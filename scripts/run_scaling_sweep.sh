@@ -59,23 +59,25 @@ echo ""
 # Command-line --nodes overrides #SBATCH --nodes=1 in run_training.sh
 # --export=ALL,CUDA_VISIBLE_DEVICES=... overrides the default in the script
 
+# submitting all at once can overload the scheduler; run a smaller set for testing
 # declare -a CONFIGS=(
 #     "1 1"    # 1 device
-#     "2 1"    # 2 devices
-#     "3 1"    # 3 devices
-#     "4 1"    # 4 devices
-#     "3 2"    # 6 devices
-#     "4 2"    # 8 devices
+#     "1 2"    # 2 devices
+#     "1 3"    # 3 devices
+#     "1 4"    # 4 devices
+#     "2 3"    # 6 devices
+#     "2 4"    # 8 devices
 #     "5 2"    # 10 devices
-#     "6 2"    # 12 devices
+#     "3 4"    # 12 devices
 #     "4 4"    # 16 devices
 #     "6 3"    # 18 devices
 #     "5 4"    # 20 devices
 #     "6 4"    # 24 devices
 # )
 
+
 declare -a CONFIGS=(
-    "2 2"    # 6 devices
+   "5 4"
 )
 
 declare -a JOB_IDS
