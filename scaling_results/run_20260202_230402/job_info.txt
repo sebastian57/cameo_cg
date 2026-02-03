@@ -1,0 +1,12 @@
+Scaling Test Run: 20260202_230402
+Config: /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/config_scaling_test.yaml
+
+Device counts tested: 1, 2, 3, 4, 8, 12, 16, 20, 24
+
+Job IDs:
+  Single node (1-4 devices): 13193693
+  2 nodes (8 devices): 13193694
+  3 nodes (12 devices): 13193695
+  4 nodes (16 devices): 13193696
+  5 nodes (20 devices): 13193697
+  6 nodes (24 devices): 13193698

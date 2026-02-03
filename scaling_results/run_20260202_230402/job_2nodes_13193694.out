@@ -1,0 +1,28 @@
+============================================================
+Scaling Test Worker (Fixed)
+============================================================
+Job ID:         13193694
+Nodes:          2
+Mode:           multi
+Config:         /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/config_scaling_test.yaml
+Output dir:     /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scaling_results/run_20260202_230402
+============================================================
+SCRIPT_DIR: /var/spool/parastation/jobs
+CLEAN_CODE_BASE_DIR: /var/spool/parastation
+TRAIN_SCRIPT: /var/spool/parastation/jobs/train_scaling_fixed.py
+
+============================================================
+Multi-node scaling test: 2 nodes, 8 devices
+============================================================
+  Running training on 2 nodes...
+/p/project1/cameo/schmidt36/clean_booster_env/bin/python3: can't open file '/var/spool/parastation/jobs/train_scaling_fixed.py': [Errno 2] No such file or directory
+srun: error: jwb1082: task 1: Terminated
+srun: error: jwb0857: task 0: Exited with exit code 2
+srun: Force Terminated StepId=13193694.0
+  Total time: 1.145180918s
+  Throughput: 23577.06 samples/s
+
+============================================================
+Scaling test complete
+Results saved to: /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scaling_results/run_20260202_230402/timing_job_13193694.csv
+============================================================

@@ -1,0 +1,6 @@
+/p/project1/cameo/schmidt36/clean_booster_env/bin/python3: can't open file '/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/scripts/train_scaling_fixed.py': [Errno 2] No such file or directory
+/p/project1/cameo/schmidt36/clean_booster_env/bin/python3: can't open file '/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/scripts/train_scaling_fixed.py': [Errno 2] No such file or directory
+srun: error: jwb0570: task 2: Exited with exit code 2
+/p/project1/cameo/schmidt36/clean_booster_env/bin/python3: can't open file '/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/scripts/train_scaling_fixed.py': [Errno 2] No such file or directory
+srun: error: jwb0380: task 1: Exited with exit code 2
+srun: error: jwb0357: task 0: Exited with exit code 2

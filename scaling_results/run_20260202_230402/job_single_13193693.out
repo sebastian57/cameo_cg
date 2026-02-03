@@ -1,0 +1,57 @@
+============================================================
+Scaling Test Worker (Fixed)
+============================================================
+Job ID:         13193693
+Nodes:          1
+Mode:           single
+Config:         /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/config_scaling_test.yaml
+Output dir:     /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scaling_results/run_20260202_230402
+============================================================
+SCRIPT_DIR: /var/spool/parastation/jobs
+CLEAN_CODE_BASE_DIR: /var/spool/parastation
+TRAIN_SCRIPT: /var/spool/parastation/jobs/train_scaling_fixed.py
+
+============================================================
+Single-node scaling tests (1-4 devices)
+============================================================
+
+------------------------------------------------------------
+Testing with 1 device(s)...
+------------------------------------------------------------
+  CUDA_VISIBLE_DEVICES=0
+  Running training...
+python3: can't open file '/var/spool/parastation/jobs/train_scaling_fixed.py': [Errno 2] No such file or directory
+  Total time: .063602158s
+  Throughput: 424513.89 samples/s
+
+------------------------------------------------------------
+Testing with 2 device(s)...
+------------------------------------------------------------
+  CUDA_VISIBLE_DEVICES=0,1
+  Running training...
+python3: can't open file '/var/spool/parastation/jobs/train_scaling_fixed.py': [Errno 2] No such file or directory
+  Total time: .063673629s
+  Throughput: 424037.39 samples/s
+
+------------------------------------------------------------
+Testing with 3 device(s)...
+------------------------------------------------------------
+  CUDA_VISIBLE_DEVICES=0,1,2
+  Running training...
+python3: can't open file '/var/spool/parastation/jobs/train_scaling_fixed.py': [Errno 2] No such file or directory
+  Total time: .062589991s
+  Throughput: 431378.87 samples/s
+
+------------------------------------------------------------
+Testing with 4 device(s)...
+------------------------------------------------------------
+  CUDA_VISIBLE_DEVICES=0,1,2,3
+  Running training...
+python3: can't open file '/var/spool/parastation/jobs/train_scaling_fixed.py': [Errno 2] No such file or directory
+  Total time: .064257243s
+  Throughput: 420186.09 samples/s
+
+============================================================
+Scaling test complete
+Results saved to: /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scaling_results/run_20260202_230402/timing_job_13193693.csv
+============================================================

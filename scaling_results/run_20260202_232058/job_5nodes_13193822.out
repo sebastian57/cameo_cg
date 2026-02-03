@@ -1,0 +1,160 @@
+============================================================
+Scaling Test Worker (Fixed)
+============================================================
+Job ID:         13193822
+Nodes:          5
+Mode:           multi
+Config:         /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/config_scaling_test.yaml
+Output dir:     /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scaling_results/run_20260202_232058
+Script dir:     /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts
+============================================================
+SCRIPT_DIR: /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts
+CLEAN_CODE_BASE_DIR: /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base
+TRAIN_SCRIPT: /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/train_scaling_fixed.py
+
+============================================================
+Multi-node scaling test: 5 nodes, 20 devices
+============================================================
+  Running training on 5 nodes...
+2026-02-02 23:31:42.697793: E external/xla/xla/pjrt/distributed/client.cc:137] Failed to connect to distributed JAX controller: waited too long for some tasks to show up. This may be due to 1) some tasks crashed earlier before connecting, 2) some tasks were never scheduled, or 3) scheduling delays. Consider setting a longer initialization timeout if such delays are expected, the timeout is currently set to: 5m.
+
+Original runtime error: DEADLINE_EXCEEDED: Barrier timed out. Id: PjRT_Client_Connect. This usually happens because a task triggered the barrier too early or too slowly. Please look at the task logs (both timed out and first task) to debug further.
+# of tasks that reached the barrier: 4/5.
+The first task at the barrier: /job:jax_worker/replica:0/task:0. Some timed out task names:
+/job:jax_worker/replica:0/task:4
+
+
+RPC: /tensorflow.CoordinationService/Barrier [type.googleapis.com/tensorflow.CoordinationServiceError='']
+[Scaling] Multi-node mode: process 0/5
+[Scaling] CUDA_VISIBLE_DEVICES = 0,1,2,3
+[Scaling] Coordinator: jwb0073.juwels:30222
+[Scaling] Using init_timeout=300s, heartbeat will use env var
+Traceback (most recent call last):
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/train_scaling_fixed.py", line 132, in <module>
+    _IS_DISTRIBUTED, _RANK, _WORLD_SIZE = _initialize_jax_distributed()
+                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/train_scaling_fixed.py", line 95, in _initialize_jax_distributed
+    jax.distributed.initialize(
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/distributed.py", line 231, in initialize
+    global_state.initialize(coordinator_address, num_processes, process_id,
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/distributed.py", line 120, in initialize
+    self.client.connect()
+jaxlib.xla_extension.XlaRuntimeError: DEADLINE_EXCEEDED: Barrier timed out. Id: PjRT_Client_Connect. This usually happens because a task triggered the barrier too early or too slowly. Please look at the task logs (both timed out and first task) to debug further.
+# of tasks that reached the barrier: 4/5.
+The first task at the barrier: /job:jax_worker/replica:0/task:0. Some timed out task names:
+/job:jax_worker/replica:0/task:4
+
+
+RPC: /tensorflow.CoordinationService/Barrier
+2026-02-02 23:31:42.699153: E external/xla/xla/pjrt/distributed/client.cc:137] Failed to connect to distributed JAX controller: waited too long for some tasks to show up. This may be due to 1) some tasks crashed earlier before connecting, 2) some tasks were never scheduled, or 3) scheduling delays. Consider setting a longer initialization timeout if such delays are expected, the timeout is currently set to: 5m.
+
+Original runtime error: DEADLINE_EXCEEDED: Barrier timed out. Id: PjRT_Client_Connect. This usually happens because a task triggered the barrier too early or too slowly. Please look at the task logs (both timed out and first task) to debug further.
+# of tasks that reached the barrier: 4/5.
+The first task at the barrier: /job:jax_worker/replica:0/task:0. Some timed out task names:
+/job:jax_worker/replica:0/task:4
+
+
+RPC: /tensorflow.CoordinationService/Barrier [type.googleapis.com/tensorflow.CoordinationServiceError='']
+2026-02-02 23:31:42.700335: E external/xla/xla/pjrt/distributed/client.cc:137] Failed to connect to distributed JAX controller: waited too long for some tasks to show up. This may be due to 1) some tasks crashed earlier before connecting, 2) some tasks were never scheduled, or 3) scheduling delays. Consider setting a longer initialization timeout if such delays are expected, the timeout is currently set to: 5m.
+
+Original runtime error: DEADLINE_EXCEEDED: Barrier timed out. Id: PjRT_Client_Connect. This usually happens because a task triggered the barrier too early or too slowly. Please look at the task logs (both timed out and first task) to debug further.
+# of tasks that reached the barrier: 4/5.
+The first task at the barrier: /job:jax_worker/replica:0/task:0. Some timed out task names:
+/job:jax_worker/replica:0/task:4
+
+
+RPC: /tensorflow.CoordinationService/Barrier [type.googleapis.com/tensorflow.CoordinationServiceError='']
+2026-02-02 23:31:42.701001: E external/xla/xla/pjrt/distributed/client.cc:137] Failed to connect to distributed JAX controller: waited too long for some tasks to show up. This may be due to 1) some tasks crashed earlier before connecting, 2) some tasks were never scheduled, or 3) scheduling delays. Consider setting a longer initialization timeout if such delays are expected, the timeout is currently set to: 5m.
+
+Original runtime error: DEADLINE_EXCEEDED: Barrier timed out. Id: PjRT_Client_Connect. This usually happens because a task triggered the barrier too early or too slowly. Please look at the task logs (both timed out and first task) to debug further.
+# of tasks that reached the barrier: 4/5.
+The first task at the barrier: /job:jax_worker/replica:0/task:0. Some timed out task names:
+/job:jax_worker/replica:0/task:4
+
+
+RPC: /tensorflow.CoordinationService/Barrier [type.googleapis.com/tensorflow.CoordinationServiceError='']
+[Scaling] Multi-node mode: process 3/5
+[Scaling] CUDA_VISIBLE_DEVICES = 0,1,2,3
+[Scaling] Coordinator: jwb0073.juwels:30222
+[Scaling] Using init_timeout=300s, heartbeat will use env var
+Traceback (most recent call last):
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/train_scaling_fixed.py", line 132, in <module>
+    _IS_DISTRIBUTED, _RANK, _WORLD_SIZE = _initialize_jax_distributed()
+                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/train_scaling_fixed.py", line 95, in _initialize_jax_distributed
+    jax.distributed.initialize(
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/distributed.py", line 231, in initialize
+    global_state.initialize(coordinator_address, num_processes, process_id,
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/distributed.py", line 120, in initialize
+    self.client.connect()
+jaxlib.xla_extension.XlaRuntimeError: DEADLINE_EXCEEDED: Barrier timed out. Id: PjRT_Client_Connect. This usually happens because a task triggered the barrier too early or too slowly. Please look at the task logs (both timed out and first task) to debug further.
+# of tasks that reached the barrier: 4/5.
+The first task at the barrier: /job:jax_worker/replica:0/task:0. Some timed out task names:
+/job:jax_worker/replica:0/task:4
+
+
+RPC: /tensorflow.CoordinationService/Barrier
+[Scaling] Multi-node mode: process 2/5
+[Scaling] CUDA_VISIBLE_DEVICES = 0,1,2,3
+[Scaling] Coordinator: jwb0073.juwels:30222
+[Scaling] Using init_timeout=300s, heartbeat will use env var
+Traceback (most recent call last):
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/train_scaling_fixed.py", line 132, in <module>
+    _IS_DISTRIBUTED, _RANK, _WORLD_SIZE = _initialize_jax_distributed()
+                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/train_scaling_fixed.py", line 95, in _initialize_jax_distributed
+    jax.distributed.initialize(
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/distributed.py", line 231, in initialize
+    global_state.initialize(coordinator_address, num_processes, process_id,
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/distributed.py", line 120, in initialize
+    self.client.connect()
+jaxlib.xla_extension.XlaRuntimeError: DEADLINE_EXCEEDED: Barrier timed out. Id: PjRT_Client_Connect. This usually happens because a task triggered the barrier too early or too slowly. Please look at the task logs (both timed out and first task) to debug further.
+# of tasks that reached the barrier: 4/5.
+The first task at the barrier: /job:jax_worker/replica:0/task:0. Some timed out task names:
+/job:jax_worker/replica:0/task:4
+
+
+RPC: /tensorflow.CoordinationService/Barrier
+[Scaling] Multi-node mode: process 1/5
+[Scaling] CUDA_VISIBLE_DEVICES = 0,1,2,3
+[Scaling] Coordinator: jwb0073.juwels:30222
+[Scaling] Using init_timeout=300s, heartbeat will use env var
+Traceback (most recent call last):
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/train_scaling_fixed.py", line 132, in <module>
+    _IS_DISTRIBUTED, _RANK, _WORLD_SIZE = _initialize_jax_distributed()
+                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/train_scaling_fixed.py", line 95, in _initialize_jax_distributed
+    jax.distributed.initialize(
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/distributed.py", line 231, in initialize
+    global_state.initialize(coordinator_address, num_processes, process_id,
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/distributed.py", line 120, in initialize
+    self.client.connect()
+jaxlib.xla_extension.XlaRuntimeError: DEADLINE_EXCEEDED: Barrier timed out. Id: PjRT_Client_Connect. This usually happens because a task triggered the barrier too early or too slowly. Please look at the task logs (both timed out and first task) to debug further.
+# of tasks that reached the barrier: 4/5.
+The first task at the barrier: /job:jax_worker/replica:0/task:0. Some timed out task names:
+/job:jax_worker/replica:0/task:4
+
+
+RPC: /tensorflow.CoordinationService/Barrier
+E0202 23:31:43.652820  477174 coordination_service_agent.cc:892] Coordination agent is set to ERROR: DEADLINE_EXCEEDED: Deadline Exceeded
+
+RPC: /tensorflow.CoordinationService/RegisterTask
+2026-02-02 23:31:43.652937: E external/xla/xla/pjrt/distributed/client.cc:99] Coordination service agent in error status: DEADLINE_EXCEEDED: Deadline Exceeded
+
+RPC: /tensorflow.CoordinationService/RegisterTask
+2026-02-02 23:31:43.653313: F external/xla/xla/pjrt/distributed/client.h:82] Terminating process because the coordinator detected missing heartbeats. This most likely indicates that another task died; see the other task logs for more details. Disable Python buffering, i.e. `python -u`, to be sure to see all the previous output. absl::Status: DEADLINE_EXCEEDED: Deadline Exceeded
+
+RPC: /tensorflow.CoordinationService/RegisterTask
+srun: error: jwb0544: task 4: Aborted (core dumped)
+srun: error: jwb0159: task 2: Terminated
+srun: error: jwb0087: task 1: Terminated
+srun: error: jwb0160: task 3: Terminated
+srun: error: jwb0073: task 0: Terminated
+srun: Force Terminated StepId=13193822.0
+  Total time: 303.270838039s
+  Throughput: 89.02 samples/s
+
+============================================================
+Scaling test complete
+Results saved to: /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scaling_results/run_20260202_232058/timing_job_13193822.csv
+============================================================

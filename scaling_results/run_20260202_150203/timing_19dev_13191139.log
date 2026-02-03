@@ -1,0 +1,855 @@
+2026-02-02 16:31:59.217027: E external/xla/xla/status_macros.cc:56] INTERNAL: RET_CHECK failure (external/xla/xla/pjrt/pjrt_stream_executor_client.cc:3497) device_count() % addressable_device_count() == 0 Each process is expected to have the same number of devices
+*** Begin stack trace ***
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	PyObject_Vectorcall
+	
+	PyObject_Vectorcall
+	
+	
+	
+	
+	
+	_PyObject_FastCallDictTstate
+	_PyObject_Call_Prepend
+	
+	_PyObject_MakeTpCall
+	
+	PyObject_Vectorcall
+	
+	
+	
+	
+	
+	
+	PyObject_Vectorcall
+	
+	
+	
+	
+	
+	
+	
+	_PyObject_FastCallDictTstate
+	_PyObject_Call_Prepend
+	
+	_PyObject_MakeTpCall
+	
+	PyEval_EvalCode
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	PyEval_EvalCode
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	PyEval_EvalCode
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	PyEval_EvalCode
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	PyEval_EvalCode
+	
+	
+	
+	_PyRun_SimpleFileObject
+	_PyRun_AnyFileObject
+	Py_RunMain
+	Py_BytesMain
+	
+	__libc_start_main
+	_start
+*** End stack trace ***
+
+[Scaling] Node 3/5: local_device_ids = [0, 1, 2, 3]
+[Scaling] Node 3: CUDA_VISIBLE_DEVICES = 0,1,2,3
+[Scaling] Coordinator: jwb0611.juwels:29539
+[Scaling] Actual processes: 5
+[Rank 3/5] JAX distributed initialized
+[Rank 3] Local GPUs: 4, Total GPUs: 19
+[Rank 3] Local devices: [CudaDevice(id=12), CudaDevice(id=13), CudaDevice(id=14), CudaDevice(id=15)]
+[Rank 3] All devices: [CudaDevice(id=0), CudaDevice(id=1), CudaDevice(id=2), CudaDevice(id=3), CudaDevice(id=4), CudaDevice(id=5), CudaDevice(id=6), CudaDevice(id=7), CudaDevice(id=8), CudaDevice(id=9), CudaDevice(id=10), CudaDevice(id=11), CudaDevice(id=12), CudaDevice(id=13), CudaDevice(id=14), CudaDevice(id=15), CudaDevice(id=16), CudaDevice(id=17), CudaDevice(id=18)]
+Traceback (most recent call last):
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/train_scaling.py", line 193, in <module>
+    from chemtrain.data.data_loaders import DataLoaders
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain/__init__.py", line 16, in <module>
+    import jax_md_mod
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/jax_md_mod/__init__.py", line 55, in <module>
+    import jax_md.partition
+  File "/p/project1/cameo/schmidt36/clean_booster_env/lib/python3.12/site-packages/jax_md/__init__.py", line 27, in <module>
+    from jax_md import rigid_body
+  File "/p/project1/cameo/schmidt36/clean_booster_env/lib/python3.12/site-packages/jax_md/rigid_body.py", line 1009, in <module>
+    monomer = point_union_shape(onp.array([[0.0, 0.0]], f32), f32(1.0))
+                                                              ^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py", line 183, in __call__
+    return asarray(x, dtype=self.dtype)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py", line 5191, in asarray
+    return array(a, dtype=dtype, copy=bool(copy), order=order, device=device)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py", line 5025, in array
+    out_array: Array = lax_internal._convert_element_type(
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/lax/lax.py", line 585, in _convert_element_type
+    return convert_element_type_p.bind(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/lax/lax.py", line 2865, in _convert_element_type_bind
+    operand = core.Primitive.bind(convert_element_type_p, operand,
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/core.py", line 438, in bind
+    return self.bind_with_trace(find_top_trace(args), args, params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/core.py", line 442, in bind_with_trace
+    out = trace.process_primitive(self, map(trace.full_raise, args), params)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/core.py", line 948, in process_primitive
+    return primitive.impl(*tracers, **params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/dispatch.py", line 90, in apply_primitive
+    outs = fun(*args)
+           ^^^^^^^^^^
+jaxlib.xla_extension.XlaRuntimeError: INTERNAL: RET_CHECK failure (external/xla/xla/pjrt/pjrt_stream_executor_client.cc:3497) device_count() % addressable_device_count() == 0 Each process is expected to have the same number of devices
+--------------------
+For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
+2026-02-02 16:32:00.094382: E external/xla/xla/status_macros.cc:56] INTERNAL: RET_CHECK failure (external/xla/xla/pjrt/pjrt_stream_executor_client.cc:3497) device_count() % addressable_device_count() == 0 Each process is expected to have the same number of devices
+*** Begin stack trace ***
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	PyObject_Vectorcall
+	
+	PyObject_Vectorcall
+	
+	
+	
+	
+	
+	_PyObject_FastCallDictTstate
+	_PyObject_Call_Prepend
+	
+	_PyObject_MakeTpCall
+	
+	PyObject_Vectorcall
+	
+	
+	
+	
+	
+	
+	PyObject_Vectorcall
+	
+	
+	
+	
+	
+	
+	
+	_PyObject_FastCallDictTstate
+	_PyObject_Call_Prepend
+	
+	_PyObject_MakeTpCall
+	
+	PyEval_EvalCode
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	PyEval_EvalCode
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	PyEval_EvalCode
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	PyEval_EvalCode
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	PyEval_EvalCode
+	
+	
+	
+	_PyRun_SimpleFileObject
+	_PyRun_AnyFileObject
+	Py_RunMain
+	Py_BytesMain
+	
+	__libc_start_main
+	_start
+*** End stack trace ***
+
+[Scaling] Node 2/5: local_device_ids = [0, 1, 2, 3]
+[Scaling] Node 2: CUDA_VISIBLE_DEVICES = 0,1,2,3
+[Scaling] Coordinator: jwb0611.juwels:29539
+[Scaling] Actual processes: 5
+[Rank 2/5] JAX distributed initialized
+[Rank 2] Local GPUs: 4, Total GPUs: 19
+[Rank 2] Local devices: [CudaDevice(id=8), CudaDevice(id=9), CudaDevice(id=10), CudaDevice(id=11)]
+[Rank 2] All devices: [CudaDevice(id=0), CudaDevice(id=1), CudaDevice(id=2), CudaDevice(id=3), CudaDevice(id=4), CudaDevice(id=5), CudaDevice(id=6), CudaDevice(id=7), CudaDevice(id=8), CudaDevice(id=9), CudaDevice(id=10), CudaDevice(id=11), CudaDevice(id=12), CudaDevice(id=13), CudaDevice(id=14), CudaDevice(id=15), CudaDevice(id=16), CudaDevice(id=17), CudaDevice(id=18)]
+Traceback (most recent call last):
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/train_scaling.py", line 193, in <module>
+    from chemtrain.data.data_loaders import DataLoaders
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain/__init__.py", line 16, in <module>
+    import jax_md_mod
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/jax_md_mod/__init__.py", line 55, in <module>
+    import jax_md.partition
+  File "/p/project1/cameo/schmidt36/clean_booster_env/lib/python3.12/site-packages/jax_md/__init__.py", line 27, in <module>
+    from jax_md import rigid_body
+  File "/p/project1/cameo/schmidt36/clean_booster_env/lib/python3.12/site-packages/jax_md/rigid_body.py", line 1009, in <module>
+    monomer = point_union_shape(onp.array([[0.0, 0.0]], f32), f32(1.0))
+                                                              ^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py", line 183, in __call__
+    return asarray(x, dtype=self.dtype)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py", line 5191, in asarray
+    return array(a, dtype=dtype, copy=bool(copy), order=order, device=device)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py", line 5025, in array
+    out_array: Array = lax_internal._convert_element_type(
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/lax/lax.py", line 585, in _convert_element_type
+    return convert_element_type_p.bind(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/lax/lax.py", line 2865, in _convert_element_type_bind
+    operand = core.Primitive.bind(convert_element_type_p, operand,
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/core.py", line 438, in bind
+    return self.bind_with_trace(find_top_trace(args), args, params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/core.py", line 442, in bind_with_trace
+2026-02-02 16:32:00.147953: E external/xla/xla/status_macros.cc:56] INTERNAL: RET_CHECK failure (external/xla/xla/pjrt/pjrt_stream_executor_client.cc:3497) device_count() % addressable_device_count() == 0 Each process is expected to have the same number of devices
+*** Begin stack trace ***
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	PyObject_Vectorcall
+	
+	PyObject_Vectorcall
+	
+	
+	
+	
+	
+	_PyObject_FastCallDictTstate
+	_PyObject_Call_Prepend
+	
+	_PyObject_MakeTpCall
+	
+	PyObject_Vectorcall
+	
+	
+	
+	
+	
+	
+	PyObject_Vectorcall
+	
+	
+	
+	
+	
+	
+	
+	_PyObject_FastCallDictTstate
+	_PyObject_Call_Prepend
+	
+	_PyObject_MakeTpCall
+	
+	PyEval_EvalCode
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	PyEval_EvalCode
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	PyEval_EvalCode
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+    out = trace.process_primitive(self, map(trace.full_raise, args), params)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/core.py", line 948, in process_primitive
+    return primitive.impl(*tracers, **params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/dispatch.py", line 90, in apply_primitive
+    outs = fun(*args)
+           ^^^^^^^^^^
+jaxlib.xla_extension.XlaRuntimeError: INTERNAL: RET_CHECK failure (external/xla/xla/pjrt/pjrt_stream_executor_client.cc:3497) device_count() % addressable_device_count() == 0 Each process is expected to have the same number of devices
+--------------------
+For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
+	PyEval_EvalCode
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	PyEval_EvalCode
+	
+	
+	
+	_PyRun_SimpleFileObject
+	_PyRun_AnyFileObject
+	Py_RunMain
+	Py_BytesMain
+	
+	__libc_start_main
+	_start
+*** End stack trace ***
+
+[Scaling] Node 1/5: local_device_ids = [0, 1, 2, 3]
+[Scaling] Node 1: CUDA_VISIBLE_DEVICES = 0,1,2,3
+[Scaling] Coordinator: jwb0611.juwels:29539
+[Scaling] Actual processes: 5
+[Rank 1/5] JAX distributed initialized
+[Rank 1] Local GPUs: 4, Total GPUs: 19
+[Rank 1] Local devices: [CudaDevice(id=4), CudaDevice(id=5), CudaDevice(id=6), CudaDevice(id=7)]
+[Rank 1] All devices: [CudaDevice(id=0), CudaDevice(id=1), CudaDevice(id=2), CudaDevice(id=3), CudaDevice(id=4), CudaDevice(id=5), CudaDevice(id=6), CudaDevice(id=7), CudaDevice(id=8), CudaDevice(id=9), CudaDevice(id=10), CudaDevice(id=11), CudaDevice(id=12), CudaDevice(id=13), CudaDevice(id=14), CudaDevice(id=15), CudaDevice(id=16), CudaDevice(id=17), CudaDevice(id=18)]
+Traceback (most recent call last):
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/train_scaling.py", line 193, in <module>
+    from chemtrain.data.data_loaders import DataLoaders
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain/__init__.py", line 16, in <module>
+    import jax_md_mod
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/jax_md_mod/__init__.py", line 55, in <module>
+    import jax_md.partition
+  File "/p/project1/cameo/schmidt36/clean_booster_env/lib/python3.12/site-packages/jax_md/__init__.py", line 27, in <module>
+    from jax_md import rigid_body
+  File "/p/project1/cameo/schmidt36/clean_booster_env/lib/python3.12/site-packages/jax_md/rigid_body.py", line 1009, in <module>
+    monomer = point_union_shape(onp.array([[0.0, 0.0]], f32), f32(1.0))
+                                                              ^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py", line 183, in __call__
+    return asarray(x, dtype=self.dtype)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py", line 5191, in asarray
+    return array(a, dtype=dtype, copy=bool(copy), order=order, device=device)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py", line 5025, in array
+    out_array: Array = lax_internal._convert_element_type(
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/lax/lax.py", line 585, in _convert_element_type
+    return convert_element_type_p.bind(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/lax/lax.py", line 2865, in _convert_element_type_bind
+    operand = core.Primitive.bind(convert_element_type_p, operand,
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/core.py", line 438, in bind
+    return self.bind_with_trace(find_top_trace(args), args, params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/core.py", line 442, in bind_with_trace
+    out = trace.process_primitive(self, map(trace.full_raise, args), params)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/core.py", line 948, in process_primitive
+    return primitive.impl(*tracers, **params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/dispatch.py", line 90, in apply_primitive
+    outs = fun(*args)
+           ^^^^^^^^^^
+jaxlib.xla_extension.XlaRuntimeError: INTERNAL: RET_CHECK failure (external/xla/xla/pjrt/pjrt_stream_executor_client.cc:3497) device_count() % addressable_device_count() == 0 Each process is expected to have the same number of devices
+--------------------
+For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
+2026-02-02 16:32:00.665855: E external/xla/xla/status_macros.cc:56] INTERNAL: RET_CHECK failure (external/xla/xla/pjrt/pjrt_stream_executor_client.cc:3497) device_count() % addressable_device_count() == 0 Each process is expected to have the same number of devices
+*** Begin stack trace ***
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	PyObject_Vectorcall
+	
+	PyObject_Vectorcall
+	
+	
+	
+	
+	
+	_PyObject_FastCallDictTstate
+	_PyObject_Call_Prepend
+	
+	_PyObject_MakeTpCall
+	
+	PyObject_Vectorcall
+	
+	
+	
+	
+	
+	
+	PyObject_Vectorcall
+	
+	
+	
+	
+	
+	
+	
+	_PyObject_FastCallDictTstate
+	_PyObject_Call_Prepend
+	
+	_PyObject_MakeTpCall
+	
+	PyEval_EvalCode
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	PyEval_EvalCode
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	PyEval_EvalCode
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	PyEval_EvalCode
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	PyEval_EvalCode
+	
+	
+	
+	_PyRun_SimpleFileObject
+	_PyRun_AnyFileObject
+	Py_RunMain
+	Py_BytesMain
+	
+	__libc_start_main
+	_start
+*** End stack trace ***
+
+[Scaling] Node 4/5: local_device_ids = [0, 1, 2]
+[Scaling] Node 4: CUDA_VISIBLE_DEVICES = 0,1,2
+[Scaling] Coordinator: jwb0611.juwels:29539
+[Scaling] Actual processes: 5
+[Rank 4/5] JAX distributed initialized
+[Rank 4] Local GPUs: 3, Total GPUs: 19
+[Rank 4] Local devices: [CudaDevice(id=16), CudaDevice(id=17), CudaDevice(id=18)]
+[Rank 4] All devices: [CudaDevice(id=0), CudaDevice(id=1), CudaDevice(id=2), CudaDevice(id=3), CudaDevice(id=4), CudaDevice(id=5), CudaDevice(id=6), CudaDevice(id=7), CudaDevice(id=8), CudaDevice(id=9), CudaDevice(id=10), CudaDevice(id=11), CudaDevice(id=12), CudaDevice(id=13), CudaDevice(id=14), CudaDevice(id=15), CudaDevice(id=16), CudaDevice(id=17), CudaDevice(id=18)]
+Traceback (most recent call last):
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/train_scaling.py", line 193, in <module>
+    from chemtrain.data.data_loaders import DataLoaders
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain/__init__.py", line 16, in <module>
+    import jax_md_mod
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/jax_md_mod/__init__.py", line 55, in <module>
+    import jax_md.partition
+  File "/p/project1/cameo/schmidt36/clean_booster_env/lib/python3.12/site-packages/jax_md/__init__.py", line 27, in <module>
+    from jax_md import rigid_body
+  File "/p/project1/cameo/schmidt36/clean_booster_env/lib/python3.12/site-packages/jax_md/rigid_body.py", line 1009, in <module>
+    monomer = point_union_shape(onp.array([[0.0, 0.0]], f32), f32(1.0))
+                                                              ^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py", line 183, in __call__
+    return asarray(x, dtype=self.dtype)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py", line 5191, in asarray
+    return array(a, dtype=dtype, copy=bool(copy), order=order, device=device)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py", line 5025, in array
+    out_array: Array = lax_internal._convert_element_type(
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/lax/lax.py", line 585, in _convert_element_type
+    return convert_element_type_p.bind(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/lax/lax.py", line 2865, in _convert_element_type_bind
+    operand = core.Primitive.bind(convert_element_type_p, operand,
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/core.py", line 438, in bind
+    return self.bind_with_trace(find_top_trace(args), args, params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/core.py", line 442, in bind_with_trace
+    out = trace.process_primitive(self, map(trace.full_raise, args), params)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/core.py", line 948, in process_primitive
+    return primitive.impl(*tracers, **params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/dispatch.py", line 90, in apply_primitive
+    outs = fun(*args)
+           ^^^^^^^^^^
+jaxlib.xla_extension.XlaRuntimeError: INTERNAL: RET_CHECK failure (external/xla/xla/pjrt/pjrt_stream_executor_client.cc:3497) device_count() % addressable_device_count() == 0 Each process is expected to have the same number of devices
+--------------------
+For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
+2026-02-02 16:32:03.841734: E external/xla/xla/status_macros.cc:56] INTERNAL: RET_CHECK failure (external/xla/xla/pjrt/pjrt_stream_executor_client.cc:3497) device_count() % addressable_device_count() == 0 Each process is expected to have the same number of devices
+*** Begin stack trace ***
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	PyObject_Vectorcall
+	
+	PyObject_Vectorcall
+	
+	
+	
+	
+	
+	_PyObject_FastCallDictTstate
+	_PyObject_Call_Prepend
+	
+	_PyObject_MakeTpCall
+	
+	PyObject_Vectorcall
+	
+	
+	
+	
+	
+	
+	PyObject_Vectorcall
+	
+	
+	
+	
+	
+	
+	
+	_PyObject_FastCallDictTstate
+	_PyObject_Call_Prepend
+	
+	_PyObject_MakeTpCall
+	
+	PyEval_EvalCode
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	PyEval_EvalCode
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	PyEval_EvalCode
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	PyEval_EvalCode
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	
+	
+	
+	PyObject_CallMethodObjArgs
+	PyImport_ImportModuleLevelObject
+	
+	PyEval_EvalCode
+	
+	
+	
+	_PyRun_SimpleFileObject
+	_PyRun_AnyFileObject
+	Py_RunMain
+	Py_BytesMain
+	
+	__libc_start_main
+	_start
+*** End stack trace ***
+
+[Scaling] Node 0/5: local_device_ids = [0, 1, 2, 3]
+[Scaling] Node 0: CUDA_VISIBLE_DEVICES = 0,1,2,3
+[Scaling] Coordinator: jwb0611.juwels:29539
+[Scaling] Actual processes: 5
+[Rank 0/5] JAX distributed initialized
+[Rank 0] Local GPUs: 4, Total GPUs: 19
+[Rank 0] Local devices: [CudaDevice(id=0), CudaDevice(id=1), CudaDevice(id=2), CudaDevice(id=3)]
+[Rank 0] All devices: [CudaDevice(id=0), CudaDevice(id=1), CudaDevice(id=2), CudaDevice(id=3), CudaDevice(id=4), CudaDevice(id=5), CudaDevice(id=6), CudaDevice(id=7), CudaDevice(id=8), CudaDevice(id=9), CudaDevice(id=10), CudaDevice(id=11), CudaDevice(id=12), CudaDevice(id=13), CudaDevice(id=14), CudaDevice(id=15), CudaDevice(id=16), CudaDevice(id=17), CudaDevice(id=18)]
+Traceback (most recent call last):
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/train_scaling.py", line 193, in <module>
+    from chemtrain.data.data_loaders import DataLoaders
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain/__init__.py", line 16, in <module>
+    import jax_md_mod
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/jax_md_mod/__init__.py", line 55, in <module>
+    import jax_md.partition
+  File "/p/project1/cameo/schmidt36/clean_booster_env/lib/python3.12/site-packages/jax_md/__init__.py", line 27, in <module>
+    from jax_md import rigid_body
+  File "/p/project1/cameo/schmidt36/clean_booster_env/lib/python3.12/site-packages/jax_md/rigid_body.py", line 1009, in <module>
+    monomer = point_union_shape(onp.array([[0.0, 0.0]], f32), f32(1.0))
+                                                              ^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py", line 183, in __call__
+    return asarray(x, dtype=self.dtype)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py", line 5191, in asarray
+    return array(a, dtype=dtype, copy=bool(copy), order=order, device=device)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py", line 5025, in array
+    out_array: Array = lax_internal._convert_element_type(
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/lax/lax.py", line 585, in _convert_element_type
+    return convert_element_type_p.bind(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/lax/lax.py", line 2865, in _convert_element_type_bind
+    operand = core.Primitive.bind(convert_element_type_p, operand,
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/core.py", line 438, in bind
+    return self.bind_with_trace(find_top_trace(args), args, params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/core.py", line 442, in bind_with_trace
+    out = trace.process_primitive(self, map(trace.full_raise, args), params)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/core.py", line 948, in process_primitive
+    return primitive.impl(*tracers, **params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/dispatch.py", line 90, in apply_primitive
+    outs = fun(*args)
+           ^^^^^^^^^^
+jaxlib.xla_extension.XlaRuntimeError: INTERNAL: RET_CHECK failure (external/xla/xla/pjrt/pjrt_stream_executor_client.cc:3497) device_count() % addressable_device_count() == 0 Each process is expected to have the same number of devices
+--------------------
+For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
+srun: error: jwb0629: task 4: Exited with exit code 1
+srun: error: jwb0612: task 1: Exited with exit code 1
+srun: error: jwb0615: task 2: Exited with exit code 1
+srun: error: jwb0617: task 3: Exited with exit code 1
+srun: error: jwb0611: task 0: Exited with exit code 1

@@ -1,0 +1,110 @@
+[Model] Using Allegro size: default
+[Model] Detected 18 unique species
+[Model] Using Allegro config size: default
+[Model] Mode: Prior + Allegro
+[Model] Prior weights: {'bond': 0.5, 'angle': 0.25, 'dihedral': 0.25, 'repulsive': 1.0}
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py:183: UserWarning: Explicitly requested dtype float64 requested in asarray is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return asarray(x, dtype=self.dtype)
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/reductions.py:213: UserWarning: Explicitly requested dtype <class 'jax.numpy.float64'> requested in sum is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return _reduction(a, "sum", np.sum, lax.add, 0, preproc=_cast_to_numeric,
+[Training] Initialized model with seed=193749
+[Training] Applied NumpyDataLoader patch
+[Training] 
+============================================================
+[Training] Training Stage: ADABELIEF (3 epochs, starting from 0)
+[Training] ============================================================
+/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain/trainers/base.py:957: UserWarning: Batch size 32 does not divide the number of observations 2250. Trainer will skip 10 samples for state training
+  warnings.warn(
+/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain/trainers/base.py:957: UserWarning: Batch size 32 does not divide the number of observations 250. Trainer will skip 26 samples for state validation
+  warnings.warn(
+[Scaling] Single-node mode: 2 device(s)
+[Scaling] CUDA_VISIBLE_DEVICES = 0,1
+[Rank 0] Local devices: [CudaDevice(id=0), CudaDevice(id=1)]
+============================================================
+SCALING TEST (FIXED)
+============================================================
+Expected devices: 2
+Actual devices:   2
+Distributed:      False
+Rank:             0/1
+Local devices:    2
+============================================================
+Capping edges and triplets. Beware of overflow, which is currently not being detected.
+Estimated max. 900 edges.
+[Allegro] Use two atom species for oxygen and hydroge.
+[Allegro] Use default mask
+Use a custom scatter implementation
+Out irreps 300x0e+556x1o+256x1e+556x2e+384x2o+512x3o+256x3e
+Irreps after layer are 128x1o+128x1e+128x2e+128x2o+128x3o+128x3e
+Use a custom scatter implementation
+Out irreps 256x0e+768x1o+896x2e
+Irreps after layer are 128x1o+128x2e
+Use a custom scatter implementation
+Out irreps 256x0e
+Irreps after layer are Irreps()
+
+============================================================
+TRAINING WITH TIMING
+============================================================
+[Allegro] Use two atom species for oxygen and hydroge.
+[Allegro] Use default mask
+Use a custom scatter implementation
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+Out irreps 300x0e+556x1o+256x1e+556x2e+384x2o+512x3o+256x3e
+Irreps after layer are 128x1o+128x1e+128x2e+128x2o+128x3o+128x3e
+Use a custom scatter implementation
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+Out irreps 256x0e+768x1o+896x2e
+Irreps after layer are 128x1o+128x2e
+Use a custom scatter implementation
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+Out irreps 256x0e
+Irreps after layer are Irreps()
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py:183: UserWarning: Explicitly requested dtype float64 requested in asarray is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return asarray(x, dtype=self.dtype)
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/reductions.py:213: UserWarning: Explicitly requested dtype <class 'jax.numpy.float64'> requested in sum is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return _reduction(a, "sum", np.sum, lax.add, 0, preproc=_cast_to_numeric,
+[Force] Found precomputed forces.
+[Force] Found precomputed forces.
+[Epoch 0]:
+	Average train loss: 116.22558
+	Average val loss: 86.80593872070312
+	Gradient norm: 6.714452743530273
+	Elapsed time = 3.126 min
+	Per-target losses:
+		F | train loss: 116.22558081490654 | val loss: 86.80593872070312
+
+[Epoch 1]:
+	Average train loss: 84.97892
+	Average val loss: 86.28740692138672
+	Gradient norm: 6.664463043212891
+	Elapsed time = 2.061 min
+	Per-target losses:
+		F | train loss: 84.97891595023019 | val loss: 86.28740692138672
+
+[Epoch 2]:
+	Average train loss: 84.33376
+	Average val loss: 86.15654754638672
+	Gradient norm: 7.481634616851807
+	Elapsed time = 2.061 min
+	Per-target losses:
+		F | train loss: 84.33376410348075 | val loss: 86.15654754638672
+
+[Training] 
+Stage complete: train_loss=84.333764, val_loss=86.156548
+
+Total training time: 487.26s
+Timing data saved to: /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scaling_results/run_20260202_172828/timing_2dev_13192056_2dev.json
+
+============================================================
+SCALING TEST COMPLETE
+============================================================

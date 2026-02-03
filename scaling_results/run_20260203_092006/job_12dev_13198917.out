@@ -1,0 +1,675 @@
+============================================================
+Module Environment
+============================================================
+
+============================================================
+SLURM Job Configuration
+============================================================
+Config file:    config_timing_test.yaml
+Job ID:         13198917
+Nodes:          6
+Tasks/node:     1 (1 process per node)
+GPUs per node:  4 (pmap distributes across local GPUs)
+Total GPUs:     24
+CUDA_HOME:      /p/software/juwelsbooster/stages/2025/software/CUDA/12
+CUDA_VISIBLE:   0
+============================================================
+Verifying GPU allocation per node...
+Host=jwb0003.juwels CUDA_VISIBLE_DEVICES=0
+GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-31a97a70-f92d-dac9-80e4-1d89756da935)
+GPU 1: NVIDIA A100-SXM4-40GB (UUID: GPU-c6d36a97-9716-c387-5f08-d913f6b11b62)
+GPU 2: NVIDIA A100-SXM4-40GB (UUID: GPU-fd5b5d46-03a7-1dea-f771-e7baeef3d534)
+GPU 3: NVIDIA A100-SXM4-40GB (UUID: GPU-3cee6e5d-1199-dc2d-a1ae-79f2377918de)
+Host=jwb0024.juwels CUDA_VISIBLE_DEVICES=0
+Host=jwb0006.juwels CUDA_VISIBLE_DEVICES=0
+Host=jwb0027.juwels CUDA_VISIBLE_DEVICES=0
+Host=jwb0025.juwels CUDA_VISIBLE_DEVICES=0
+Host=jwb0023.juwels CUDA_VISIBLE_DEVICES=0
+GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-de6d2d43-7459-521d-242e-40bde2103cee)
+GPU 1: NVIDIA A100-SXM4-40GB (UUID: GPU-7c6ccbb2-a440-0930-e303-4a4bc73cc15e)
+GPU 2: NVIDIA A100-SXM4-40GB (UUID: GPU-e91ab34b-1fe9-a198-4e9c-a8edfec9490f)
+GPU 3: NVIDIA A100-SXM4-40GB (UUID: GPU-549c10b7-fb2c-5c7f-547c-701833f9e417)
+GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-2e1c3135-3245-4011-19af-b069868c4cc9)
+GPU 1: NVIDIA A100-SXM4-40GB (UUID: GPU-ed899073-1c1b-da37-d39c-65e37e78ae56)
+GPU 2: NVIDIA A100-SXM4-40GB (UUID: GPU-80ddd84a-74db-7193-c053-229c6c6977fb)
+GPU 3: NVIDIA A100-SXM4-40GB (UUID: GPU-9926131c-e53c-0c91-9513-ba4cda25e560)
+GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-0e9a6fea-9482-c91a-6e2f-2fc40968ac38)
+GPU 1: NVIDIA A100-SXM4-40GB (UUID: GPU-e349d06d-a2e1-bfaa-e131-273cc2e8d1a1)
+GPU 2: NVIDIA A100-SXM4-40GB (UUID: GPU-2bc8af8a-28b2-946a-e09f-392b75f41fb1)
+GPU 3: NVIDIA A100-SXM4-40GB (UUID: GPU-ee3f4cdc-663b-238b-e0e4-64134cb6a2ed)
+GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-2e9daf88-cc61-365e-b2f5-8e7c35705df8)
+GPU 1: NVIDIA A100-SXM4-40GB (UUID: GPU-333df9ef-d536-c37f-97a7-b56fb0732149)
+GPU 2: NVIDIA A100-SXM4-40GB (UUID: GPU-95e26abb-946d-67db-6533-fb5b408d049c)
+GPU 3: NVIDIA A100-SXM4-40GB (UUID: GPU-487a711c-922a-41bf-b896-86b25215f0ae)
+GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-18864107-73b9-fecc-895a-3f799072f6eb)
+GPU 1: NVIDIA A100-SXM4-40GB (UUID: GPU-6746d36d-1ca0-e889-f882-81e0b61396b3)
+GPU 2: NVIDIA A100-SXM4-40GB (UUID: GPU-6b72df4e-7462-5c72-52e9-ae97db08a874)
+GPU 3: NVIDIA A100-SXM4-40GB (UUID: GPU-19ada2b0-5cc4-fbb7-87f2-96629ccfeb62)
+
+============================================================
+Multi-node JAX Distributed Verification
+============================================================
+Node=jwb0003.juwels SLURM_PROCID=0 SLURM_NTASKS=6
+Node=jwb0027.juwels SLURM_PROCID=5 SLURM_NTASKS=6
+Node=jwb0023.juwels SLURM_PROCID=2 SLURM_NTASKS=6
+Node=jwb0024.juwels SLURM_PROCID=3 SLURM_NTASKS=6
+Node=jwb0025.juwels SLURM_PROCID=4 SLURM_NTASKS=6
+Node=jwb0006.juwels SLURM_PROCID=1 SLURM_NTASKS=6
+JAX will auto-detect coordinator from SLURM environment
+============================================================
+Submit directory: /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base
+Training script:  /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/train.py
+============================================================
+Starting training with 6 node(s), 4 GPUs each...
+Log file: train_allegro_13198917.log
+============================================================
+[Data] Resolved relative path: data_prep/datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz -> /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/data_prep/datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz
+[Data] Resolved relative path: data_prep/datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz -> /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/data_prep/datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz
+[Data] Resolved relative path: data_prep/datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz -> /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/data_prep/datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz
+[Data] Resolved relative path: data_prep/datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz -> /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/data_prep/datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz
+[Data] Resolved relative path: data_prep/datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz -> /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/data_prep/datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz
+[Data] Resolved relative path: data_prep/datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz -> /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/data_prep/datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz
+[Data] N_max: 99
+[Data] N_max: 99
+[Data] N_max: 99
+[Data] N_max: 99
+[Data] N_max: 99
+[Data] N_max: 99
+[Data] Species: [14 20 16 16 13 15  7 20 21 11 16  3  2 12  2  6  0 12  6 15 12  6  6  8
+  5  3  0  1 16 12  0  7  7 10 17 12 11 16 14 12 13 12  1 12 11  1 16 17
+ 20 11 21  6 11 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1
+ -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1
+ -1 -1 -1]
+[Data] Total frames: 10000
+[Data] Species: [14 20 16 16 13 15  7 20 21 11 16  3  2 12  2  6  0 12  6 15 12  6  6  8
+  5  3  0  1 16 12  0  7  7 10 17 12 11 16 14 12 13 12  1 12 11  1 16 17
+ 20 11 21  6 11 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1
+ -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1
+ -1 -1 -1]
+[Data] Total frames: 10000
+[Data] Species: [14 20 16 16 13 15  7 20 21 11 16  3  2 12  2  6  0 12  6 15 12  6  6  8
+  5  3  0  1 16 12  0  7  7 10 17 12 11 16 14 12 13 12  1 12 11  1 16 17
+ 20 11 21  6 11 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1
+ -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1
+ -1 -1 -1]
+[Data] Total frames: 10000
+[Data] Species: [14 20 16 16 13 15  7 20 21 11 16  3  2 12  2  6  0 12  6 15 12  6  6  8
+  5  3  0  1 16 12  0  7  7 10 17 12 11 16 14 12 13 12  1 12 11  1 16 17
+ 20 11 21  6 11 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1
+ -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1
+ -1 -1 -1]
+[Data] Total frames: 10000
+[Data] Species: [14 20 16 16 13 15  7 20 21 11 16  3  2 12  2  6  0 12  6 15 12  6  6  8
+  5  3  0  1 16 12  0  7  7 10 17 12 11 16 14 12 13 12  1 12 11  1 16 17
+ 20 11 21  6 11 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1
+ -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1
+ -1 -1 -1]
+[Data] Total frames: 10000
+[Data] Species: [14 20 16 16 13 15  7 20 21 11 16  3  2 12  2  6  0 12  6 15 12  6  6  8
+  5  3  0  1 16 12  0  7  7 10 17 12 11 16 14 12 13 12  1 12 11  1 16 17
+ 20 11 21  6 11 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1
+ -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1
+ -1 -1 -1]
+[Data] Total frames: 10000
+[Data] [Preprocessing] Computed box: [398.13    442.15002 444.7    ]
+[Data] [Preprocessing] R_shift: [188.9     161.41    156.73001]
+[Data] [Preprocessing] Computed box: [398.13    442.15002 444.7    ]
+[Data] [Preprocessing] R_shift: [188.9     161.41    156.73001]
+[Data] [Preprocessing] Computed box: [398.13    442.15002 444.7    ]
+[Data] [Preprocessing] R_shift: [188.9     161.41    156.73001]
+[Data] [Preprocessing] Computed box: [398.13    442.15002 444.7    ]
+[Data] [Preprocessing] R_shift: [188.9     161.41    156.73001]
+[Data] [Preprocessing] Computed box: [398.13    442.15002 444.7    ]
+[Data] [Preprocessing] R_shift: [188.9     161.41    156.73001]
+[Data] [Preprocessing] Computed box: [398.13    442.15002 444.7    ]
+[Data] [Preprocessing] R_shift: [188.9     161.41    156.73001]
+[Model] Using Allegro size: default
+[Model] Using Allegro size: default
+[Model] Using Allegro size: default
+[Model] Using Allegro size: default
+[Model] Using Allegro size: default
+[Model] Using Allegro size: default
+[Model] Detected 22 unique species
+[Model] Using Allegro config size: default
+[Model] Detected 22 unique species
+[Model] Using Allegro config size: default
+[Model] Detected 22 unique species
+[Model] Using Allegro config size: default
+[Model] Detected 22 unique species
+[Model] Using Allegro config size: default
+[Model] Detected 22 unique species
+[Model] Using Allegro config size: default
+[Model] Detected 22 unique species
+[Model] Using Allegro config size: default
+[Model] Mode: Prior + Allegro
+[Model] Prior weights: {'bond': 0.5, 'angle': 0.25, 'dihedral': 0.25, 'repulsive': 1.0}
+[Model] Initialized: CombinedModel(mode=Prior+Allegro, N_max=99)
+[Data] [Split] Training: 8000, Validation: 2000
+[Model] Mode: Prior + Allegro
+[Model] Prior weights: {'bond': 0.5, 'angle': 0.25, 'dihedral': 0.25, 'repulsive': 1.0}
+[Model] Initialized: CombinedModel(mode=Prior+Allegro, N_max=99)
+[Data] [Split] Training: 8000, Validation: 2000
+[Model] Mode: Prior + Allegro
+[Model] Prior weights: {'bond': 0.5, 'angle': 0.25, 'dihedral': 0.25, 'repulsive': 1.0}
+[Model] Initialized: CombinedModel(mode=Prior+Allegro, N_max=99)
+[Data] [Split] Training: 8000, Validation: 2000
+[Model] Mode: Prior + Allegro
+[Model] Prior weights: {'bond': 0.5, 'angle': 0.25, 'dihedral': 0.25, 'repulsive': 1.0}
+[Model] Initialized: CombinedModel(mode=Prior+Allegro, N_max=99)
+[Data] [Split] Training: 8000, Validation: 2000
+[Model] Mode: Prior + Allegro
+[Model] Prior weights: {'bond': 0.5, 'angle': 0.25, 'dihedral': 0.25, 'repulsive': 1.0}
+[Model] Initialized: CombinedModel(mode=Prior+Allegro, N_max=99)
+[Data] [Split] Training: 8000, Validation: 2000
+[Model] Mode: Prior + Allegro
+[Model] Prior weights: {'bond': 0.5, 'angle': 0.25, 'dihedral': 0.25, 'repulsive': 1.0}
+[Model] Initialized: CombinedModel(mode=Prior+Allegro, N_max=99)
+[Data] [Split] Training: 8000, Validation: 2000
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py:183: UserWarning: Explicitly requested dtype float64 requested in asarray is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return asarray(x, dtype=self.dtype)
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py:183: UserWarning: Explicitly requested dtype float64 requested in asarray is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return asarray(x, dtype=self.dtype)
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py:183: UserWarning: Explicitly requested dtype float64 requested in asarray is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return asarray(x, dtype=self.dtype)
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py:183: UserWarning: Explicitly requested dtype float64 requested in asarray is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return asarray(x, dtype=self.dtype)
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/reductions.py:213: UserWarning: Explicitly requested dtype <class 'jax.numpy.float64'> requested in sum is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return _reduction(a, "sum", np.sum, lax.add, 0, preproc=_cast_to_numeric,
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/reductions.py:213: UserWarning: Explicitly requested dtype <class 'jax.numpy.float64'> requested in sum is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return _reduction(a, "sum", np.sum, lax.add, 0, preproc=_cast_to_numeric,
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/reductions.py:213: UserWarning: Explicitly requested dtype <class 'jax.numpy.float64'> requested in sum is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return _reduction(a, "sum", np.sum, lax.add, 0, preproc=_cast_to_numeric,
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/reductions.py:213: UserWarning: Explicitly requested dtype <class 'jax.numpy.float64'> requested in sum is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return _reduction(a, "sum", np.sum, lax.add, 0, preproc=_cast_to_numeric,
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py:183: UserWarning: Explicitly requested dtype float64 requested in asarray is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return asarray(x, dtype=self.dtype)
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py:183: UserWarning: Explicitly requested dtype float64 requested in asarray is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return asarray(x, dtype=self.dtype)
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/reductions.py:213: UserWarning: Explicitly requested dtype <class 'jax.numpy.float64'> requested in sum is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return _reduction(a, "sum", np.sum, lax.add, 0, preproc=_cast_to_numeric,
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/reductions.py:213: UserWarning: Explicitly requested dtype <class 'jax.numpy.float64'> requested in sum is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return _reduction(a, "sum", np.sum, lax.add, 0, preproc=_cast_to_numeric,
+[Training] Initialized model with seed=8951
+[Training] Applied NumpyDataLoader patch
+[Training] 
+============================================================
+[Training] Prior Pre-Training (LBFGS, max_steps=200)
+[Training] [Distributed] Running on rank 0, broadcasting to 6 processes
+[Training] ============================================================
+[Training] [LBFGS] Rank 5 waiting for broadcast from rank 0...
+[Training] Initialized model with seed=8951
+[Training] Applied NumpyDataLoader patch
+[Training] 
+============================================================
+[Training] Prior Pre-Training (LBFGS, max_steps=200)
+[Training] [Distributed] Running on rank 0, broadcasting to 6 processes
+[Training] ============================================================
+[Training] [LBFGS] Starting optimization on rank 0...
+[Training] Initialized model with seed=8951
+[Training] Applied NumpyDataLoader patch
+[Training] 
+============================================================
+[Training] Prior Pre-Training (LBFGS, max_steps=200)
+[Training] [Distributed] Running on rank 0, broadcasting to 6 processes
+[Training] ============================================================
+[Training] [LBFGS] Rank 3 waiting for broadcast from rank 0...
+[Training] Initialized model with seed=8951
+[Training] Applied NumpyDataLoader patch
+[Training] 
+============================================================
+[Training] Prior Pre-Training (LBFGS, max_steps=200)
+[Training] [Distributed] Running on rank 0, broadcasting to 6 processes
+[Training] ============================================================
+[Training] [LBFGS] Rank 1 waiting for broadcast from rank 0...
+[Training] Initialized model with seed=8951
+[Training] Applied NumpyDataLoader patch
+[Training] 
+============================================================
+[Training] Prior Pre-Training (LBFGS, max_steps=200)
+[Training] [Distributed] Running on rank 0, broadcasting to 6 processes
+[Training] ============================================================
+[Training] [LBFGS] Rank 2 waiting for broadcast from rank 0...
+[Training] Initialized model with seed=8951
+[Training] Applied NumpyDataLoader patch
+[Training] 
+============================================================
+[Training] Prior Pre-Training (LBFGS, max_steps=200)
+[Training] [Distributed] Running on rank 0, broadcasting to 6 processes
+[Training] ============================================================
+[Training] [LBFGS] Rank 4 waiting for broadcast from rank 0...
+[Training] [LBFGS] Completed: 200 steps
+[Training] [LBFGS] Final loss: 2.689627e+02
+[Training] [LBFGS] Grad norm: 3.571254e+00 (tol=1.000000e-06)
+[Training] [LBFGS] Converged: False
+[Training] [LBFGS] Rank 0 received broadcasted parameters
+[Training] 
+[LBFGS] Fitted parameters:
+[Training] [LBFGS] Rank 3 received broadcasted parameters
+[Training] 
+[LBFGS] Fitted parameters:
+[Training] [LBFGS] Rank 1 received broadcasted parameters
+[Training] 
+[LBFGS] Fitted parameters:
+[Training] [LBFGS] Rank 2 received broadcasted parameters
+[Training] 
+[LBFGS] Fitted parameters:
+[Training] [LBFGS] Rank 4 received broadcasted parameters
+[Training] 
+[LBFGS] Fitted parameters:
+[Training] [LBFGS] Rank 5 received broadcasted parameters
+[Training] 
+[LBFGS] Fitted parameters:
+[Training]   a: [ 2.7794652 -3.2927198 -2.4553194  0.7391555  3.3488874  1.0702701
+ -1.0561484 -4.1596036 -1.0274947 -4.053939 ]
+[Training]   a: [ 2.7794652 -3.2927198 -2.4553194  0.7391555  3.3488874  1.0702701
+ -1.0561484 -4.1596036 -1.0274947 -4.053939 ]
+[Training]   a: [ 2.7794652 -3.2927198 -2.4553194  0.7391555  3.3488874  1.0702701
+ -1.0561484 -4.1596036 -1.0274947 -4.053939 ]
+[Training]   a: [ 2.7794652 -3.2927198 -2.4553194  0.7391555  3.3488874  1.0702701
+ -1.0561484 -4.1596036 -1.0274947 -4.053939 ]
+[Training]   a: [ 2.7794652 -3.2927198 -2.4553194  0.7391555  3.3488874  1.0702701
+ -1.0561484 -4.1596036 -1.0274947 -4.053939 ]
+[Training]   b: [ 1.8023732  3.3852556 -2.9243762 -2.2880926 -0.9411275  3.4005768
+  1.6589549  1.2919786 -4.607068  -3.2350535]
+[Training]   epsilon: 1.168311
+[Training]   a: [ 2.7794652 -3.2927198 -2.4553194  0.7391555  3.3488874  1.0702701
+ -1.0561484 -4.1596036 -1.0274947 -4.053939 ]
+[Training]   b: [ 1.8023732  3.3852556 -2.9243762 -2.2880926 -0.9411275  3.4005768
+  1.6589549  1.2919786 -4.607068  -3.2350535]
+[Training]   epsilon: 1.168311
+[Training]   b: [ 1.8023732  3.3852556 -2.9243762 -2.2880926 -0.9411275  3.4005768
+  1.6589549  1.2919786 -4.607068  -3.2350535]
+[Training]   epsilon: 1.168311
+[Training]   b: [ 1.8023732  3.3852556 -2.9243762 -2.2880926 -0.9411275  3.4005768
+  1.6589549  1.2919786 -4.607068  -3.2350535]
+[Training]   epsilon: 1.168311
+[Training]   gamma_dih: [-6.358208 -7.325196]
+[Training]   b: [ 1.8023732  3.3852556 -2.9243762 -2.2880926 -0.9411275  3.4005768
+  1.6589549  1.2919786 -4.607068  -3.2350535]
+[Training]   epsilon: 1.168311
+[Training]   b: [ 1.8023732  3.3852556 -2.9243762 -2.2880926 -0.9411275  3.4005768
+  1.6589549  1.2919786 -4.607068  -3.2350535]
+[Training]   epsilon: 1.168311
+[Training]   gamma_dih: [-6.358208 -7.325196]
+[Training]   k_dih: [ 4.166797   -0.68229574]
+[Training]   gamma_dih: [-6.358208 -7.325196]
+[Training]   gamma_dih: [-6.358208 -7.325196]
+[Training]   gamma_dih: [-6.358208 -7.325196]
+[Training]   gamma_dih: [-6.358208 -7.325196]
+[Training]   kr: 290.599213
+[Training]   k_dih: [ 4.166797   -0.68229574]
+[Training]   kr: 290.599213
+[Training]   k_dih: [ 4.166797   -0.68229574]
+[Training]   r0: 3.838453
+[Training]   r0: 3.838453
+[Training]   k_dih: [ 4.166797   -0.68229574]
+[Training]   k_dih: [ 4.166797   -0.68229574]
+[Training]   kr: 290.599213
+[Training]   sigma: -3.090943
+[Training]   sigma: -3.090943
+[Training]   kr: 290.599213
+[Training]   k_dih: [ 4.166797   -0.68229574]
+[Training]   r0: 3.838453
+[Training]   r0: 3.838453
+[Training]   sigma: -3.090943
+[Training]   sigma: -3.090943
+[Training]   kr: 290.599213
+[Training]   kr: 290.599213
+[Training]   r0: 3.838453
+[Training]   sigma: -3.090943
+[Training]   r0: 3.838453
+[Training]   sigma: -3.090943
+[Training] 
+============================================================
+[Training] Training Stage: ADABELIEF (20 epochs, starting from 0)
+[Training] ============================================================
+[Training] 
+============================================================
+[Training] Training Stage: ADABELIEF (20 epochs, starting from 0)
+[Training] 
+============================================================
+[Training] Training Stage: ADABELIEF (20 epochs, starting from 0)
+[Training] 
+============================================================
+[Training] Training Stage: ADABELIEF (20 epochs, starting from 0)
+[Training] ============================================================
+[Training] ============================================================
+[Training] ============================================================
+[Training] 
+============================================================
+[Training] Training Stage: ADABELIEF (20 epochs, starting from 0)
+[Training] ============================================================
+[Training] 
+============================================================
+[Training] Training Stage: ADABELIEF (20 epochs, starting from 0)
+[Training] ============================================================
+/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain/trainers/base.py:957: UserWarning: Batch size 6 does not divide the number of observations 8000. Trainer will skip 2 samples for state training
+  warnings.warn(
+/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain/trainers/base.py:957: UserWarning: Batch size 6 does not divide the number of observations 8000. Trainer will skip 2 samples for state training
+  warnings.warn(
+/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain/trainers/base.py:957: UserWarning: Batch size 6 does not divide the number of observations 8000. Trainer will skip 2 samples for state training
+  warnings.warn(
+/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain/trainers/base.py:957: UserWarning: Batch size 6 does not divide the number of observations 8000. Trainer will skip 2 samples for state training
+  warnings.warn(
+/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain/trainers/base.py:957: UserWarning: Batch size 6 does not divide the number of observations 8000. Trainer will skip 2 samples for state training
+  warnings.warn(
+/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain/trainers/base.py:957: UserWarning: Batch size 6 does not divide the number of observations 8000. Trainer will skip 2 samples for state training
+  warnings.warn(
+/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain/trainers/base.py:957: UserWarning: Batch size 6 does not divide the number of observations 2000. Trainer will skip 2 samples for state validation
+  warnings.warn(
+/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain/trainers/base.py:957: UserWarning: Batch size 6 does not divide the number of observations 2000. Trainer will skip 2 samples for state validation
+  warnings.warn(
+/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain/trainers/base.py:957: UserWarning: Batch size 6 does not divide the number of observations 2000. Trainer will skip 2 samples for state validation
+  warnings.warn(
+/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain/trainers/base.py:957: UserWarning: Batch size 6 does not divide the number of observations 2000. Trainer will skip 2 samples for state validation
+  warnings.warn(
+/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain/trainers/base.py:957: UserWarning: Batch size 6 does not divide the number of observations 2000. Trainer will skip 2 samples for state validation
+  warnings.warn(
+/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain/trainers/base.py:957: UserWarning: Batch size 6 does not divide the number of observations 2000. Trainer will skip 2 samples for state validation
+  warnings.warn(
+[SLURM] Detected multi-node job: 6 tasks
+[SLURM] Process 3/6
+[SLURM] Coordinator: jwb0003.juwels:30317
+[SLURM] CUDA_VISIBLE_DEVICES=0 -> 1 local GPUs
+[Rank 3/6] JAX distributed initialized
+[Rank 3] Local GPUs: 1, Total GPUs: 6
+[Rank 3] CUDA_VISIBLE_DEVICES: 0
+WARNING: Expected 4 local GPUs per process (1 process per node), got 1
+WARNING: Expected 24 total GPUs (6 nodes × 4 GPUs), got 6
+[Rank 3] Local devices: [CudaDevice(id=3)]
+[Rank 3] All devices: [CudaDevice(id=0), CudaDevice(id=1), CudaDevice(id=2), CudaDevice(id=3), CudaDevice(id=4), CudaDevice(id=5)]
+Capping edges and triplets. Beware of overflow, which is currently not being detected.
+Estimated max. 3488 edges.
+[Allegro] Use two atom species for oxygen and hydroge.
+[Allegro] Use default mask
+Use a custom scatter implementation
+Out irreps 300x0e+556x1o+556x2e
+Irreps after layer are 128x1o+128x2e
+Use a custom scatter implementation
+Out irreps 256x0e
+Irreps after layer are Irreps()
+[Allegro] Use two atom species for oxygen and hydroge.
+[SLURM] Detected multi-node job: 6 tasks
+[SLURM] Process 0/6
+[SLURM] Coordinator: jwb0003.juwels:30317
+[SLURM] CUDA_VISIBLE_DEVICES=0 -> 1 local GPUs
+[Rank 0/6] JAX distributed initialized
+[Rank 0] Local GPUs: 1, Total GPUs: 6
+[Rank 0] CUDA_VISIBLE_DEVICES: 0
+WARNING: Expected 4 local GPUs per process (1 process per node), got 1
+WARNING: Expected 24 total GPUs (6 nodes × 4 GPUs), got 6
+[Rank 0] Local devices: [CudaDevice(id=0)]
+[Rank 0] All devices: [CudaDevice(id=0), CudaDevice(id=1), CudaDevice(id=2), CudaDevice(id=3), CudaDevice(id=4), CudaDevice(id=5)]
+Capping edges and triplets. Beware of overflow, which is currently not being detected.
+Estimated max. 3488 edges.
+[Allegro] Use two atom species for oxygen and hydroge.
+[Allegro] Use default mask
+Use a custom scatter implementation
+Out irreps 300x0e+556x1o+556x2e
+Irreps after layer are 128x1o+128x2e
+Use a custom scatter implementation
+Out irreps 256x0e
+Irreps after layer are Irreps()
+[SLURM] Detected multi-node job: 6 tasks
+[SLURM] Process 4/6
+[SLURM] Coordinator: jwb0003.juwels:30317
+[SLURM] CUDA_VISIBLE_DEVICES=0 -> 1 local GPUs
+[Rank 4/6] JAX distributed initialized
+[Rank 4] Local GPUs: 1, Total GPUs: 6
+[Rank 4] CUDA_VISIBLE_DEVICES: 0
+WARNING: Expected 4 local GPUs per process (1 process per node), got 1
+WARNING: Expected 24 total GPUs (6 nodes × 4 GPUs), got 6
+[Rank 4] Local devices: [CudaDevice(id=4)]
+[Rank 4] All devices: [CudaDevice(id=0), CudaDevice(id=1), CudaDevice(id=2), CudaDevice(id=3), CudaDevice(id=4), CudaDevice(id=5)]
+Capping edges and triplets. Beware of overflow, which is currently not being detected.
+Estimated max. 3488 edges.
+[Allegro] Use two atom species for oxygen and hydroge.
+[Allegro] Use default mask
+Use a custom scatter implementation
+Out irreps 300x0e+556x1o+556x2e
+Irreps after layer are 128x1o+128x2e
+Use a custom scatter implementation
+Out irreps 256x0e
+Irreps after layer are Irreps()
+[SLURM] Detected multi-node job: 6 tasks
+[SLURM] Process 1/6
+[SLURM] Coordinator: jwb0003.juwels:30317
+[SLURM] CUDA_VISIBLE_DEVICES=0 -> 1 local GPUs
+[Rank 1/6] JAX distributed initialized
+[Rank 1] Local GPUs: 1, Total GPUs: 6
+[Rank 1] CUDA_VISIBLE_DEVICES: 0
+WARNING: Expected 4 local GPUs per process (1 process per node), got 1
+WARNING: Expected 24 total GPUs (6 nodes × 4 GPUs), got 6
+[Rank 1] Local devices: [CudaDevice(id=1)]
+[Rank 1] All devices: [CudaDevice(id=0), CudaDevice(id=1), CudaDevice(id=2), CudaDevice(id=3), CudaDevice(id=4), CudaDevice(id=5)]
+Capping edges and triplets. Beware of overflow, which is currently not being detected.
+Estimated max. 3488 edges.
+[Allegro] Use two atom species for oxygen and hydroge.
+[Allegro] Use default mask
+Use a custom scatter implementation
+Out irreps 300x0e+556x1o+556x2e
+Irreps after layer are 128x1o+128x2e
+Use a custom scatter implementation
+Out irreps 256x0e
+Irreps after layer are Irreps()
+[Allegro] Use default mask
+[SLURM] Detected multi-node job: 6 tasks
+[SLURM] Process 5/6
+[SLURM] Coordinator: jwb0003.juwels:30317
+[SLURM] CUDA_VISIBLE_DEVICES=0 -> 1 local GPUs
+[Rank 5/6] JAX distributed initialized
+[Rank 5] Local GPUs: 1, Total GPUs: 6
+[Rank 5] CUDA_VISIBLE_DEVICES: 0
+WARNING: Expected 4 local GPUs per process (1 process per node), got 1
+WARNING: Expected 24 total GPUs (6 nodes × 4 GPUs), got 6
+[Rank 5] Local devices: [CudaDevice(id=5)]
+[Rank 5] All devices: [CudaDevice(id=0), CudaDevice(id=1), CudaDevice(id=2), CudaDevice(id=3), CudaDevice(id=4), CudaDevice(id=5)]
+Capping edges and triplets. Beware of overflow, which is currently not being detected.
+Estimated max. 3488 edges.
+[Allegro] Use two atom species for oxygen and hydroge.
+[Allegro] Use default mask
+Use a custom scatter implementation
+Out irreps 300x0e+556x1o+556x2e
+Irreps after layer are 128x1o+128x2e
+Use a custom scatter implementation
+Out irreps 256x0e
+Irreps after layer are Irreps()
+[Allegro] Use two atom species for oxygen and hydroge.
+[SLURM] Detected multi-node job: 6 tasks
+[SLURM] Process 2/6
+[SLURM] Coordinator: jwb0003.juwels:30317
+[SLURM] CUDA_VISIBLE_DEVICES=0 -> 1 local GPUs
+[Rank 2/6] JAX distributed initialized
+[Rank 2] Local GPUs: 1, Total GPUs: 6
+[Rank 2] CUDA_VISIBLE_DEVICES: 0
+WARNING: Expected 4 local GPUs per process (1 process per node), got 1
+WARNING: Expected 24 total GPUs (6 nodes × 4 GPUs), got 6
+[Rank 2] Local devices: [CudaDevice(id=2)]
+[Rank 2] All devices: [CudaDevice(id=0), CudaDevice(id=1), CudaDevice(id=2), CudaDevice(id=3), CudaDevice(id=4), CudaDevice(id=5)]
+Capping edges and triplets. Beware of overflow, which is currently not being detected.
+Estimated max. 3488 edges.
+[Allegro] Use two atom species for oxygen and hydroge.
+[Allegro] Use default mask
+Use a custom scatter implementation
+Out irreps 300x0e+556x1o+556x2e
+Irreps after layer are 128x1o+128x2e
+Use a custom scatter implementation
+Out irreps 256x0e
+Irreps after layer are Irreps()
+[Allegro] Use two atom species for oxygen and hydroge.
+[Allegro] Use two atom species for oxygen and hydroge.
+[Allegro] Use default mask
+[Allegro] Use two atom species for oxygen and hydroge.
+[Allegro] Use default mask
+[Allegro] Use default mask
+[Allegro] Use two atom species for oxygen and hydroge.
+[Allegro] Use default mask
+[Allegro] Use default mask
+Use a custom scatter implementation
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+Out irreps 300x0e+556x1o+556x2e
+Use a custom scatter implementation
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+Use a custom scatter implementation
+Use a custom scatter implementation
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+Use a custom scatter implementation
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+Use a custom scatter implementation
+Irreps after layer are 128x1o+128x2e
+Out irreps 300x0e+556x1o+556x2e
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+Use a custom scatter implementation
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+Out irreps 300x0e+556x1o+556x2e
+Out irreps 300x0e+556x1o+556x2e
+Out irreps 256x0e
+Out irreps 300x0e+556x1o+556x2e
+Out irreps 300x0e+556x1o+556x2e
+Irreps after layer are Irreps()
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py:183: UserWarning: Explicitly requested dtype float64 requested in asarray is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return asarray(x, dtype=self.dtype)
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/reductions.py:213: UserWarning: Explicitly requested dtype <class 'jax.numpy.float64'> requested in sum is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return _reduction(a, "sum", np.sum, lax.add, 0, preproc=_cast_to_numeric,
+Irreps after layer are 128x1o+128x2e
+Use a custom scatter implementation
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+Irreps after layer are 128x1o+128x2e
+Irreps after layer are 128x1o+128x2e
+Irreps after layer are 128x1o+128x2e
+Use a custom scatter implementation
+Use a custom scatter implementation
+Out irreps 256x0e
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+Use a custom scatter implementation
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+Irreps after layer are 128x1o+128x2e
+Out irreps 256x0e
+Out irreps 256x0e
+Out irreps 256x0e
+Use a custom scatter implementation
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/ops/scatter.py:92: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float32 to dtype=int32 with jax_numpy_dtype_promotion='standard'. In future JAX releases this will result in an error.
+  warnings.warn(
+Irreps after layer are Irreps()
+Irreps after layer are Irreps()
+Out irreps 256x0e
+Irreps after layer are Irreps()
+Irreps after layer are Irreps()
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py:183: UserWarning: Explicitly requested dtype float64 requested in asarray is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return asarray(x, dtype=self.dtype)
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/reductions.py:213: UserWarning: Explicitly requested dtype <class 'jax.numpy.float64'> requested in sum is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return _reduction(a, "sum", np.sum, lax.add, 0, preproc=_cast_to_numeric,
+Irreps after layer are Irreps()
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py:183: UserWarning: Explicitly requested dtype float64 requested in asarray is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return asarray(x, dtype=self.dtype)
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/reductions.py:213: UserWarning: Explicitly requested dtype <class 'jax.numpy.float64'> requested in sum is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return _reduction(a, "sum", np.sum, lax.add, 0, preproc=_cast_to_numeric,
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py:183: UserWarning: Explicitly requested dtype float64 requested in asarray is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return asarray(x, dtype=self.dtype)
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py:183: UserWarning: Explicitly requested dtype float64 requested in asarray is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return asarray(x, dtype=self.dtype)
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/reductions.py:213: UserWarning: Explicitly requested dtype <class 'jax.numpy.float64'> requested in sum is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return _reduction(a, "sum", np.sum, lax.add, 0, preproc=_cast_to_numeric,
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/reductions.py:213: UserWarning: Explicitly requested dtype <class 'jax.numpy.float64'> requested in sum is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return _reduction(a, "sum", np.sum, lax.add, 0, preproc=_cast_to_numeric,
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py:183: UserWarning: Explicitly requested dtype float64 requested in asarray is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return asarray(x, dtype=self.dtype)
+/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/reductions.py:213: UserWarning: Explicitly requested dtype <class 'jax.numpy.float64'> requested in sum is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return _reduction(a, "sum", np.sum, lax.add, 0, preproc=_cast_to_numeric,
+[Force] Found precomputed forces.
+[Force] Found precomputed forces.
+[Force] Found precomputed forces.
+[Force] Found precomputed forces.
+[Force] Found precomputed forces.
+[Force] Found precomputed forces.
+[Force] Found precomputed forces.
+[Force] Found precomputed forces.
+[Force] Found precomputed forces.
+[Force] Found precomputed forces.
+[Force] Found precomputed forces.
+[Force] Found precomputed forces.
+[Epoch 0]:
+	Average train loss: 69.02402
+	Average val loss: 50.790042877197266
+	Gradient norm: 0.7449799180030823
+	Elapsed time = 6.830 min
+	Per-target losses:
+		F | train loss: 69.02402381296008 | val loss: 50.790042877197266
+[Epoch 0]:
+	Average train loss: 69.02402
+	Average val loss: 50.790042877197266
+	Gradient norm: 0.7449799180030823
+	Elapsed time = 6.830 min
+	Per-target losses:
+		F | train loss: 69.02402381296008 | val loss: 50.790042877197266
+[Epoch 0]:
+	Average train loss: 69.02402
+	Average val loss: 50.790042877197266
+	Gradient norm: 0.7449799180030823
+	Elapsed time = 6.831 min
+	Per-target losses:
+		F | train loss: 69.02402381296008 | val loss: 50.790042877197266
+[Epoch 0]:
+	Average train loss: 69.02402
+	Average val loss: 50.790042877197266
+	Gradient norm: 0.7449799180030823
+	Elapsed time = 6.830 min
+	Per-target losses:
+		F | train loss: 69.02402381296008 | val loss: 50.790042877197266
+[Epoch 0]:
+	Average train loss: 69.02402
+	Average val loss: 50.790042877197266
+	Gradient norm: 0.7449799180030823
+	Elapsed time = 6.830 min
+	Per-target losses:
+		F | train loss: 69.02402381296008 | val loss: 50.790042877197266
+[Epoch 0]:
+	Average train loss: 69.02402
+	Average val loss: 50.790042877197266
+	Gradient norm: 0.7449799180030823
+	Elapsed time = 6.830 min
+	Per-target losses:
+		F | train loss: 69.02402381296008 | val loss: 50.790042877197266
+
+
+
+
+
+

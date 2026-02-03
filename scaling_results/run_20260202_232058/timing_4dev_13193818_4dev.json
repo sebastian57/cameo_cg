@@ -1,0 +1,7 @@
+{
+  "num_devices": 4,
+  "expected_devices": 4,
+  "num_nodes": 1,
+  "total_time": 325.47895789146423,
+  "train_samples": 2250
+}

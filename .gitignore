@@ -1,0 +1,26 @@
+# --- logs ---
+train_allegro_*.log
+slurm-*.out
+force_matching.log
+
+# --- crash dumps / core files ---
+core.*
+
+# --- run artifacts / outputs (dirs) ---
+exported_models/
+force_eval/
+force_eval_test/
+checkpoints_allegro/
+checkpoints_scaling/
+
+# --- large / generated datasets ---
+data_prep/datasets/
+
+# --- temporary / old scripts --- 
+scripts/analyze_scaling.py
+scripts/config_scaling_test.yaml
+scripts/run_scaling_test.sh
+scripts/scaling_worker.sbatch
+scripts/scaling_worker_fixed.sbatch
+scripts/train_scaling.py
+scripts/train_scaling_fixed.py

@@ -1,0 +1,145 @@
+============================================================
+Module Environment
+============================================================
+
+============================================================
+SLURM Job Configuration
+============================================================
+Config file:    config_timing_test.yaml
+Job ID:         13198920
+Nodes:          5
+Tasks/node:     1 (1 process per node)
+GPUs per node:  4 (pmap distributes across local GPUs)
+Total GPUs:     20
+CUDA_HOME:      /p/software/juwelsbooster/stages/2025/software/CUDA/12
+CUDA_VISIBLE:   0
+============================================================
+Verifying GPU allocation per node...
+Host=jwb0324.juwels CUDA_VISIBLE_DEVICES=0
+GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-72e5c0c2-d4d9-1d51-113d-325611bb5ed1)
+GPU 1: NVIDIA A100-SXM4-40GB (UUID: GPU-d2840a62-4b00-2743-8876-1d1ba2502940)
+GPU 2: NVIDIA A100-SXM4-40GB (UUID: GPU-27b1889a-cd7e-b61e-9ebc-8ec600318951)
+GPU 3: NVIDIA A100-SXM4-40GB (UUID: GPU-721455c3-960d-5c6a-2867-7c240fb1e005)
+Host=jwb1082.juwels CUDA_VISIBLE_DEVICES=0
+Host=jwb1083.juwels CUDA_VISIBLE_DEVICES=0
+Host=jwb1065.juwels CUDA_VISIBLE_DEVICES=0
+GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-bd811eb2-b8be-e53e-783e-f8918d525973)
+GPU 1: NVIDIA A100-SXM4-40GB (UUID: GPU-c1bb51f5-9bc1-69b2-7db6-06207e1880f5)
+GPU 2: NVIDIA A100-SXM4-40GB (UUID: GPU-41b0f42e-54ba-68a8-f248-a97f1b461bf2)
+GPU 3: NVIDIA A100-SXM4-40GB (UUID: GPU-16b06589-d1af-4ea6-4eb8-174b63af3575)
+Host=jwb0347.juwels CUDA_VISIBLE_DEVICES=0
+GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-d3310358-2044-b7c0-2842-66e2fd01b225)
+GPU 1: NVIDIA A100-SXM4-40GB (UUID: GPU-ebb94543-5b1a-5062-5a28-7ae042b552c5)
+GPU 2: NVIDIA A100-SXM4-40GB (UUID: GPU-60b7947a-d748-035f-7509-2170f28d0d6b)
+GPU 3: NVIDIA A100-SXM4-40GB (UUID: GPU-63469a4a-44d8-6721-bba7-1218d3df68c9)
+GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-5be94dda-aa9b-a520-4a45-567b641a401f)
+GPU 1: NVIDIA A100-SXM4-40GB (UUID: GPU-f7f65aee-3b55-a800-87b8-90ca75d2b799)
+GPU 2: NVIDIA A100-SXM4-40GB (UUID: GPU-d3fa7a39-32cc-0884-c9d4-ad054a8e2d2f)
+GPU 3: NVIDIA A100-SXM4-40GB (UUID: GPU-20b0d1a4-506f-7a33-93e2-b5cd3cc473a5)
+GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-a7eec644-828d-dc6a-56ac-5edab53dfb90)
+GPU 1: NVIDIA A100-SXM4-40GB (UUID: GPU-17670e24-9508-9be4-8137-628f2d926e57)
+GPU 2: NVIDIA A100-SXM4-40GB (UUID: GPU-c61488b5-d75c-77f1-37b3-9d1538b032d4)
+GPU 3: NVIDIA A100-SXM4-40GB (UUID: GPU-4163fdb3-3568-b3b8-09b5-e59c1a7a32e0)
+
+============================================================
+Multi-node JAX Distributed Verification
+============================================================
+Node=jwb0324.juwels SLURM_PROCID=0 SLURM_NTASKS=5
+Node=jwb0347.juwels SLURM_PROCID=1 SLURM_NTASKS=5
+Node=jwb1065.juwels SLURM_PROCID=2 SLURM_NTASKS=5
+Node=jwb1082.juwels SLURM_PROCID=3 SLURM_NTASKS=5
+Node=jwb1083.juwels SLURM_PROCID=4 SLURM_NTASKS=5
+JAX will auto-detect coordinator from SLURM environment
+============================================================
+Submit directory: /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base
+Training script:  /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/train.py
+============================================================
+Starting training with 5 node(s), 4 GPUs each...
+Log file: train_allegro_13198920.log
+============================================================
+2026-02-03 09:25:44.386501: E external/xla/xla/pjrt/distributed/client.cc:137] Failed to connect to distributed JAX controller: waited too long for some tasks to show up. This may be due to 1) some tasks crashed earlier before connecting, 2) some tasks were never scheduled, or 3) scheduling delays. Consider setting a longer initialization timeout if such delays are expected, the timeout is currently set to: 5m.
+
+Original runtime error: DEADLINE_EXCEEDED: Barrier timed out. Id: PjRT_Client_Connect. This usually happens because a task triggered the barrier too early or too slowly. Please look at the task logs (both timed out and first task) to debug further.
+# of tasks that reached the barrier: 2/5.
+The first task at the barrier: /job:jax_worker/replica:0/task:0. Some timed out task names:
+/job:jax_worker/replica:0/task:4
+/job:jax_worker/replica:0/task:3
+/job:jax_worker/replica:0/task:2
+
+
+RPC: /tensorflow.CoordinationService/Barrier [type.googleapis.com/tensorflow.CoordinationServiceError='']
+2026-02-03 09:25:44.385670: E external/xla/xla/pjrt/distributed/client.cc:137] Failed to connect to distributed JAX controller: waited too long for some tasks to show up. This may be due to 1) some tasks crashed earlier before connecting, 2) some tasks were never scheduled, or 3) scheduling delays. Consider setting a longer initialization timeout if such delays are expected, the timeout is currently set to: 5m.
+
+Original runtime error: DEADLINE_EXCEEDED: Barrier timed out. Id: PjRT_Client_Connect. This usually happens because a task triggered the barrier too early or too slowly. Please look at the task logs (both timed out and first task) to debug further.
+# of tasks that reached the barrier: 2/5.
+The first task at the barrier: /job:jax_worker/replica:0/task:0. Some timed out task names:
+/job:jax_worker/replica:0/task:4
+/job:jax_worker/replica:0/task:3
+/job:jax_worker/replica:0/task:2
+
+
+RPC: /tensorflow.CoordinationService/Barrier [type.googleapis.com/tensorflow.CoordinationServiceError='']
+[SLURM] Detected multi-node job: 5 tasks
+[SLURM] Process 0/5
+[SLURM] Coordinator: jwb0324.juwels:30320
+[SLURM] CUDA_VISIBLE_DEVICES=0 -> 1 local GPUs
+Traceback (most recent call last):
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/train.py", line 160, in <module>
+    _IS_DISTRIBUTED, _RANK, _WORLD_SIZE = _initialize_jax_distributed()
+                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/train.py", line 110, in _initialize_jax_distributed
+    jax.distributed.initialize(
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/distributed.py", line 231, in initialize
+    global_state.initialize(coordinator_address, num_processes, process_id,
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/distributed.py", line 120, in initialize
+    self.client.connect()
+jaxlib.xla_extension.XlaRuntimeError: DEADLINE_EXCEEDED: Barrier timed out. Id: PjRT_Client_Connect. This usually happens because a task triggered the barrier too early or too slowly. Please look at the task logs (both timed out and first task) to debug further.
+# of tasks that reached the barrier: 2/5.
+The first task at the barrier: /job:jax_worker/replica:0/task:0. Some timed out task names:
+/job:jax_worker/replica:0/task:4
+/job:jax_worker/replica:0/task:3
+/job:jax_worker/replica:0/task:2
+
+
+RPC: /tensorflow.CoordinationService/Barrier
+[SLURM] Detected multi-node job: 5 tasks
+[SLURM] Process 1/5
+[SLURM] Coordinator: jwb0324.juwels:30320
+[SLURM] CUDA_VISIBLE_DEVICES=0 -> 1 local GPUs
+Traceback (most recent call last):
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/train.py", line 160, in <module>
+    _IS_DISTRIBUTED, _RANK, _WORLD_SIZE = _initialize_jax_distributed()
+                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/train.py", line 110, in _initialize_jax_distributed
+    jax.distributed.initialize(
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/distributed.py", line 231, in initialize
+    global_state.initialize(coordinator_address, num_processes, process_id,
+  File "/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/distributed.py", line 120, in initialize
+    self.client.connect()
+jaxlib.xla_extension.XlaRuntimeError: DEADLINE_EXCEEDED: Barrier timed out. Id: PjRT_Client_Connect. This usually happens because a task triggered the barrier too early or too slowly. Please look at the task logs (both timed out and first task) to debug further.
+# of tasks that reached the barrier: 2/5.
+The first task at the barrier: /job:jax_worker/replica:0/task:0. Some timed out task names:
+/job:jax_worker/replica:0/task:4
+/job:jax_worker/replica:0/task:3
+/job:jax_worker/replica:0/task:2
+
+
+RPC: /tensorflow.CoordinationService/Barrier
+E0203 09:25:45.072166  624202 coordination_service_agent.cc:892] Coordination agent is set to ERROR: DEADLINE_EXCEEDED: Deadline Exceeded
+
+RPC: /tensorflow.CoordinationService/RegisterTask
+2026-02-03 09:25:45.072233: E external/xla/xla/pjrt/distributed/client.cc:99] Coordination service agent in error status: DEADLINE_EXCEEDED: Deadline Exceeded
+
+RPC: /tensorflow.CoordinationService/RegisterTask
+2026-02-03 09:25:45.072956: F external/xla/xla/pjrt/distributed/client.h:82] Terminating process because the coordinator detected missing heartbeats. This most likely indicates that another task died; see the other task logs for more details. Disable Python buffering, i.e. `python -u`, to be sure to see all the previous output. absl::Status: DEADLINE_EXCEEDED: Deadline Exceeded
+
+RPC: /tensorflow.CoordinationService/RegisterTask
+srun: error: jwb1082: task 3: Aborted (core dumped)
+srun: error: jwb1083: task 4: Terminated
+srun: error: jwb0347: task 1: Terminated
+srun: error: jwb1065: task 2: Terminated
+srun: error: jwb0324: task 0: Terminated
+srun: Force Terminated StepId=13198920.2
+============================================================
+Training complete. Log: train_allegro_13198920.log
+============================================================

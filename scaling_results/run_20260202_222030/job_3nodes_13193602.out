@@ -1,0 +1,27 @@
+============================================================
+Scaling Test Worker (Fixed)
+============================================================
+Job ID:         13193602
+Nodes:          3
+Mode:           multi
+Config:         /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/config_scaling_test.yaml
+Output dir:     /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scaling_results/run_20260202_222030
+============================================================
+
+============================================================
+Multi-node scaling test: 3 nodes, 12 devices
+============================================================
+  Running training on 3 nodes...
+/p/project1/cameo/schmidt36/clean_booster_env/bin/python3: can't open file '/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/scripts/train_scaling_fixed.py': [Errno 2] No such file or directory
+/p/project1/cameo/schmidt36/clean_booster_env/bin/python3: can't open file '/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/scripts/train_scaling_fixed.py': [Errno 2] No such file or directory
+srun: error: jwb0570: task 2: Exited with exit code 2
+/p/project1/cameo/schmidt36/clean_booster_env/bin/python3: can't open file '/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/scripts/train_scaling_fixed.py': [Errno 2] No such file or directory
+srun: error: jwb0380: task 1: Exited with exit code 2
+srun: error: jwb0357: task 0: Exited with exit code 2
+  Total time: 1.524275830s
+  Throughput: 17713.32 samples/s
+
+============================================================
+Scaling test complete
+Results saved to: /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scaling_results/run_20260202_222030/timing_job_13193602.csv
+============================================================

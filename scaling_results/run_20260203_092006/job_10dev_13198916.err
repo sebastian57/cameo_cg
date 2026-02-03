@@ -1,0 +1,342 @@
++ '[' -z '' ']'
++ case "$-" in
++ __lmod_vx=x
++ '[' -n x ']'
++ set +x
+Shell debugging temporarily silenced: export LMOD_SH_DBG_ON=1 for this output (/p/software/juwelsbooster/lmod/8.7.64/init/bash)
+Shell debugging restarted
++ unset __lmod_vx
++ CONFIG_FILE=config_timing_test.yaml
++ shift
++ [[ -z config_timing_test.yaml ]]
++ RESUME_FLAG=
++ [[ 0 -gt 0 ]]
++ source /p/project1/cameo/schmidt36/load_modules.sh
+++ module purge
+++ '[' -z '' ']'
+++ case "$-" in
+++ __lmod_sh_dbg=x
+++ '[' -n x ']'
+++ set +x
+Shell debugging temporarily silenced: export LMOD_SH_DBG_ON=1 for Lmod's output
+The following modules were not unloaded:
+  (Use "module --force purge" to unload all):
+
+  1) Stages/2026
+Shell debugging restarted
+++ unset __lmod_sh_dbg
+++ return 0
+++ module load Stages/2025 StdEnv/2025
+++ '[' -z '' ']'
+++ case "$-" in
+++ __lmod_sh_dbg=x
+++ '[' -n x ']'
+++ set +x
+Shell debugging temporarily silenced: export LMOD_SH_DBG_ON=1 for Lmod's output
+
+  [01;33mThis stage is deprecated. Please consider moving to a new stage (2026
+or newer)[0m
+
+
+The following have been reloaded with a version change:
+  1) Stages/2026 => Stages/2025
+
+Shell debugging restarted
+++ unset __lmod_sh_dbg
+++ return 0
+++ module load GCC/13.3.0 Python/3.12.3
+++ '[' -z '' ']'
+++ case "$-" in
+++ __lmod_sh_dbg=x
+++ '[' -n x ']'
+++ set +x
+Shell debugging temporarily silenced: export LMOD_SH_DBG_ON=1 for Lmod's output
+Shell debugging restarted
+++ unset __lmod_sh_dbg
+++ return 0
+++ module load CUDA/12 ParaStationMPI cuDNN/9.5.0.50-CUDA-12 NCCL/default-CUDA-12
+++ '[' -z '' ']'
+++ case "$-" in
+++ __lmod_sh_dbg=x
+++ '[' -n x ']'
+++ set +x
+Shell debugging temporarily silenced: export LMOD_SH_DBG_ON=1 for Lmod's output
+Shell debugging restarted
+++ unset __lmod_sh_dbg
+++ return 0
+++ module load jax/0.4.34-CUDA-12
+++ '[' -z '' ']'
+++ case "$-" in
+++ __lmod_sh_dbg=x
+++ '[' -n x ']'
+++ set +x
+Shell debugging temporarily silenced: export LMOD_SH_DBG_ON=1 for Lmod's output
+Shell debugging restarted
+++ unset __lmod_sh_dbg
+++ return 0
+++ module load CMake/3.30.3
+++ '[' -z '' ']'
+++ case "$-" in
+++ __lmod_sh_dbg=x
+++ '[' -n x ']'
+++ set +x
+Shell debugging temporarily silenced: export LMOD_SH_DBG_ON=1 for Lmod's output
+Shell debugging restarted
+++ unset __lmod_sh_dbg
+++ return 0
+++ module load Ninja/1.12.1
+++ '[' -z '' ']'
+++ case "$-" in
+++ __lmod_sh_dbg=x
+++ '[' -n x ']'
+++ set +x
+Shell debugging temporarily silenced: export LMOD_SH_DBG_ON=1 for Lmod's output
+Shell debugging restarted
+++ unset __lmod_sh_dbg
+++ return 0
+++ module load Clang/18.1.8
+++ '[' -z '' ']'
+++ case "$-" in
+++ __lmod_sh_dbg=x
+++ '[' -n x ']'
+++ set +x
+Shell debugging temporarily silenced: export LMOD_SH_DBG_ON=1 for Lmod's output
+Shell debugging restarted
+++ unset __lmod_sh_dbg
+++ return 0
+++ module load UCX/default
+++ '[' -z '' ']'
+++ case "$-" in
+++ __lmod_sh_dbg=x
+++ '[' -n x ']'
+++ set +x
+Shell debugging temporarily silenced: export LMOD_SH_DBG_ON=1 for Lmod's output
+Shell debugging restarted
+++ unset __lmod_sh_dbg
+++ return 0
+++ module load UCC/default
+++ '[' -z '' ']'
+++ case "$-" in
+++ __lmod_sh_dbg=x
+++ '[' -n x ']'
+++ set +x
+Shell debugging temporarily silenced: export LMOD_SH_DBG_ON=1 for Lmod's output
+Shell debugging restarted
+++ unset __lmod_sh_dbg
+++ return 0
+++ module load git/2.45.1
+++ '[' -z '' ']'
+++ case "$-" in
+++ __lmod_sh_dbg=x
+++ '[' -n x ']'
+++ set +x
+Shell debugging temporarily silenced: export LMOD_SH_DBG_ON=1 for Lmod's output
+Shell debugging restarted
+++ unset __lmod_sh_dbg
+++ return 0
+++ module load HDF5/1.14.5-serial
+++ '[' -z '' ']'
+++ case "$-" in
+++ __lmod_sh_dbg=x
+++ '[' -n x ']'
+++ set +x
+Shell debugging temporarily silenced: export LMOD_SH_DBG_ON=1 for Lmod's output
+Shell debugging restarted
+++ unset __lmod_sh_dbg
+++ return 0
+++ module load tmux
+++ '[' -z '' ']'
+++ case "$-" in
+++ __lmod_sh_dbg=x
+++ '[' -n x ']'
+++ set +x
+Shell debugging temporarily silenced: export LMOD_SH_DBG_ON=1 for Lmod's output
+Shell debugging restarted
+++ unset __lmod_sh_dbg
+++ return 0
++++ which gcc
++++ alias
++++ eval declare -f
+++++ declare -f
++++ /usr/bin/which --tty-only --read-alias --read-functions --show-tilde --show-dot gcc
+++ export CC=/p/software/juwelsbooster/stages/2025/software/GCCcore/13.3.0/bin/gcc
+++ CC=/p/software/juwelsbooster/stages/2025/software/GCCcore/13.3.0/bin/gcc
++++ which g++
++++ alias
++++ eval declare -f
+++++ declare -f
++++ /usr/bin/which --tty-only --read-alias --read-functions --show-tilde --show-dot g++
+++ export CXX=/p/software/juwelsbooster/stages/2025/software/GCCcore/13.3.0/bin/g++
+++ CXX=/p/software/juwelsbooster/stages/2025/software/GCCcore/13.3.0/bin/g++
++++ which gcc
++++ alias
++++ eval declare -f
+++++ declare -f
++++ /usr/bin/which --tty-only --read-alias --read-functions --show-tilde --show-dot gcc
+++ export CLANG_CUDA_COMPILER_PATH=/p/software/juwelsbooster/stages/2025/software/GCCcore/13.3.0/bin/gcc
+++ CLANG_CUDA_COMPILER_PATH=/p/software/juwelsbooster/stages/2025/software/GCCcore/13.3.0/bin/gcc
++ source /p/project1/cameo/schmidt36/clean_booster_env/bin/activate
+++ deactivate nondestructive
+++ '[' -n '' ']'
+++ '[' -n '' ']'
+++ hash -r
+++ '[' -n '' ']'
+++ unset VIRTUAL_ENV
+++ unset VIRTUAL_ENV_PROMPT
+++ '[' '!' nondestructive = nondestructive ']'
+++ '[' linux-gnu = cygwin ']'
+++ '[' linux-gnu = msys ']'
+++ export VIRTUAL_ENV=/p/project1/cameo/schmidt36/clean_booster_env
+++ VIRTUAL_ENV=/p/project1/cameo/schmidt36/clean_booster_env
+++ _OLD_VIRTUAL_PATH=/p/software/juwelsbooster/stages/2025/software/tmux/3.4-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/HDF5/1.14.5-GCCcore-13.3.0-serial/bin:/p/software/juwelsbooster/stages/2025/software/git/2.45.1-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/Perl/5.38.2-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/gettext/0.22.5-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/libiconv/1.17-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/expat/2.6.2-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/UCC/default-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/UCX/default-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/Clang/18.1.8-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/Z3/4.13.0-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/Ninja/1.12.1-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/CMake/3.30.3-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/libarchive/3.7.4-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/cURL/8.7.1-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/SciPy-bundle/2024.05-gcccoreflexiblas-13.3.0-3.4.4/bin:/p/software/default/stages/2025/software/pybind11/2.12.0-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/ICU/75.1-GCCcore-13.3.0/sbin:/p/software/juwelsbooster/stages/2025/software/ICU/75.1-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/zstd/1.5.6-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/lz4/1.9.4-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/gzip/1.13-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/Python-bundle-PyPI/2024.06-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/virtualenv/20.26.2-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/FlexiBLAS/3.4.4-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/FFTW/3.3.10-GCC-13.3.0/bin:/p/software/default/stages/2025/software/psmpi/5.10.0-1-GCC-13.3.0/bin:/p/software/default/stages/2025/software/PMIx/5.0.3-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/hwloc/2.10.0-GCCcore-13.3.0/sbin:/p/software/juwelsbooster/stages/2025/software/hwloc/2.10.0-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/libevent/2.1.12-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/libxml2/2.12.7-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/pscom/5-default-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/numactl/2.0.18-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/CUDA/12/nvvm/bin:/p/software/juwelsbooster/stages/2025/software/CUDA/12/bin:/p/software/juwelsbooster/stages/2025/software/Python/3.12.3-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/OpenSSL/3/bin:/p/software/juwelsbooster/stages/2025/software/XZ/5.4.5-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/SQLite/3.45.3-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/Tcl/8.6.14-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/ncurses/6.5-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/bzip2/1.0.8-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/make/4.4.1-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/binutils/2.42-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/GCCcore/13.3.0/bin:/p/project1/cameo/schmidt36/clean_booster_env/bin:/p/home/jusers/schmidt36/juwels/.vscode-server/cli/servers/Stable-7d842fb85a0275a4a8e4d7e040d2625abbf7f084/server/bin/remote-cli:/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin:/opt/jsc/bin:/usr/local/jsc/bin:/opt/parastation/bin:/p/software/default/bin:/opt/jsc/bin:/usr/local/jsc/bin:/opt/parastation/bin:/p/software/default/bin:/opt/jsc/bin:/usr/local/jsc/bin:/opt/parastation/bin:/p/software/default/bin
+++ PATH=/p/project1/cameo/schmidt36/clean_booster_env/bin:/p/software/juwelsbooster/stages/2025/software/tmux/3.4-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/HDF5/1.14.5-GCCcore-13.3.0-serial/bin:/p/software/juwelsbooster/stages/2025/software/git/2.45.1-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/Perl/5.38.2-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/gettext/0.22.5-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/libiconv/1.17-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/expat/2.6.2-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/UCC/default-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/UCX/default-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/Clang/18.1.8-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/Z3/4.13.0-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/Ninja/1.12.1-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/CMake/3.30.3-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/libarchive/3.7.4-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/cURL/8.7.1-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/SciPy-bundle/2024.05-gcccoreflexiblas-13.3.0-3.4.4/bin:/p/software/default/stages/2025/software/pybind11/2.12.0-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/ICU/75.1-GCCcore-13.3.0/sbin:/p/software/juwelsbooster/stages/2025/software/ICU/75.1-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/zstd/1.5.6-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/lz4/1.9.4-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/gzip/1.13-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/Python-bundle-PyPI/2024.06-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/virtualenv/20.26.2-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/FlexiBLAS/3.4.4-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/FFTW/3.3.10-GCC-13.3.0/bin:/p/software/default/stages/2025/software/psmpi/5.10.0-1-GCC-13.3.0/bin:/p/software/default/stages/2025/software/PMIx/5.0.3-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/hwloc/2.10.0-GCCcore-13.3.0/sbin:/p/software/juwelsbooster/stages/2025/software/hwloc/2.10.0-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/libevent/2.1.12-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/libxml2/2.12.7-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/pscom/5-default-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/numactl/2.0.18-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/CUDA/12/nvvm/bin:/p/software/juwelsbooster/stages/2025/software/CUDA/12/bin:/p/software/juwelsbooster/stages/2025/software/Python/3.12.3-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/OpenSSL/3/bin:/p/software/juwelsbooster/stages/2025/software/XZ/5.4.5-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/SQLite/3.45.3-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/Tcl/8.6.14-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/ncurses/6.5-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/bzip2/1.0.8-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/make/4.4.1-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/binutils/2.42-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/GCCcore/13.3.0/bin:/p/project1/cameo/schmidt36/clean_booster_env/bin:/p/home/jusers/schmidt36/juwels/.vscode-server/cli/servers/Stable-7d842fb85a0275a4a8e4d7e040d2625abbf7f084/server/bin/remote-cli:/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin:/opt/jsc/bin:/usr/local/jsc/bin:/opt/parastation/bin:/p/software/default/bin:/opt/jsc/bin:/usr/local/jsc/bin:/opt/parastation/bin:/p/software/default/bin:/opt/jsc/bin:/usr/local/jsc/bin:/opt/parastation/bin:/p/software/default/bin
+++ export PATH
+++ '[' -n '' ']'
+++ '[' -z '' ']'
+++ _OLD_VIRTUAL_PS1=
+++ PS1='(clean_booster_env) '
+++ export PS1
+++ VIRTUAL_ENV_PROMPT='(clean_booster_env) '
+++ export VIRTUAL_ENV_PROMPT
+++ hash -r
++ source /p/project1/cameo/schmidt36/set_lammps_paths.sh
+++ export PATH=/p/project1/cameo/schmidt36/lammps/build:/p/project1/cameo/schmidt36/clean_booster_env/bin:/p/software/juwelsbooster/stages/2025/software/tmux/3.4-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/HDF5/1.14.5-GCCcore-13.3.0-serial/bin:/p/software/juwelsbooster/stages/2025/software/git/2.45.1-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/Perl/5.38.2-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/gettext/0.22.5-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/libiconv/1.17-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/expat/2.6.2-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/UCC/default-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/UCX/default-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/Clang/18.1.8-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/Z3/4.13.0-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/Ninja/1.12.1-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/CMake/3.30.3-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/libarchive/3.7.4-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/cURL/8.7.1-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/SciPy-bundle/2024.05-gcccoreflexiblas-13.3.0-3.4.4/bin:/p/software/default/stages/2025/software/pybind11/2.12.0-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/ICU/75.1-GCCcore-13.3.0/sbin:/p/software/juwelsbooster/stages/2025/software/ICU/75.1-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/zstd/1.5.6-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/lz4/1.9.4-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/gzip/1.13-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/Python-bundle-PyPI/2024.06-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/virtualenv/20.26.2-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/FlexiBLAS/3.4.4-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/FFTW/3.3.10-GCC-13.3.0/bin:/p/software/default/stages/2025/software/psmpi/5.10.0-1-GCC-13.3.0/bin:/p/software/default/stages/2025/software/PMIx/5.0.3-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/hwloc/2.10.0-GCCcore-13.3.0/sbin:/p/software/juwelsbooster/stages/2025/software/hwloc/2.10.0-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/libevent/2.1.12-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/libxml2/2.12.7-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/pscom/5-default-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/numactl/2.0.18-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/CUDA/12/nvvm/bin:/p/software/juwelsbooster/stages/2025/software/CUDA/12/bin:/p/software/juwelsbooster/stages/2025/software/Python/3.12.3-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/OpenSSL/3/bin:/p/software/juwelsbooster/stages/2025/software/XZ/5.4.5-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/SQLite/3.45.3-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/Tcl/8.6.14-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/ncurses/6.5-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/bzip2/1.0.8-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/make/4.4.1-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/binutils/2.42-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/GCCcore/13.3.0/bin:/p/project1/cameo/schmidt36/clean_booster_env/bin:/p/home/jusers/schmidt36/juwels/.vscode-server/cli/servers/Stable-7d842fb85a0275a4a8e4d7e040d2625abbf7f084/server/bin/remote-cli:/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin:/opt/jsc/bin:/usr/local/jsc/bin:/opt/parastation/bin:/p/software/default/bin:/opt/jsc/bin:/usr/local/jsc/bin:/opt/parastation/bin:/p/software/default/bin:/opt/jsc/bin:/usr/local/jsc/bin:/opt/parastation/bin:/p/software/default/bin
+++ PATH=/p/project1/cameo/schmidt36/lammps/build:/p/project1/cameo/schmidt36/clean_booster_env/bin:/p/software/juwelsbooster/stages/2025/software/tmux/3.4-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/HDF5/1.14.5-GCCcore-13.3.0-serial/bin:/p/software/juwelsbooster/stages/2025/software/git/2.45.1-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/Perl/5.38.2-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/gettext/0.22.5-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/libiconv/1.17-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/expat/2.6.2-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/UCC/default-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/UCX/default-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/Clang/18.1.8-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/Z3/4.13.0-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/Ninja/1.12.1-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/CMake/3.30.3-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/libarchive/3.7.4-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/cURL/8.7.1-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/SciPy-bundle/2024.05-gcccoreflexiblas-13.3.0-3.4.4/bin:/p/software/default/stages/2025/software/pybind11/2.12.0-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/ICU/75.1-GCCcore-13.3.0/sbin:/p/software/juwelsbooster/stages/2025/software/ICU/75.1-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/zstd/1.5.6-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/lz4/1.9.4-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/gzip/1.13-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/Python-bundle-PyPI/2024.06-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/virtualenv/20.26.2-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/FlexiBLAS/3.4.4-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/FFTW/3.3.10-GCC-13.3.0/bin:/p/software/default/stages/2025/software/psmpi/5.10.0-1-GCC-13.3.0/bin:/p/software/default/stages/2025/software/PMIx/5.0.3-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/hwloc/2.10.0-GCCcore-13.3.0/sbin:/p/software/juwelsbooster/stages/2025/software/hwloc/2.10.0-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/libevent/2.1.12-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/libxml2/2.12.7-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/pscom/5-default-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/numactl/2.0.18-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/CUDA/12/nvvm/bin:/p/software/juwelsbooster/stages/2025/software/CUDA/12/bin:/p/software/juwelsbooster/stages/2025/software/Python/3.12.3-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/OpenSSL/3/bin:/p/software/juwelsbooster/stages/2025/software/XZ/5.4.5-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/SQLite/3.45.3-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/Tcl/8.6.14-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/ncurses/6.5-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/bzip2/1.0.8-GCCcore-13.3.0/bin:/p/software/default/stages/2025/software/make/4.4.1-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/binutils/2.42-GCCcore-13.3.0/bin:/p/software/juwelsbooster/stages/2025/software/GCCcore/13.3.0/bin:/p/project1/cameo/schmidt36/clean_booster_env/bin:/p/home/jusers/schmidt36/juwels/.vscode-server/cli/servers/Stable-7d842fb85a0275a4a8e4d7e040d2625abbf7f084/server/bin/remote-cli:/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin:/opt/jsc/bin:/usr/local/jsc/bin:/opt/parastation/bin:/p/software/default/bin:/opt/jsc/bin:/usr/local/jsc/bin:/opt/parastation/bin:/p/software/default/bin:/opt/jsc/bin:/usr/local/jsc/bin:/opt/parastation/bin:/p/software/default/bin
+++ export LAMMPS_PLUGIN_PATH=/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain-deploy/build
+++ LAMMPS_PLUGIN_PATH=/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain-deploy/build
+++ export JCN_PJRT_PATH=/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain-deploy/lib
+++ JCN_PJRT_PATH=/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain-deploy/lib
+++ export LD_LIBRARY_PATH=/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain-deploy/lib:/p/software/default/stages/2025/software/HDF5/1.14.5-GCCcore-13.3.0-serial/lib:/p/software/default/stages/2025/software/Szip/2.1.1-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/gettext/0.22.5-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/libiconv/1.17-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/expat/2.6.2-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/UCC/default-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/UCX/default-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/Clang/18.1.8-GCCcore-13.3.0/lib/x86_64-unknown-linux-gnu:/p/software/juwelsbooster/stages/2025/software/Clang/18.1.8-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/Z3/4.13.0-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/GMP/6.3.0-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/libarchive/3.7.4-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/cURL/8.7.1-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/SciPy-bundle/2024.05-gcccoreflexiblas-13.3.0-3.4.4/lib/python3.12/site-packages/numpy/core/lib:/p/software/default/stages/2025/software/Boost/1.86.0-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/ICU/75.1-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/zstd/1.5.6-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/lz4/1.9.4-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/FlexiBLAS/3.4.4-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/BLIS/1.0-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/ScaLAPACK/2.2.0-gpsmpi-2024a-fb/lib:/p/software/default/stages/2025/software/FFTW.MPI/3.3.10-gpsmpi-2024a/lib:/p/software/default/stages/2025/software/FFTW/3.3.10-GCC-13.3.0/lib:/p/software/default/stages/2025/software/imkl/2024.2.0/mkl/2024.2/lib/intel64:/p/software/default/stages/2025/software/imkl/2024.2.0/compiler/2024.2/lib:/p/software/default/stages/2025/software/OpenBLAS/0.3.27-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/NCCL/default-GCCcore-13.3.0-CUDA-12/lib:/p/software/default/stages/2025/software/cuDNN/9.5.0.50-CUDA-12/lib:/p/software/default/stages/2025/software/psmpi/5.10.0-1-GCC-13.3.0/lib:/p/software/default/stages/2025/software/PMIx/5.0.3-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/hwloc/2.10.0-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/libpciaccess/0.18.1-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/libevent/2.1.12-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/libxml2/2.12.7-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/pscom/5-default-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/numactl/2.0.18-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/CUDA/12/nvvm/lib64:/p/software/juwelsbooster/stages/2025/software/CUDA/12/extras/CUPTI/lib64:/p/software/juwelsbooster/stages/2025/software/CUDA/12/lib:/p/software/juwelsbooster/stages/2025/software/Python/3.12.3-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/OpenSSL/3/lib:/p/software/juwelsbooster/stages/2025/software/libffi/3.4.5-GCCcore-13.3.0/lib64:/p/software/juwelsbooster/stages/2025/software/XZ/5.4.5-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/SQLite/3.45.3-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/Tcl/8.6.14-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/libreadline/8.2-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/ncurses/6.5-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/bzip2/1.0.8-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/binutils/2.42-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/zlib/1.3.1-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/GCCcore/13.3.0/lib64
+++ LD_LIBRARY_PATH=/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain-deploy/lib:/p/software/default/stages/2025/software/HDF5/1.14.5-GCCcore-13.3.0-serial/lib:/p/software/default/stages/2025/software/Szip/2.1.1-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/gettext/0.22.5-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/libiconv/1.17-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/expat/2.6.2-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/UCC/default-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/UCX/default-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/Clang/18.1.8-GCCcore-13.3.0/lib/x86_64-unknown-linux-gnu:/p/software/juwelsbooster/stages/2025/software/Clang/18.1.8-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/Z3/4.13.0-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/GMP/6.3.0-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/libarchive/3.7.4-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/cURL/8.7.1-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/SciPy-bundle/2024.05-gcccoreflexiblas-13.3.0-3.4.4/lib/python3.12/site-packages/numpy/core/lib:/p/software/default/stages/2025/software/Boost/1.86.0-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/ICU/75.1-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/zstd/1.5.6-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/lz4/1.9.4-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/FlexiBLAS/3.4.4-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/BLIS/1.0-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/ScaLAPACK/2.2.0-gpsmpi-2024a-fb/lib:/p/software/default/stages/2025/software/FFTW.MPI/3.3.10-gpsmpi-2024a/lib:/p/software/default/stages/2025/software/FFTW/3.3.10-GCC-13.3.0/lib:/p/software/default/stages/2025/software/imkl/2024.2.0/mkl/2024.2/lib/intel64:/p/software/default/stages/2025/software/imkl/2024.2.0/compiler/2024.2/lib:/p/software/default/stages/2025/software/OpenBLAS/0.3.27-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/NCCL/default-GCCcore-13.3.0-CUDA-12/lib:/p/software/default/stages/2025/software/cuDNN/9.5.0.50-CUDA-12/lib:/p/software/default/stages/2025/software/psmpi/5.10.0-1-GCC-13.3.0/lib:/p/software/default/stages/2025/software/PMIx/5.0.3-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/hwloc/2.10.0-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/libpciaccess/0.18.1-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/libevent/2.1.12-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/libxml2/2.12.7-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/pscom/5-default-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/numactl/2.0.18-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/CUDA/12/nvvm/lib64:/p/software/juwelsbooster/stages/2025/software/CUDA/12/extras/CUPTI/lib64:/p/software/juwelsbooster/stages/2025/software/CUDA/12/lib:/p/software/juwelsbooster/stages/2025/software/Python/3.12.3-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/OpenSSL/3/lib:/p/software/juwelsbooster/stages/2025/software/libffi/3.4.5-GCCcore-13.3.0/lib64:/p/software/juwelsbooster/stages/2025/software/XZ/5.4.5-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/SQLite/3.45.3-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/Tcl/8.6.14-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/libreadline/8.2-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/ncurses/6.5-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/bzip2/1.0.8-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/binutils/2.42-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/zlib/1.3.1-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/GCCcore/13.3.0/lib64
+++ which gcc
+++ alias
+++ eval declare -f
++++ declare -f
+++ /usr/bin/which --tty-only --read-alias --read-functions --show-tilde --show-dot gcc
++ export CC=/p/software/juwelsbooster/stages/2025/software/GCCcore/13.3.0/bin/gcc
++ CC=/p/software/juwelsbooster/stages/2025/software/GCCcore/13.3.0/bin/gcc
+++ which g++
+++ alias
+++ eval declare -f
++++ declare -f
+++ /usr/bin/which --tty-only --read-alias --read-functions --show-tilde --show-dot g++
++ export CXX=/p/software/juwelsbooster/stages/2025/software/GCCcore/13.3.0/bin/g++
++ CXX=/p/software/juwelsbooster/stages/2025/software/GCCcore/13.3.0/bin/g++
+++ which gcc
+++ alias
+++ eval declare -f
++++ declare -f
+++ /usr/bin/which --tty-only --read-alias --read-functions --show-tilde --show-dot gcc
++ export CLANG_CUDA_COMPILER_PATH=/p/software/juwelsbooster/stages/2025/software/GCCcore/13.3.0/bin/gcc
++ CLANG_CUDA_COMPILER_PATH=/p/software/juwelsbooster/stages/2025/software/GCCcore/13.3.0/bin/gcc
+++ python -c 'import os; from jax_plugins import xla_cuda12; print(os.path.dirname(xla_cuda12.__file__))'
++ CUDA_ROOT=/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax_plugins/xla_cuda12
+++ python -c 'import site; print(site.getsitepackages()[0])'
+++ python -c 'import site; print(site.getsitepackages()[0])'
+++ python -c 'import site; print(site.getsitepackages()[0])'
++ export LD_LIBRARY_PATH=/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax_plugins/xla_cuda12:/p/project1/cameo/schmidt36/clean_booster_env/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:/p/project1/cameo/schmidt36/clean_booster_env/lib/python3.12/site-packages/nvidia/cublas/lib:/p/project1/cameo/schmidt36/clean_booster_env/lib/python3.12/site-packages/nvidia/cusolver/lib:/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain-deploy/lib:/p/software/default/stages/2025/software/HDF5/1.14.5-GCCcore-13.3.0-serial/lib:/p/software/default/stages/2025/software/Szip/2.1.1-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/gettext/0.22.5-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/libiconv/1.17-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/expat/2.6.2-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/UCC/default-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/UCX/default-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/Clang/18.1.8-GCCcore-13.3.0/lib/x86_64-unknown-linux-gnu:/p/software/juwelsbooster/stages/2025/software/Clang/18.1.8-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/Z3/4.13.0-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/GMP/6.3.0-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/libarchive/3.7.4-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/cURL/8.7.1-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/SciPy-bundle/2024.05-gcccoreflexiblas-13.3.0-3.4.4/lib/python3.12/site-packages/numpy/core/lib:/p/software/default/stages/2025/software/Boost/1.86.0-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/ICU/75.1-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/zstd/1.5.6-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/lz4/1.9.4-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/FlexiBLAS/3.4.4-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/BLIS/1.0-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/ScaLAPACK/2.2.0-gpsmpi-2024a-fb/lib:/p/software/default/stages/2025/software/FFTW.MPI/3.3.10-gpsmpi-2024a/lib:/p/software/default/stages/2025/software/FFTW/3.3.10-GCC-13.3.0/lib:/p/software/default/stages/2025/software/imkl/2024.2.0/mkl/2024.2/lib/intel64:/p/software/default/stages/2025/software/imkl/2024.2.0/compiler/2024.2/lib:/p/software/default/stages/2025/software/OpenBLAS/0.3.27-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/NCCL/default-GCCcore-13.3.0-CUDA-12/lib:/p/software/default/stages/2025/software/cuDNN/9.5.0.50-CUDA-12/lib:/p/software/default/stages/2025/software/psmpi/5.10.0-1-GCC-13.3.0/lib:/p/software/default/stages/2025/software/PMIx/5.0.3-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/hwloc/2.10.0-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/libpciaccess/0.18.1-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/libevent/2.1.12-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/libxml2/2.12.7-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/pscom/5-default-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/numactl/2.0.18-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/CUDA/12/nvvm/lib64:/p/software/juwelsbooster/stages/2025/software/CUDA/12/extras/CUPTI/lib64:/p/software/juwelsbooster/stages/2025/software/CUDA/12/lib:/p/software/juwelsbooster/stages/2025/software/Python/3.12.3-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/OpenSSL/3/lib:/p/software/juwelsbooster/stages/2025/software/libffi/3.4.5-GCCcore-13.3.0/lib64:/p/software/juwelsbooster/stages/2025/software/XZ/5.4.5-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/SQLite/3.45.3-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/Tcl/8.6.14-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/libreadline/8.2-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/ncurses/6.5-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/bzip2/1.0.8-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/binutils/2.42-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/zlib/1.3.1-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/GCCcore/13.3.0/lib64
++ LD_LIBRARY_PATH=/p/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax_plugins/xla_cuda12:/p/project1/cameo/schmidt36/clean_booster_env/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:/p/project1/cameo/schmidt36/clean_booster_env/lib/python3.12/site-packages/nvidia/cublas/lib:/p/project1/cameo/schmidt36/clean_booster_env/lib/python3.12/site-packages/nvidia/cusolver/lib:/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain-deploy/lib:/p/software/default/stages/2025/software/HDF5/1.14.5-GCCcore-13.3.0-serial/lib:/p/software/default/stages/2025/software/Szip/2.1.1-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/gettext/0.22.5-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/libiconv/1.17-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/expat/2.6.2-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/UCC/default-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/UCX/default-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/Clang/18.1.8-GCCcore-13.3.0/lib/x86_64-unknown-linux-gnu:/p/software/juwelsbooster/stages/2025/software/Clang/18.1.8-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/Z3/4.13.0-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/GMP/6.3.0-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/libarchive/3.7.4-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/cURL/8.7.1-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/SciPy-bundle/2024.05-gcccoreflexiblas-13.3.0-3.4.4/lib/python3.12/site-packages/numpy/core/lib:/p/software/default/stages/2025/software/Boost/1.86.0-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/ICU/75.1-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/zstd/1.5.6-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/lz4/1.9.4-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/FlexiBLAS/3.4.4-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/BLIS/1.0-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/ScaLAPACK/2.2.0-gpsmpi-2024a-fb/lib:/p/software/default/stages/2025/software/FFTW.MPI/3.3.10-gpsmpi-2024a/lib:/p/software/default/stages/2025/software/FFTW/3.3.10-GCC-13.3.0/lib:/p/software/default/stages/2025/software/imkl/2024.2.0/mkl/2024.2/lib/intel64:/p/software/default/stages/2025/software/imkl/2024.2.0/compiler/2024.2/lib:/p/software/default/stages/2025/software/OpenBLAS/0.3.27-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/NCCL/default-GCCcore-13.3.0-CUDA-12/lib:/p/software/default/stages/2025/software/cuDNN/9.5.0.50-CUDA-12/lib:/p/software/default/stages/2025/software/psmpi/5.10.0-1-GCC-13.3.0/lib:/p/software/default/stages/2025/software/PMIx/5.0.3-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/hwloc/2.10.0-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/libpciaccess/0.18.1-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/libevent/2.1.12-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/libxml2/2.12.7-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/pscom/5-default-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/numactl/2.0.18-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/CUDA/12/nvvm/lib64:/p/software/juwelsbooster/stages/2025/software/CUDA/12/extras/CUPTI/lib64:/p/software/juwelsbooster/stages/2025/software/CUDA/12/lib:/p/software/juwelsbooster/stages/2025/software/Python/3.12.3-GCCcore-13.3.0/lib:/p/software/default/stages/2025/software/OpenSSL/3/lib:/p/software/juwelsbooster/stages/2025/software/libffi/3.4.5-GCCcore-13.3.0/lib64:/p/software/juwelsbooster/stages/2025/software/XZ/5.4.5-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/SQLite/3.45.3-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/Tcl/8.6.14-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/libreadline/8.2-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/ncurses/6.5-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/bzip2/1.0.8-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/binutils/2.42-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/zlib/1.3.1-GCCcore-13.3.0/lib:/p/software/juwelsbooster/stages/2025/software/GCCcore/13.3.0/lib64
++ export CUDA_HOME=/p/software/juwelsbooster/stages/2025/software/CUDA/12
++ CUDA_HOME=/p/software/juwelsbooster/stages/2025/software/CUDA/12
++ export 'XLA_FLAGS=--xla_gpu_cuda_data_dir=/p/software/juwelsbooster/stages/2025/software/CUDA/12 --xla_gpu_autotune_level=0'
++ XLA_FLAGS='--xla_gpu_cuda_data_dir=/p/software/juwelsbooster/stages/2025/software/CUDA/12 --xla_gpu_autotune_level=0'
++ export XLA_PYTHON_CLIENT_PREALLOCATE=false
++ XLA_PYTHON_CLIENT_PREALLOCATE=false
++ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
++ XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
++ export CUDA_VISIBLE_DEVICES=0
++ CUDA_VISIBLE_DEVICES=0
++ echo ============================================================
++ echo 'Module Environment'
++ echo ============================================================
++ module list
++ '[' -z '' ']'
++ case "$-" in
++ __lmod_sh_dbg=x
++ '[' -n x ']'
++ set +x
+Shell debugging temporarily silenced: export LMOD_SH_DBG_ON=1 for Lmod's output
+
+Currently Loaded Modules:
+  1) Stages/2025             (S)  34) BLIS/.1.0                  (H)
+  2) GCCcore/.13.3.0         (H)  35) FlexiBLAS/.3.4.4           (H)
+  3) zlib/.1.3.1             (H)  36) cffi/.1.16.0               (H)
+  4) binutils/.2.42          (H)  37) cryptography/42.0.8
+  5) make/4.4.1                   38) virtualenv/20.26.2
+  6) StdEnv/2025                  39) Python-bundle-PyPI/2024.06
+  7) GCC/13.3.0                   40) gzip/.1.13                 (H)
+  8) bzip2/.1.0.8            (H)  41) lz4/.1.9.4                 (H)
+  9) ncurses/.6.5            (H)  42) zstd/.1.5.6                (H)
+ 10) libreadline/.8.2        (H)  43) ICU/.75.1                  (H)
+ 11) Tcl/8.6.14                   44) Boost/1.86.0
+ 12) SQLite/.3.45.3          (H)  45) pybind11/.2.12.0           (H)
+ 13) XZ/.5.4.5               (H)  46) SciPy-bundle/2024.05
+ 14) libffi/.3.4.5           (H)  47) flatbuffers-python/24.3.25
+ 15) OpenSSL/3                    48) jax/0.4.34-CUDA-12         (g)
+ 16) Python/3.12.3                49) cURL/8.7.1
+ 17) CUDA/12                 (g)  50) libarchive/3.7.4
+ 18) numactl/2.0.18               51) CMake/3.30.3
+ 19) pscom/.5-default        (H)  52) Ninja/1.12.1
+ 20) libxml2/.2.12.7         (H)  53) GMP/6.3.0
+ 21) libevent/.2.1.12        (H)  54) Z3/4.13.0
+ 22) libpciaccess/.0.18.1    (H)  55) Clang/18.1.8
+ 23) hwloc/2.10.0                 56) UCX-settings/RC-CUDA
+ 24) PMIx/5.0.3                   57) UCX/default                (g)
+ 25) MPI-settings/CUDA            58) UCC/default                (g)
+ 26) ParaStationMPI/5.10.0-1 (g)  59) expat/.2.6.2               (H)
+ 27) cuDNN/9.5.0.50-CUDA-12  (g)  60) libiconv/.1.17             (H)
+ 28) NCCL/default-CUDA-12    (g)  61) gettext/.0.22.5            (H)
+ 29) OpenBLAS/.0.3.27        (H)  62) Perl/5.38.2
+ 30) imkl/2024.2.0                63) git/2.45.1
+ 31) FFTW/3.3.10                  64) Szip/.2.1.1                (H)
+ 32) FFTW.MPI/3.3.10              65) HDF5/1.14.5-serial
+ 33) ScaLAPACK/2.2.0-fb           66) tmux/3.4
+
+  Where:
+   H:  Hidden Module
+   S:  Module is Sticky, requires --force to unload or purge
+   g:  Built with GPU support
+
+ 
+
+Shell debugging restarted
++ unset __lmod_sh_dbg
++ return 0
++ echo ''
++ echo ============================================================
++ echo 'SLURM Job Configuration'
++ echo ============================================================
++ echo 'Config file:    config_timing_test.yaml'
++ echo 'Job ID:         13198916'
++ echo 'Nodes:          5'
++ echo 'Tasks/node:     1 (1 process per node)'
++ echo 'GPUs per node:  4 (pmap distributes across local GPUs)'
++ echo 'Total GPUs:     20'
++ echo 'CUDA_HOME:      /p/software/juwelsbooster/stages/2025/software/CUDA/12'
++ echo 'CUDA_VISIBLE:   0'
++ echo ============================================================
++ echo 'Verifying GPU allocation per node...'
++ srun --ntasks-per-node=1 bash -c 'echo "Host=$(hostname) CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"; nvidia-smi -L'
++ [[ 5 -gt 1 ]]
++ echo ''
++ echo ============================================================
++ echo 'Multi-node JAX Distributed Verification'
++ echo ============================================================
++ srun --ntasks-per-node=1 bash -c 'echo "Node=$(hostname) SLURM_PROCID=$SLURM_PROCID SLURM_NTASKS=$SLURM_NTASKS"'
++ echo 'JAX will auto-detect coordinator from SLURM environment'
++ echo ============================================================
++ [[ -n /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base ]]
++ CLEAN_CODE_BASE_DIR=/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base
++ SCRIPT_DIR=/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts
++ TRAIN_SCRIPT=/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/train.py
++ echo 'Submit directory: /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base'
++ echo 'Training script:  /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/train.py'
++ [[ ! -f /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/train.py ]]
++ LOGFILE=train_allegro_13198916.log
++ echo ============================================================
++ echo 'Starting training with 5 node(s), 4 GPUs each...'
++ echo 'Log file: train_allegro_13198916.log'
++ [[ -n '' ]]
++ echo ============================================================
++ srun --ntasks-per-node=1 python3 /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/scripts/train.py config_timing_test.yaml 13198916
++ tee train_allegro_13198916.log
