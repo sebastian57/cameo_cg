@@ -8,6 +8,8 @@ Need to place the cloned repo inside chemtrain-deploy/external/chemtrain
 	chemtrain in the above path is the cloned chemtrain repo 
 	general workflow is thus cloning chemtrain-deploy and cloning chemtrain inside a subdirectory of chemtrain-deploy
 
+Also need to create data_prep/datasets directory with the h5 or npz dataset files
+
 ## Integrating code with LAMMPS
 Need to build LAMMPS with at least the cmake command from env_setup 
 
