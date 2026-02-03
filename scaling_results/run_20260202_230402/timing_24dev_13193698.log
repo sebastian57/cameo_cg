@@ -1,9 +1,0 @@
-/p/project1/cameo/schmidt36/clean_booster_env/bin/python3: can't open file '/var/spool/parastation/jobs/train_scaling_fixed.py': [Errno 2] No such file or directory
-/p/project1/cameo/schmidt36/clean_booster_env/bin/python3: can't open file '/var/spool/parastation/jobs/train_scaling_fixed.py': [Errno 2] No such file or directory
-srun: error: jwb0344: task 1: Exited with exit code 2
-srun: error: jwb1132: task 5: Terminated
-srun: error: jwb1082: task 4: Terminated
-srun: error: jwb0380: task 2: Terminated
-srun: error: jwb0777: task 3: Terminated
-srun: error: jwb0221: task 0: Exited with exit code 2
-srun: Force Terminated StepId=13193698.0

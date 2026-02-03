@@ -1,5 +1,0 @@
-num_devices,num_nodes,devices_per_node,epoch1_time,epoch2_time,epoch3_time,total_time,throughput_samples_per_sec
-9,3,mixed,,,,54.101768310,124.76
-10,3,mixed,,,,34.090832134,198.00
-11,3,mixed,,,,16.618410643,406.17
-12,3,4,,,,181.737791302,37.14
