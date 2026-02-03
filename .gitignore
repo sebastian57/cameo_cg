@@ -16,6 +16,7 @@ scaling_results/
 
 # --- large / generated datasets ---
 data_prep/datasets/
+data_prep/plots
 
 # --- temporary / old scripts --- 
 scripts/analyze_scaling.py
