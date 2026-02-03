@@ -1,0 +1,31 @@
+units           real
+atom_style      atomic
+dimension       3
+boundary        s s s
+
+neighbor        2.0 bin
+neigh_modify    every 1 delay 0 check yes once no
+
+read_data       config_2234.data
+
+mass * 12.01
+
+# Syntax: pair_style chemtrain_deploy <backend> <memory_fraction>
+#         pair_coeff * * <model_path> <ghost_buffer_multiplier> <edge_buffer_multiplier>
+
+comm_modify cutoff 14.0
+pair_style chemtrain_deploy cuda12 0.9
+pair_coeff      * * exported_models/allegro_cg_protein_4zohB01_pretrain_full.mlir 1.2 1.1
+
+thermo_style    custom step temp pe ke etotal press vol density bonds
+thermo          10
+
+velocity        all create 320.0 4928459 rot no dist gaussian
+
+fix             1 all nvt temp 320.0 320.0 200.0
+timestep        1.0
+
+dump            traj all custom 100 dump.out id type x y z fx fy fz 
+dump_modify     traj sort id
+
+run             10000
