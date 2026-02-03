@@ -58,31 +58,42 @@ echo ""
 # All (nodes, gpus_per_node) configurations — 12 jobs total
 # Command-line --nodes overrides #SBATCH --nodes=1 in run_training.sh
 # --export=ALL,CUDA_VISIBLE_DEVICES=... overrides the default in the script
+
+# declare -a CONFIGS=(
+#     "1 1"    # 1 device
+#     "2 1"    # 2 devices
+#     "3 1"    # 3 devices
+#     "4 1"    # 4 devices
+#     "3 2"    # 6 devices
+#     "4 2"    # 8 devices
+#     "5 2"    # 10 devices
+#     "6 2"    # 12 devices
+#     "4 4"    # 16 devices
+#     "6 3"    # 18 devices
+#     "5 4"    # 20 devices
+#     "6 4"    # 24 devices
+# )
+
 declare -a CONFIGS=(
-    "1 1"    # 1 device
-    "2 1"    # 2 devices
-    "3 1"    # 3 devices
-    "4 1"    # 4 devices
-    "3 2"    # 6 devices
-    "4 2"    # 8 devices
-    "5 2"    # 10 devices
-    "6 2"    # 12 devices
-    "4 4"    # 16 devices
-    "6 3"    # 18 devices
-    "5 4"    # 20 devices
-    "6 4"    # 24 devices
+    "2 2"    # 6 devices
 )
 
 declare -a JOB_IDS
+
+# Exported once: no commas in value, safe for --export=ALL
+export JAX_COORDINATOR_HEARTBEAT_TIMEOUT_SECS=120
 
 for config in "${CONFIGS[@]}"; do
     read -r NODES GPUS <<< "$config"
     DEVICES=$((NODES * GPUS))
 
     # Build CUDA_VISIBLE_DEVICES: "0" / "0,1" / "0,1,2" / "0,1,2,3"
-    CUDA_VIS=$(seq -s, 0 $((GPUS - 1)))
+    # NOTE: cannot pass via --export=ALL,CUDA_VISIBLE_DEVICES=0,1,2 because
+    # SLURM parses the commas as field separators, truncating to just "0".
+    # Export in the shell instead; --export=ALL propagates it.
+    export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((GPUS - 1)))
 
-    echo "Submitting: $NODES nodes x $GPUS GPUs = $DEVICES devices  (CUDA_VISIBLE_DEVICES=$CUDA_VIS)..."
+    echo "Submitting: $NODES nodes x $GPUS GPUs = $DEVICES devices  (CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES)..."
 
     JOB_ID=$(sbatch \
         --nodes=$NODES \
@@ -90,7 +101,7 @@ for config in "${CONFIGS[@]}"; do
         --output="${LOG_DIR}/job_${DEVICES}dev_%j.out" \
         --error="${LOG_DIR}/job_${DEVICES}dev_%j.err" \
         --exclusive \
-        --export=ALL,CUDA_VISIBLE_DEVICES=$CUDA_VIS,JAX_COORDINATOR_HEARTBEAT_TIMEOUT_SECS=120 \
+        --export=ALL \
         "$WORKER_SCRIPT" "$CONFIG_FILE" \
         | awk '{print $4}')
 
