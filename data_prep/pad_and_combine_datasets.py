@@ -1,16 +1,18 @@
+import argparse
+import logging
+import sys
 import numpy as np
 from pathlib import Path
 
-def load_npz(path):
-    data = np.load(path, allow_pickle=True)
-    return {
-        "R": data["R"].astype(np.float32),          # (T, N, 3)
-        "F": data["F"].astype(np.float32),          # (T, N, 3)
-        "Z": data["Z"].astype(np.int32),            # (N,)
-        "resid": data["resid"].astype(np.int32),    # (N,)
-        "resname": data["resname"],                 # (N,) object/bytes/str
-    }
-    
+# Logger — matches clean_code_base [Name] format from utils/logging.py
+logger = logging.getLogger("PadCombine")
+logger.propagate = False
+_handler = logging.StreamHandler(sys.stdout)
+_handler.setFormatter(logging.Formatter('[%(name)s] %(message)s'))
+logger.addHandler(_handler)
+logger.setLevel(logging.INFO)
+
+
 def _normalize_resname_array(resname):
     """
     Ensure resname is a 1D numpy array of python strings.
@@ -67,13 +69,17 @@ def combine_and_pad_npz(
     id_to_aa = sorted(all_resnames)
     aa_to_id = {aa: i for i, aa in enumerate(id_to_aa)}
 
-    print(aa_to_id)
+    logger.info(f"Global AA mapping: {aa_to_id}")
 
     # Determine N_max and total frames
     Ns = [d["R"].shape[1] for d in datasets]
     Ts = [d["R"].shape[0] for d in datasets]
     N_max = int(max(Ns))
     T_total = int(sum(Ts))
+
+    logger.info(f"Combining {len(paths)} datasets: T_total={T_total}, N_max={N_max}")
+    for i, (p, N, T) in enumerate(zip(paths, Ns, Ts)):
+        logger.debug(f"  [{i}] {Path(p).name}: {T} frames, {N} atoms")
 
     # Allocate merged arrays
     R_all = np.zeros((T_total, N_max, 3), dtype=np.float32)
@@ -116,14 +122,6 @@ def combine_and_pad_npz(
 
         cursor += T
 
-    print(species_all)
-
-    for mask in mask_all:
-        mask_current = jnp.asarray(dataset["mask"][mask]) 
-        park = 1000.0
-        park_vec = jnp.array([park, park, park], dtype=R0.dtype)
-        R_all = mask_current[:, None] * R_all + (1.0 - mask_current[:, None]) * park_vec[None, :]
-
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -144,19 +142,26 @@ def combine_and_pad_npz(
         N_max=np.array([N_max], dtype=np.int32),
     )
 
-    print(f"[combine_and_pad_npz] Saved: {out_path}")
-    print(f"  proteins={len(paths)}, T_total={T_total}, N_max={N_max}, n_species={len(id_to_aa)}")
+    logger.info(f"Saved combined dataset: {out_path}")
+    logger.info(f"  proteins={len(paths)}, T_total={T_total}, N_max={N_max}, n_species={len(id_to_aa)}")
     return str(out_path)
 
 
 
 def main():
-    paths =     paths = ["datasets/4zohB01_320K_kcalmol_1bead_notnorm_aggforce.npz",
-    "datasets/2gy5A01_320K_kcalmol_1bead_notnorm_aggforce.npz",
-    "datasets/4q5wA02_320K_kcalmol_1bead_notnorm_aggforce.npz",
-    "datasets/5k39B02_320K_kcalmol_1bead_notnorm_aggforce.npz"]
-    out_path = "datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz"
-    combine_and_pad_npz(paths,out_path)
+    parser = argparse.ArgumentParser(description="Combine multiple CG NPZ datasets with padding.")
+    parser.add_argument("--paths", action="append", required=True,
+                        help="Input NPZ file path. Repeat for each dataset "
+                             "(e.g. --paths a.npz --paths b.npz).")
+    parser.add_argument("--out", required=True, help="Output combined NPZ file path.")
+    parser.add_argument("--verbose", action="store_true", default=False,
+                        help="Enable DEBUG-level logging.")
+    args = parser.parse_args()
+
+    if args.verbose:
+        logger.setLevel(logging.DEBUG)
+
+    combine_and_pad_npz(args.paths, args.out)
 
 if __name__ == "__main__":
     main()
