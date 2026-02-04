@@ -112,7 +112,7 @@ def _initialize_jax_distributed():
             num_processes=num_processes,
             process_id=process_id,
             local_device_ids=local_ids,
-            initialization_timeout=300,
+            initialization_timeout=600,
         )
 
         rank = jax.process_index()

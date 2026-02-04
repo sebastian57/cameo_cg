@@ -77,7 +77,8 @@ echo ""
 
 
 declare -a CONFIGS=(
-   "5 4"
+    "3 4"    # 12 devices
+    "6 4"    # 24 devices
 )
 
 declare -a JOB_IDS
