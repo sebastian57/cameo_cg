@@ -13,6 +13,7 @@ force_eval_test/
 checkpoints_allegro/
 checkpoints_scaling/
 scaling_results/
+rand_plots/
 
 # --- large / generated datasets ---
 data_prep/datasets/
