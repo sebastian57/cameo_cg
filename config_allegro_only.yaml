@@ -10,8 +10,9 @@ model_id: "allegro_only"
 
 data:
   #path: "data_prep/datasets/4zohB01_320K_kcalmol_1bead_notnorm_aggforce.npz"
-  path: "data_prep/datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz"
-  max_frames: 10000  # Maximum frames to use from dataset (null = use all)
+  #path: "data_prep/datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz"
+  path: "data_prep/datasets/test_dir"
+  max_frames: 10  # Maximum frames to use from dataset (null = use all)
 
 preprocessing:
   buffer_multiplier: 2.0  # Multiplier for box buffer (box = max_range + 2 * buffer_multiplier * cutoff)
