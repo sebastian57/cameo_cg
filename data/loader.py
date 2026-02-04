@@ -14,6 +14,7 @@ import jax
 import jax.numpy as jnp
 from pathlib import Path
 from typing import Dict, Any, Tuple, Optional
+from glob import glob
 
 from config.types import PathLike, as_path
 
@@ -44,6 +45,36 @@ def load_npz(path: PathLike) -> Dict[str, Any]:
     path = as_path(path)
     if not path.exists():
         raise FileNotFoundError(f"NPZ file not found: {path}")
+
+    if path.is_dir():
+        print("It's a directory")
+
+        files = sorted(path.glob("*.npz"))
+        if not files:
+            raise FileNotFoundError(f"No .npz files found in directory: {path}")
+
+        datasets = [np.load(f, allow_pickle=True) for f in files]
+
+        def cat(key):
+            return np.concatenate([d[key] for d in datasets], axis=0)
+
+        result = {
+            "R":       cat("R").astype(np.float32),
+            "F":       cat("F").astype(np.float32),
+            "mask":    cat("mask").astype(np.float32),
+            "species": cat("species").astype(np.int32),
+            "Z":       datasets[0]["Z"].astype(np.int32) if "Z" in datasets[0] else None,
+            "resid":   datasets[0]["resid"].astype(np.int32) if "resid" in datasets[0] else None,
+            "resname": datasets[0]["resname"] if "resname" in datasets[0] else None,
+            "N_max":   int(datasets[0]["N_max"][0]) if "N_max" in datasets[0] else datasets[0]["R"].shape[1],
+            "aa_to_id": datasets[0]["aa_to_id"].item() if "aa_to_id" in datasets[0] else None,
+        }
+
+        print(f"Loaded {len(files)} NPZ files, total frames: {result['R'].shape[0]}")
+        return result
+
+    elif path.is_file():
+        print("It's a file")
 
     data = np.load(path, allow_pickle=True)
 
