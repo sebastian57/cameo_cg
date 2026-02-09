@@ -1,0 +1,135 @@
+# Chemtrain MACE Configuration Template
+# Same structure as config_template.yaml but with MACE as the ML backbone
+
+seed: 193749
+debug_priors: false
+
+model_context: "mace_cg_protein_4zohB01"
+protein_name: "4zohB01"
+model_id: "mace_default"
+
+data:
+  path: "data_prep/datasets/4zohB01_320K_kcalmol_1bead_notnorm_aggforce.npz"
+  max_frames: 2500
+
+preprocessing:
+  buffer_multiplier: 2.0
+  park_multiplier: 0.95
+
+model:
+  ml_model: "mace"  # Options: "allegro", "mace"
+  use_priors: true
+
+  mace_size: "default"  # Options: "default", "large"
+
+  cutoff: 10.0
+  dr_threshold: 1.0
+
+  # MACE model configurations
+  # Keys map directly to mace_neighborlist_pp kwargs (via mace_default_kwargs)
+  mace:  # Default size
+    num_interactions: 2         # Number of message-passing layers
+    hidden_irreps: "128x0e + 128x1o"  # Hidden representation irreps
+    readout_irreps: "16x0e"    # MLP readout hidden irreps
+    max_ell: 2                 # Max spherical harmonic degree
+    n_radial_basis: 8          # Radial basis functions
+    envelope_p: 6              # Envelope polynomial order
+    correlation: 3             # Correlation order (body order)
+    embed_dim: 32              # Species embedding dimension
+    mlp_n_hidden: 64           # MLP hidden width
+    mlp_n_layers: 2            # MLP depth
+    avg_num_neighbors: 21      # Average neighbors (estimate for CG proteins)
+
+  mace_large:  # Larger model for complex systems
+    num_interactions: 3
+    hidden_irreps: "256x0e + 256x1o"
+    readout_irreps: "32x0e"
+    max_ell: 3
+    n_radial_basis: 12
+    envelope_p: 6
+    correlation: 3
+    embed_dim: 64
+    mlp_n_hidden: 128
+    mlp_n_layers: 3
+    avg_num_neighbors: 21
+
+  # Prior energy parameters (same as Allegro — priors are model-independent)
+  priors:
+    weights:
+      bond: 0.5
+      angle: 0.25
+      dihedral: 0.25
+      repulsive: 1.0
+
+    r0: 3.8375435
+    kr: 154.50629422490843
+
+    a: [-0.02086511, -0.36341857, -0.50767196, 0.09906029, 0.8319552, -0.00770968, -0.13320648, -1.14116021, 0.18145372, -0.55828783]
+    b: [0.67521775, 0.14797897, -0.12157499, -0.8289584, 0.17162394, 0.48646108, 0.56000923, -0.13905056, -0.896762, -1.20144583]
+
+    theta0: 1.8335507
+    k_theta: 8.271271714604836
+
+    epsilon: 1.0
+    sigma: 3.0
+
+    k_dih: [0.47037187851535034, 0.9495107825945361]
+    gamma_dih: [1.3759673785180062, 1.6211158177819938]
+
+optimizer:
+  grad_clip: 2.0
+
+  adabelief:
+    lr: 5.0e-2
+    peak_lr: 0.01
+    end_lr: 5.0e-3
+    warmup_epochs: 15
+    decay_steps: 2500
+    beta1: 0.95
+    beta2: 0.999
+    eps: 1.0e-8
+    grad_clip: 5.0
+    weight_decay: 2.0e-5
+
+  yogi:
+    lr: 1.0e-3
+    peak_lr: 1.0e-3
+    end_lr: 5.0e-5
+    warmup_epochs: 5
+    decay_steps: 50
+    beta1: 0.9
+    beta2: 0.999
+    grad_clip: 4.0
+    eps: 1.0e-6
+    weight_decay: 5.0e-4
+
+ensemble:
+  enabled: false
+  n_models: 5
+  base_seed: 42
+  save_all_models: false
+
+training:
+  pretrain_prior: false
+  pretrain_prior_min_steps: 10
+  pretrain_prior_max_steps: 200
+  pretrain_prior_tol_grad: 1.0e-6
+
+  stage1_optimizer: "adabelief"
+  stage2_optimizer: "yogi"
+
+  epochs_adabelief: 30
+  epochs_yogi: 0
+
+  val_fraction: 0.1
+  batch_per_device: 16
+  batch_cache: 10
+
+  gammas:
+    F: 1.0
+    U: 0.0
+
+  checkpoint_freq: 10
+  checkpoint_path: "./checkpoints_mace"
+
+  export_path: "./exported_models"
