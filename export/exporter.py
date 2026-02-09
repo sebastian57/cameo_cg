@@ -1,7 +1,8 @@
 """
 MLIR Model Export for LAMMPS Integration
 
-Exports trained Allegro models to MLIR format for use with chemtrain-deploy and LAMMPS.
+Exports trained ML models (Allegro, MACE, or PaiNN) to MLIR format for use
+with chemtrain-deploy and LAMMPS.
 
 Extracted from:
 - model_exporters.py (Allegro-only, MACE and PaiNN removed)
@@ -211,7 +212,7 @@ class AllegroExporter(exporter.Exporter):
             >>> exporter.export_to_file("model.mlir")
         """
         # Extract components from CombinedModel
-        allegro_model = model.allegro
+        ml_model = model.ml_model
         topology = model.topology
 
         # Get topology arrays
@@ -241,9 +242,9 @@ class AllegroExporter(exporter.Exporter):
 
         return cls(
             apply_fn=apply_fn,
-            apply_model=allegro_model.apply_allegro,
-            nneigh_fn=allegro_model.nneigh_fn,
-            displacement=allegro_model.displacement,
+            apply_model=ml_model.model_apply_fn,
+            nneigh_fn=ml_model.nneigh_fn,
+            displacement=ml_model.displacement,
             box=box,
             species=species,
             bonds=bonds,
@@ -252,7 +253,7 @@ class AllegroExporter(exporter.Exporter):
             dihedrals=dihedrals,
             prior_params=prior_params,
             params=params,
-            r_cutoff=allegro_model.cutoff
+            r_cutoff=ml_model.cutoff
         )
 
     def __repr__(self) -> str:
