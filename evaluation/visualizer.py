@@ -87,8 +87,8 @@ class LossPlotter:
                 if m_epoch:
                     epoch = int(m_epoch.group(1))
 
-                # Match training loss
-                m_train = re.search(r"Average train loss:\s*([0-9.eE+-]+)", line)
+                # Match training loss (also matches nan/inf)
+                m_train = re.search(r"Average train loss:\s*([0-9.eE+-]+|nan|inf|-inf)", line, re.IGNORECASE)
                 if m_train and epoch is not None:
                     train_loss = float(m_train.group(1))
 
@@ -101,21 +101,29 @@ class LossPlotter:
                         pending_train_loss = train_loss
 
                 # Match validation loss - only record if we recorded the corresponding train loss
-                m_val = re.search(r"Average val loss:\s*([0-9.eE+-]+)", line)
+                m_val = re.search(r"Average val loss:\s*([0-9.eE+-]+|nan|inf|-inf)", line, re.IGNORECASE)
                 if m_val and pending_train_loss is not None:
                     self.val_losses.append(float(m_val.group(1)))
                     pending_train_loss = None  # Reset to avoid double-counting
 
+        # Safety: pad val_losses with NaN if shorter than train_losses
+        # (e.g. if training was interrupted mid-epoch before val was logged)
+        while len(self.val_losses) < len(self.train_losses):
+            self.val_losses.append(float('nan'))
+
         eval_logger.info(f"Parsed {len(self.epochs)} unique epochs from {self.log_file.name}")
         return self.epochs, self.train_losses, self.val_losses
 
-    def plot(self, output_path: PathLike, title: Optional[str] = None):
+    def plot(self, output_path: PathLike, title: Optional[str] = None,
+             epoch_range: Optional[Tuple[Optional[int], Optional[int]]] = None):
         """
         Create and save loss curve plot.
 
         Args:
             output_path: Path to save plot
             title: Custom title (optional)
+            epoch_range: Optional (lower, upper) to slice epochs, e.g. (5, 50)
+                         uses Python slicing: arrays[lower:upper]
         """
         if not self.epochs:
             eval_logger.warning("No data to plot. Run parse_log() first.")
@@ -129,10 +137,23 @@ class LossPlotter:
         # Use continuous epoch numbering (stages may restart from 0)
         # This ensures stage 2 continues from where stage 1 ended
         continuous_epochs = np.arange(len(self.train_losses))
+        train_arr = np.array(self.train_losses)
+        val_arr = np.array(self.val_losses)
 
-        # Plot losses with continuous x-axis
-        ax.plot(continuous_epochs, self.train_losses, label="Train", linewidth=2)
-        ax.plot(continuous_epochs, self.val_losses, label="Validation", linewidth=2)
+        # Apply epoch range slicing if specified
+        if epoch_range is not None:
+            lo, hi = epoch_range
+            continuous_epochs = continuous_epochs[lo:hi]
+            train_arr = train_arr[lo:hi]
+            val_arr = val_arr[lo:hi]
+
+        # Filter out NaN and extreme values so they don't distort the plot
+        train_valid = ~np.isnan(train_arr) & (np.abs(train_arr) < 1e10)
+        val_valid = ~np.isnan(val_arr) & (np.abs(val_arr) < 1e10)
+
+        # Plot losses with continuous x-axis (NaN points excluded)
+        ax.plot(continuous_epochs[train_valid], train_arr[train_valid], label="Train", linewidth=2)
+        ax.plot(continuous_epochs[val_valid], val_arr[val_valid], label="Validation", linewidth=2)
 
         # Add stage separator if config available
         if self.config:
@@ -425,7 +446,8 @@ class ForceAnalyzer:
 # Standalone CLI for plotting from log files
 # =============================================================================
 
-def plot_from_log(log_file: str, config_file: str = None, output: str = None):
+def plot_from_log(log_file: str, config_file: str = None, output: str = None,
+                  epoch_range: Optional[Tuple[Optional[int], Optional[int]]] = None):
     """
     Create loss plot from a training log file.
 
@@ -433,6 +455,7 @@ def plot_from_log(log_file: str, config_file: str = None, output: str = None):
         log_file: Path to training log file
         config_file: Path to config YAML (optional, for annotations)
         output: Output path for plot (optional, defaults to loss_curve.png)
+        epoch_range: Optional (lower, upper) to slice which epochs to plot
     """
     from pathlib import Path
 
@@ -455,7 +478,7 @@ def plot_from_log(log_file: str, config_file: str = None, output: str = None):
         output = log_path.parent / f"loss_curve_{log_path.stem}.png"
 
     # Generate plot
-    plotter.plot(output)
+    plotter.plot(output, epoch_range=epoch_range)
     print(f"Saved plot to: {output}")
 
     # Also save loss data
@@ -466,6 +489,7 @@ def plot_from_log(log_file: str, config_file: str = None, output: str = None):
 
 if __name__ == "__main__":
     import sys
+    import argparse
     from pathlib import Path
 
     # Add clean_code_base to path for imports when running standalone
@@ -474,17 +498,21 @@ if __name__ == "__main__":
     if str(clean_code_base) not in sys.path:
         sys.path.insert(0, str(clean_code_base))
 
-    if len(sys.argv) < 2:
-        print("Usage: python visualizer.py <log_file> [config.yaml] [output.png]")
-        print("")
-        print("Examples:")
-        print("  python evaluation/visualizer.py train_allegro_12345.log")
-        print("  python evaluation/visualizer.py train_allegro_12345.log config.yaml")
-        print("  python evaluation/visualizer.py train_allegro_12345.log config.yaml my_plot.png")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Plot training loss curves from log files.")
+    parser.add_argument("log_file", help="Path to training log file")
+    parser.add_argument("config_file", nargs="?", default=None, help="Path to config YAML (optional)")
+    parser.add_argument("output", nargs="?", default=None, help="Output path for plot (optional)")
+    parser.add_argument("--range", dest="epoch_range", default=None,
+                        help="Epoch range to plot as lower:upper (e.g. 5:50, :30, 10:)")
 
-    log_file = sys.argv[1]
-    config_file = sys.argv[2] if len(sys.argv) > 2 else None
-    output = sys.argv[3] if len(sys.argv) > 3 else None
+    args = parser.parse_args()
 
-    plot_from_log(log_file, config_file, output)
+    # Parse epoch range
+    epoch_range = None
+    if args.epoch_range is not None:
+        parts = args.epoch_range.split(":")
+        lo = int(parts[0]) if parts[0] else None
+        hi = int(parts[1]) if len(parts) > 1 and parts[1] else None
+        epoch_range = (lo, hi)
+
+    plot_from_log(args.log_file, args.config_file, args.output, epoch_range=epoch_range)
