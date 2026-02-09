@@ -12,6 +12,8 @@ force_eval/
 force_eval_test/
 checkpoints_allegro/
 checkpoints_scaling/
+checkpoints_mace/
+checkpoints_painn/
 scaling_results/
 rand_plots/
 
