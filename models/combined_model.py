@@ -1,8 +1,8 @@
 """
-Combined Prior + Allegro Model
+Combined Prior + ML Model
 
-Composes physics-based prior energy with Allegro ML model.
-Supports pure Allegro, pure prior, or combined training via config.
+Composes physics-based prior energy with an ML model (Allegro, MACE, or PaiNN).
+Supports pure ML, pure prior, or combined training via config.
 
 Extracted from:
 - allegro_energyfn_multiple_proteins.py
@@ -15,17 +15,24 @@ from typing import Dict, Any, Optional, Tuple
 from config.types import EnergyComponents, ForceComponents
 from .prior_energy import PriorEnergy
 from .allegro_model import AllegroModel
+from .mace_model import MACEModel
+from .painn_model import PaiNNModel
 from .topology import TopologyBuilder
 from utils.logging import model_logger
 
 
 class CombinedModel:
     """
-    Combined model with prior energy and Allegro ML terms.
+    Combined model with prior energy and ML (Allegro, MACE, or PaiNN) terms.
 
-    Can operate in three modes (controlled by config):
-    1. use_priors=True: Prior + Allegro (default)
-    2. use_priors=False: Pure Allegro only
+    Can operate in two modes (controlled by config):
+    1. use_priors=True: Prior + ML (default)
+    2. use_priors=False: Pure ML only
+
+    The ML backbone is selected via config `model.ml_model`:
+    - "allegro" (default): Allegro equivariant neural network
+    - "mace": MACE equivariant neural network
+    - "painn": PaiNN polarizable interaction neural network
 
     Example:
         >>> config = ConfigManager("config.yaml")
@@ -55,17 +62,30 @@ class CombinedModel:
         # Create topology builder (always needed for proper initialization)
         self.topology = TopologyBuilder(N_max=N_max, min_repulsive_sep=6)
 
-        # Create Allegro model
-        self.allegro = AllegroModel(config, R0, box, species, N_max)
+        # Determine which ML backbone to use
+        self.ml_model_type = config.get_ml_model_type()
+
+        if self.ml_model_type == "mace":
+            self.ml_model = MACEModel(config, R0, box, species, N_max)
+            model_logger.info("ML backbone: MACE")
+        elif self.ml_model_type == "painn":
+            self.ml_model = PaiNNModel(config, R0, box, species, N_max)
+            model_logger.info("ML backbone: PaiNN")
+        else:
+            self.ml_model = AllegroModel(config, R0, box, species, N_max)
+            model_logger.info("ML backbone: Allegro")
+
+        # Backward-compatible alias: existing code references self.allegro
+        self.allegro = self.ml_model
 
         # Create prior model (if enabled)
         if self.use_priors:
-            self.prior = PriorEnergy(config, self.topology, self.allegro.displacement)
-            model_logger.info("Mode: Prior + Allegro")
+            self.prior = PriorEnergy(config, self.topology, self.ml_model.displacement)
+            model_logger.info(f"Mode: Prior + {self.ml_model_type.upper()}")
             model_logger.info(f"Prior weights: {self.prior.weights}")
         else:
             self.prior = None
-            model_logger.info("Mode: Pure Allegro (no priors)")
+            model_logger.info(f"Mode: Pure {self.ml_model_type.upper()} (no priors)")
 
     def initialize_params(self, rng_key: jax.random.PRNGKey) -> Dict[str, Any]:
         """
@@ -106,8 +126,8 @@ class CombinedModel:
         Returns:
             Total energy (scalar)
         """
-        # Allegro energy (has internal R_masked handling)
-        E_allegro = self.allegro.compute_energy(
+        # ML energy (has internal R_masked handling)
+        E_ml = self.ml_model.compute_energy(
             params['allegro'], R, mask, species, neighbor
         )
 
@@ -125,9 +145,9 @@ class CombinedModel:
                 jax.lax.stop_gradient(R)  # Block gradient for padded atoms
             )
             E_prior = self.prior.compute_total_energy(R_masked, mask)
-            return E_allegro + E_prior
+            return E_ml + E_prior
         else:
-            return E_allegro
+            return E_ml
 
     def compute_total_energy(
         self,
@@ -183,13 +203,13 @@ class CombinedModel:
                 - E_dihedral: Dihedral energy (if use_priors)
                 - E_prior_total: Total prior energy (if use_priors)
         """
-        # Allegro energy
-        E_allegro = self.allegro.compute_energy(
+        # ML energy
+        E_ml = self.ml_model.compute_energy(
             params['allegro'], R, mask, species, neighbor
         )
 
         components = {
-            "E_allegro": E_allegro,
+            "E_allegro": E_ml,  # Key kept as "E_allegro" for backward compat
         }
 
         # Add prior components if enabled
@@ -209,9 +229,9 @@ class CombinedModel:
                 "E_dihedral": prior_components["E_dihedral"],
                 "E_prior_total": prior_components["E_total"],
             })
-            components["E_total"] = E_allegro + prior_components["E_total"]
+            components["E_total"] = E_ml + prior_components["E_total"]
         else:
-            components["E_total"] = E_allegro
+            components["E_total"] = E_ml
 
         return components
 
@@ -306,18 +326,19 @@ class CombinedModel:
     @property
     def initial_neighbors(self) -> Any:
         """Get initial neighbor list for training."""
-        return self.allegro.initial_neighbors
+        return self.ml_model.initial_neighbors
 
     @property
     def displacement(self):
-        """Get displacement function (from Allegro)."""
-        return self.allegro.displacement
+        """Get displacement function (from ML model)."""
+        return self.ml_model.displacement
 
     @property
     def nneigh_fn(self):
-        """Get neighbor list function (from Allegro)."""
-        return self.allegro.nneigh_fn
+        """Get neighbor list function (from ML model)."""
+        return self.ml_model.nneigh_fn
 
     def __repr__(self) -> str:
-        mode = "Prior+Allegro" if self.use_priors else "PureAllegro"
+        ml = self.ml_model_type.upper()
+        mode = f"Prior+{ml}" if self.use_priors else f"Pure{ml}"
         return f"CombinedModel(mode={mode}, N_max={self.N_max})"

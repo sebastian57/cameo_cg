@@ -1,42 +1,45 @@
 """
-Allegro Equivariant Neural Network Model Wrapper
+PaiNN Equivariant Neural Network Model Wrapper
 
-Wraps the Allegro model initialization and inference for force field training.
+Wraps the PaiNN model initialization and inference for force field training.
 Handles neighbor lists, species types, and coordinate masking.
 
-Extracted from:
-- allegro_energyfn_multiple_proteins.py
+PaiNN uses the same chemutils interface as Allegro/MACE (hk.transform pattern),
+making it a drop-in replacement at the model level.
 """
 
 import jax
 import jax.numpy as jnp
 from jax_md import space, partition
-from chemutils.models.allegro.model import allegro_neighborlist_pp
+from chemutils.models.painn.model import painn_neighborlist_pp
 from typing import Optional, Tuple, Any
 
 from utils.logging import model_logger
 
 
-class AllegroModel:
+class PaiNNModel:
     """
-    Wrapper for Allegro equivariant graph neural network.
+    Wrapper for PaiNN (Polarizable Interaction Neural Network).
+
+    Same interface as AllegroModel/MACEModel — can be used as a drop-in
+    replacement in CombinedModel.
 
     Handles:
-    - Allegro model initialization from config
+    - PaiNN model initialization from config
     - Neighbor list management
     - Species handling
     - Coordinate masking for padded systems
 
     Example:
         >>> config = ConfigManager("config.yaml")
-        >>> model = AllegroModel(config, R0, box, species0, N_max)
+        >>> model = PaiNNModel(config, R0, box, species0, N_max)
         >>> params = model.initialize_params(jax.random.PRNGKey(0))
         >>> energy = model.compute_energy(params, R, mask, species)
     """
 
     def __init__(self, config, R0: jax.Array, box: jax.Array, species: jax.Array, N_max: int):
         """
-        Initialize Allegro model.
+        Initialize PaiNN model.
 
         Args:
             config: ConfigManager instance
@@ -52,14 +55,13 @@ class AllegroModel:
         self.cutoff = config.get_cutoff()
         self.dr_threshold = config.get_dr_threshold()
 
-        # Get Allegro hyperparameters
-        # Support different model sizes: default, large, med
-        allegro_size = config.get_allegro_size()
-        self.allegro_config = config.get_allegro_config(size=allegro_size)
+        # Get PaiNN hyperparameters
+        painn_size = config.get_painn_size()
+        self.painn_config = config.get_painn_config(size=painn_size)
 
-        model_logger.info(f"Using Allegro size: {allegro_size}")
+        model_logger.info(f"Using PaiNN size: {painn_size}")
 
-        # Setup JAX-MD displacement and neighbor list
+        # Setup JAX-MD displacement and neighbor list (same as Allegro/MACE)
         self.displacement, self.shift = space.free()
 
         # Convert box to safe float32
@@ -81,10 +83,10 @@ class AllegroModel:
         species_safe = jnp.asarray(species, dtype=jnp.int32)
 
         model_logger.info(f"Detected {self.n_species} unique species")
-        model_logger.info(f"Using Allegro config size: {allegro_size}")
+        model_logger.info(f"Using PaiNN config size: {painn_size}")
 
-        # Initialize Allegro model
-        self.init_allegro, self.apply_allegro = allegro_neighborlist_pp(
+        # Initialize PaiNN model
+        self.init_fn, self.apply_fn = painn_neighborlist_pp(
             displacement=self.displacement,
             r_cutoff=self.cutoff,
             n_species=self.n_species,
@@ -92,7 +94,7 @@ class AllegroModel:
             neighbor_test=self.nbrs_init,
             max_edge_multiplier=1.25,
             mode="energy",
-            **self.allegro_config
+            **self.painn_config
         )
 
         # Store initialization parameters
@@ -101,15 +103,15 @@ class AllegroModel:
 
     def initialize_params(self, rng_key: jax.random.PRNGKey) -> Any:
         """
-        Initialize Allegro model parameters.
+        Initialize PaiNN model parameters.
 
         Args:
             rng_key: JAX random key for initialization
 
         Returns:
-            Allegro model parameters (pytree)
+            PaiNN model parameters (pytree)
         """
-        params = self.init_allegro(rng_key, self._R0, self.nbrs_init, self._species0)
+        params = self.init_fn(rng_key, self._R0, self.nbrs_init, self._species0)
         return params
 
     def get_neighborlist(self, R: jax.Array, nbrs: Optional[Any] = None) -> Any:
@@ -138,10 +140,10 @@ class AllegroModel:
         neighbor: Optional[Any] = None
     ) -> jax.Array:
         """
-        Compute Allegro energy for given coordinates.
+        Compute PaiNN energy for given coordinates.
 
         Args:
-            params: Allegro model parameters
+            params: PaiNN model parameters
             R: Coordinates, shape (n_atoms, 3)
             mask: Validity mask, shape (n_atoms,)
             species: Species IDs, shape (n_atoms,)
@@ -169,9 +171,9 @@ class AllegroModel:
         species_masked = jnp.where(mask > 0, species, 0).astype(jnp.int32)
 
         # Compute energy
-        E_allegro = self.apply_allegro(params, R_masked, nbrs, species_masked)
+        E_painn = self.apply_fn(params, R_masked, nbrs, species_masked)
 
-        return E_allegro
+        return E_painn
 
     def compute_energy_and_forces(
         self,
@@ -185,7 +187,7 @@ class AllegroModel:
         Compute energy and forces via automatic differentiation.
 
         Args:
-            params: Allegro model parameters
+            params: PaiNN model parameters
             R: Coordinates, shape (n_atoms, 3)
             mask: Validity mask, shape (n_atoms,)
             species: Species IDs, shape (n_atoms,)
@@ -206,7 +208,7 @@ class AllegroModel:
     @property
     def model_apply_fn(self):
         """Get raw Haiku apply function (for exporter compatibility)."""
-        return self.apply_allegro
+        return self.apply_fn
 
     @property
     def initial_neighbors(self) -> Any:
@@ -215,6 +217,6 @@ class AllegroModel:
 
     def __repr__(self) -> str:
         return (
-            f"AllegroModel(cutoff={self.cutoff}, n_species={self.n_species}, "
+            f"PaiNNModel(cutoff={self.cutoff}, n_species={self.n_species}, "
             f"N_max={self.N_max})"
         )

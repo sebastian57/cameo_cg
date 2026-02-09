@@ -9,6 +9,8 @@ from .topology import (
 )
 from .prior_energy import PriorEnergy
 from .allegro_model import AllegroModel
+from .mace_model import MACEModel
+from .painn_model import PaiNNModel
 from .combined_model import CombinedModel
 
 __all__ = [
@@ -21,5 +23,7 @@ __all__ = [
     # Energy models
     "PriorEnergy",
     "AllegroModel",
+    "MACEModel",
+    "PaiNNModel",
     "CombinedModel",
 ]
