@@ -217,6 +217,15 @@ class ConfigManager:
         """Check if prior energy terms should be used."""
         return self.get("model", "use_priors", default=True)
 
+    def get_ml_model_type(self) -> str:
+        """
+        Get which ML model backbone to use.
+
+        Returns:
+            Model type: "allegro", "mace", or "painn"
+        """
+        return self.get("model", "ml_model", default="allegro")
+
     def get_allegro_size(self) -> str:
         """
         Get Allegro model size variant.
@@ -225,6 +234,56 @@ class ConfigManager:
             Size name: "default", "large", or "med"
         """
         return self.get("model", "allegro_size", default="default")
+
+    def get_mace_size(self) -> str:
+        """
+        Get MACE model size variant.
+
+        Returns:
+            Size name: "default", "large", or "small"
+        """
+        return self.get("model", "mace_size", default="default")
+
+    def get_mace_config(self, size: str = "default") -> Dict[str, Any]:
+        """
+        Get MACE model configuration.
+
+        Args:
+            size: Model size variant ("default", "large", "small")
+
+        Returns:
+            Dictionary of MACE hyperparameters passed to mace_neighborlist_pp
+        """
+        if size == "default":
+            return self.get("model", "mace", default={})
+        else:
+            key = f"mace_{size}"
+            return self.get("model", key, default=self.get("model", "mace", default={}))
+
+    def get_painn_size(self) -> str:
+        """
+        Get PaiNN model size variant.
+
+        Returns:
+            Size name: "default", "large", or "small"
+        """
+        return self.get("model", "painn_size", default="default")
+
+    def get_painn_config(self, size: str = "default") -> Dict[str, Any]:
+        """
+        Get PaiNN model configuration.
+
+        Args:
+            size: Model size variant ("default", "large", "small")
+
+        Returns:
+            Dictionary of PaiNN hyperparameters passed to painn_neighborlist_pp
+        """
+        if size == "default":
+            return self.get("model", "painn", default={})
+        else:
+            key = f"painn_{size}"
+            return self.get("model", key, default=self.get("model", "painn", default={}))
 
     # ----- Training Configuration (New) -----
 
