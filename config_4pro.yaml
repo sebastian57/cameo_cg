@@ -1,16 +1,17 @@
 # Chemtrain Clean Code Base - Configuration Template
 # Based on config_allegro_exp2.yaml with new features added
 
-seed: 8951
+seed: 123
 debug_priors: false
 
-model_context: "allegro_cg_protein_2g4q4z5k"
-protein_name: "2g4q4z5k"
-model_id: "4pro"
+model_context: "allegro_cg_protein_4zohB01"
+protein_name: "4zohB01"
+model_id: "1pro_11k_faster"
 
 data:
-  path: "data_prep/datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz"
-  max_frames: 10000  # Maximum frames to use from dataset (null = use all)
+  #path: "data_prep/datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz"
+  path: "data_prep/datasets/4zohB01_temps_kcalmol_notnorm_1bead_aggforce.npz"
+  max_frames: 11020  # Maximum frames to use from dataset (null = use all)
 
 preprocessing:
   buffer_multiplier: 2.0  # Multiplier for box buffer (box = max_range + 2 * buffer_multiplier * cutoff)
@@ -87,16 +88,16 @@ optimizer:
   grad_clip: 1.0  # Global gradient clipping
 
   adabelief:
-    lr: 1.0e-2
-    peak_lr: 2.0e-2
-    end_lr: 1.0e-3
-    warmup_epochs: 15
+    lr: 5.0e-2
+    peak_lr: 1.0e-1
+    end_lr: 5.0e-2
+    warmup_epochs: 5
     decay_steps: 12000
     beta1: 0.95
     beta2: 0.999
     eps: 1.0e-8
-    grad_clip: 1.0
-    weight_decay: 2.0e-4 #2.0e-5
+    grad_clip: 10.0
+    weight_decay: 2.0e-5 #2.0e-5
 
   yogi:
     lr: 1.0e-3
@@ -156,11 +157,11 @@ training:
   stage1_optimizer: "adabelief"  # First training stage optimizer
   stage2_optimizer: "yogi"  # Second training stage (fine-tuning)
 
-  epochs_adabelief: 150 # looks like 30 epochs in 4 hours with 10k structures and moderate model size / cutoff
-  epochs_yogi: 0  # Set to 0 to skip this stage
+  epochs_adabelief: 30 # looks like 30 epochs in 4 hours with 10k structures and moderate model size / cutoff
+  epochs_yogi: 0 # Set to 0 to skip this stage
 
   val_fraction: 0.2  # Validation set fraction
-  batch_per_device: 1 # Batch size per GPU
+  batch_per_device: 4 # Batch size per GPU
   batch_cache: 10  # Number of batches to cache
 
   gammas:
