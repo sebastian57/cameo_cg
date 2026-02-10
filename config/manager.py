@@ -217,6 +217,10 @@ class ConfigManager:
         """Check if prior energy terms should be used."""
         return self.get("model", "use_priors", default=True)
 
+    def train_priors_enabled(self) -> bool:
+        """Check if prior parameters should be trained during force matching."""
+        return self.get("model", "train_priors", default=False)
+
     def get_ml_model_type(self) -> str:
         """
         Get which ML model backbone to use.
