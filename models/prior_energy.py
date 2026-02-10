@@ -269,7 +269,12 @@ class PriorEnergy:
         self.dihedrals = topology.get_dihedrals()
         self.rep_pairs = topology.get_repulsive_pairs()
 
-    def compute_bond_energy(self, R: jax.Array, mask: jax.Array) -> jax.Array:
+    def compute_bond_energy(
+        self,
+        R: jax.Array,
+        mask: jax.Array,
+        params: Optional[Dict[str, jax.Array]] = None
+    ) -> jax.Array:
         """
         Compute harmonic bond stretching energy.
 
@@ -282,6 +287,7 @@ class PriorEnergy:
         Returns:
             Total bond energy (scalar)
         """
+        p = params if params is not None else self.params
         bi, bj = self.bonds[:, 0], self.bonds[:, 1]
         Ri, Rj = R[bi], R[bj]
 
@@ -293,12 +299,17 @@ class PriorEnergy:
         r = _safe_norm(dR)
 
         # Harmonic energy with jnp.where for forward pass NaN prevention
-        bond_energy = (r - self.params["r0"]) ** 2
-        E_bond = 0.5 * self.params["kr"] * jnp.sum(jnp.where(bond_valid, bond_energy, 0.0))
+        bond_energy = (r - p["r0"]) ** 2
+        E_bond = 0.5 * p["kr"] * jnp.sum(jnp.where(bond_valid, bond_energy, 0.0))
 
         return E_bond
 
-    def compute_angle_energy(self, R: jax.Array, mask: jax.Array) -> jax.Array:
+    def compute_angle_energy(
+        self,
+        R: jax.Array,
+        mask: jax.Array,
+        params: Optional[Dict[str, jax.Array]] = None
+    ) -> jax.Array:
         """
         Compute angle bending energy using Fourier series.
 
@@ -311,6 +322,7 @@ class PriorEnergy:
         Returns:
             Total angle energy (scalar)
         """
+        p = params if params is not None else self.params
         ia, ib, ic = self.angles[:, 0], self.angles[:, 1], self.angles[:, 2]
 
         # Mask: all three atoms must be valid
@@ -326,14 +338,19 @@ class PriorEnergy:
         theta = jnp.where(angle_valid, theta, jax.lax.stop_gradient(theta))
 
         # Fourier series energy
-        U_angle = _angular_fourier_energy(theta, self.params["a"], self.params["b"])
+        U_angle = _angular_fourier_energy(theta, p["a"], p["b"])
 
         # Use jnp.where to avoid NaN propagation in forward pass
         E_angle = jnp.sum(jnp.where(angle_valid, U_angle, 0.0))
 
         return E_angle
 
-    def compute_repulsive_energy(self, R: jax.Array, mask: jax.Array) -> jax.Array:
+    def compute_repulsive_energy(
+        self,
+        R: jax.Array,
+        mask: jax.Array,
+        params: Optional[Dict[str, jax.Array]] = None
+    ) -> jax.Array:
         """
         Compute soft-sphere repulsive energy for non-bonded pairs.
 
@@ -346,6 +363,7 @@ class PriorEnergy:
         Returns:
             Total repulsive energy (scalar)
         """
+        p = params if params is not None else self.params
         pi, pj = self.rep_pairs[:, 0], self.rep_pairs[:, 1]
 
         # Mask: both atoms must be valid
@@ -369,8 +387,8 @@ class PriorEnergy:
         r_safe = jnp.maximum(r_rep, r_min)
 
         # Soft-sphere repulsion: (sigma/r)^4
-        rep_term = (self.params["sigma"] / r_safe) ** 4
-        E_rep = self.params["epsilon"] * jnp.sum(jnp.where(rep_valid, rep_term, 0.0))
+        rep_term = (p["sigma"] / r_safe) ** 4
+        E_rep = p["epsilon"] * jnp.sum(jnp.where(rep_valid, rep_term, 0.0))
 
         return E_rep
 
@@ -442,7 +460,12 @@ class PriorEnergy:
     # Add E_ex to the returned dict and to E_total
     # ========================================================================
 
-    def compute_dihedral_energy(self, R: jax.Array, mask: jax.Array) -> jax.Array:
+    def compute_dihedral_energy(
+        self,
+        R: jax.Array,
+        mask: jax.Array,
+        params: Optional[Dict[str, jax.Array]] = None
+    ) -> jax.Array:
         """
         Compute dihedral torsion energy using periodic potential.
 
@@ -455,6 +478,7 @@ class PriorEnergy:
         Returns:
             Total dihedral energy (scalar)
         """
+        p = params if params is not None else self.params
         i, j, k, l = self.dihedrals[:, 0], self.dihedrals[:, 1], self.dihedrals[:, 2], self.dihedrals[:, 3]
 
         # Mask: all four atoms must be valid
@@ -472,14 +496,19 @@ class PriorEnergy:
         phi = jnp.where(dih_valid, phi, jax.lax.stop_gradient(phi))
 
         # Periodic energy
-        U_dih = _dihedral_periodic_energy(phi, self.params["k_dih"], self.params["gamma_dih"])
+        U_dih = _dihedral_periodic_energy(phi, p["k_dih"], p["gamma_dih"])
 
         # Use jnp.where to avoid NaN propagation in forward pass
         E_dih = jnp.sum(jnp.where(dih_valid, U_dih, 0.0))
 
         return E_dih
 
-    def compute_energy(self, R: jax.Array, mask: jax.Array) -> Dict[str, jax.Array]:
+    def compute_energy(
+        self,
+        R: jax.Array,
+        mask: jax.Array,
+        params: Optional[Dict[str, jax.Array]] = None
+    ) -> Dict[str, jax.Array]:
         """
         Compute all energy components.
 
@@ -496,10 +525,11 @@ class PriorEnergy:
                 - E_total: Sum of all weighted components
         """
         # Compute raw energies
-        E_bond_raw = self.compute_bond_energy(R, mask)
-        E_angle_raw = self.compute_angle_energy(R, mask)
-        E_rep_raw = self.compute_repulsive_energy(R, mask)
-        E_dih_raw = self.compute_dihedral_energy(R, mask)
+        p = params if params is not None else self.params
+        E_bond_raw = self.compute_bond_energy(R, mask, params=p)
+        E_angle_raw = self.compute_angle_energy(R, mask, params=p)
+        E_rep_raw = self.compute_repulsive_energy(R, mask, params=p)
+        E_dih_raw = self.compute_dihedral_energy(R, mask, params=p)
 
         # Apply weights (matching original code behavior)
         E_bond = self.weights["bond"] * E_bond_raw
@@ -521,7 +551,12 @@ class PriorEnergy:
             "E_total": E_total,
         }
 
-    def compute_total_energy(self, R: jax.Array, mask: jax.Array) -> jax.Array:
+    def compute_total_energy(
+        self,
+        R: jax.Array,
+        mask: jax.Array,
+        params: Optional[Dict[str, jax.Array]] = None
+    ) -> jax.Array:
         """
         Compute total prior energy (weighted sum of all terms).
 
@@ -532,7 +567,7 @@ class PriorEnergy:
         Returns:
             Total energy (scalar)
         """
-        return self.compute_energy(R, mask)["E_total"]
+        return self.compute_energy(R, mask, params=params)["E_total"]
 
     def compute_total_energy_from_params(
         self,
@@ -553,14 +588,7 @@ class PriorEnergy:
         Returns:
             Total energy (scalar)
         """
-        # Temporarily swap params
-        old_params = self.params
-        self.params = params
-        try:
-            E_total = self.compute_total_energy(R, mask)
-        finally:
-            self.params = old_params
-        return E_total
+        return self.compute_total_energy(R, mask, params=params)
 
     def __repr__(self) -> str:
         return f"PriorEnergy(N_max={self.topology.N_max}, weights={self.weights})"

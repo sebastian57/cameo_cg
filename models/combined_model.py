@@ -58,6 +58,7 @@ class CombinedModel:
 
         # Check if priors are enabled
         self.use_priors = config.use_priors()
+        self.train_priors = config.train_priors_enabled()
 
         # Create topology builder (always needed for proper initialization)
         self.topology = TopologyBuilder(N_max=N_max, min_repulsive_sep=6)
@@ -144,7 +145,12 @@ class CombinedModel:
                 R,
                 jax.lax.stop_gradient(R)  # Block gradient for padded atoms
             )
-            E_prior = self.prior.compute_total_energy(R_masked, mask)
+            if self.train_priors and "prior" in params:
+                E_prior = self.prior.compute_total_energy(
+                    R_masked, mask, params=params["prior"]
+                )
+            else:
+                E_prior = self.prior.compute_total_energy(R_masked, mask)
             return E_ml + E_prior
         else:
             return E_ml
@@ -221,7 +227,12 @@ class CombinedModel:
                 R,
                 jax.lax.stop_gradient(R)
             )
-            prior_components = self.prior.compute_energy(R_masked, mask)
+            if self.train_priors and "prior" in params:
+                prior_components = self.prior.compute_energy(
+                    R_masked, mask, params=params["prior"]
+                )
+            else:
+                prior_components = self.prior.compute_energy(R_masked, mask)
             components.update({
                 "E_bond": prior_components["E_bond"],
                 "E_angle": prior_components["E_angle"],
