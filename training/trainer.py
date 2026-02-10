@@ -237,6 +237,8 @@ class Trainer:
         self.params = trainer.params
         self.best_params = trainer.best_inference_params
         self._chemtrain_trainer = trainer
+        if self.model.use_priors and getattr(self.model, "train_priors", False) and "prior" in self.params:
+            self.model.prior.params = self.params["prior"]
 
         # Save stage checkpoint with metadata for resume capability
         if checkpoint_freq > 0:
