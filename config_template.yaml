@@ -19,6 +19,7 @@ preprocessing:
 
 model:
   use_priors: true  # Set to false for pure Allegro (ML only)
+  train_priors: true  # Train prior parameters during force-matching stages
 
   allegro_size: "default"  # Options: "default", "large", "med"
 
@@ -175,8 +176,8 @@ training:
   stage1_optimizer: "adabelief"  # First training stage optimizer
   stage2_optimizer: "yogi"  # Second training stage (fine-tuning)
 
-  epochs_adabelief: 100 # looks like 30 epochs in 4 hours with 10k structures and moderate model size / cutoff
-  epochs_yogi: 50  # Set to 0 to skip this stage
+  epochs_adabelief: 10 # looks like 30 epochs in 4 hours with 10k structures and moderate model size / cutoff
+  epochs_yogi: 0  # Set to 0 to skip this stage
 
   val_fraction: 0.1  # Validation set fraction
   batch_per_device: 16  # Batch size per GPU
@@ -192,5 +193,4 @@ training:
 
   # Export
   export_path: "./exported_models"
-
 
