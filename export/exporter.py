@@ -222,7 +222,7 @@ class AllegroExporter(exporter.Exporter):
 
         # Get prior parameters (if priors are used)
         if model.use_priors:
-            prior_params = model.prior.params
+            prior_params = params.get("prior", model.prior.params)
         else:
             # Empty prior params if not using priors
             prior_params = {}
