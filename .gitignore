@@ -17,6 +17,22 @@ checkpoints_painn/
 scaling_results/
 rand_plots/
 
+# --- pycache / python artifacts ---
+models/__pycache__/
+data_prep/__pycache__/
+scripts/__pycache__/
+*.pyc
+evaluation/__pycache__/
+export/__pycache__/
+checkpoints_allegro/__pycache__/
+checkpoints_scaling/__pycache__/
+checkpoints_mace/__pycache__/
+checkpoints_painn/__pycache__/
+config/__pycache__/
+data/__pycache__/
+exported_models/__pycache__/
+force_eval/__pycache__/
+
 # --- large / generated datasets ---
 data_prep/datasets/
 data_prep/plots
