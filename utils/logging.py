@@ -50,6 +50,7 @@ model_logger = setup_logger("Model")
 training_logger = setup_logger("Training")
 export_logger = setup_logger("Export")
 eval_logger = setup_logger("Eval")
+pipeline_logger = setup_logger("Pipeline")
 
 
 def set_log_level(level: int):
@@ -64,7 +65,7 @@ def set_log_level(level: int):
         >>> from utils.logging import set_log_level
         >>> set_log_level(logging.DEBUG)  # Enable debug output
     """
-    for logger in [data_logger, model_logger, training_logger, export_logger, eval_logger]:
+    for logger in [data_logger, model_logger, training_logger, export_logger, eval_logger, pipeline_logger]:
         logger.setLevel(level)
         for handler in logger.handlers:
             handler.setLevel(level)
