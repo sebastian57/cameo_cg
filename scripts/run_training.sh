@@ -6,6 +6,7 @@
 #SBATCH --gpus-per-task=4
 #SBATCH --time=04:00:00
 #SBATCH --partition=booster
+#SBATCH --output=outputs/slurm-%j.out
 
 # =============================================================================
 # Unified SLURM script for Allegro training (works for 1 or N nodes)
@@ -150,9 +151,14 @@ if [[ ! -f "${TRAIN_SCRIPT}" ]]; then
     exit 1
 fi
 
+# ===== Prepare Output Directory =====
+# Create outputs directory for logs (relative to submit directory)
+OUTPUTS_DIR="${CLEAN_CODE_BASE_DIR}/outputs"
+mkdir -p "${OUTPUTS_DIR}"
+
 # ===== Run Training =====
 # Launch 1 process per NODE - chemtrain's pmap handles local multi-GPU
-LOGFILE="train_allegro_${SLURM_JOB_ID}.log"
+LOGFILE="${OUTPUTS_DIR}/train_allegro_${SLURM_JOB_ID}.log"
 
 echo "============================================================"
 echo "Starting training with $SLURM_NNODES node(s), 4 GPUs each..."
@@ -164,7 +170,7 @@ echo "============================================================"
 
 # srun launches 1 task per node, each sees 4 local GPUs
 # shellcheck disable=SC2086  # Word splitting intended for RESUME_FLAG
-srun --ntasks-per-node=1 python3 "${TRAIN_SCRIPT}" \
+srun -l --ntasks-per-node=1 python3 -u "${TRAIN_SCRIPT}" \
     "$CONFIG_FILE" "${SLURM_JOB_ID}" ${RESUME_FLAG} 2>&1 | tee "${LOGFILE}"
 
 echo "============================================================"

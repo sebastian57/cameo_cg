@@ -40,6 +40,7 @@ IMPORTANT: JAX distributed initialization must happen before any other JAX opera
 # =============================================================================
 
 import os
+import sys
 import jax
 
 def _initialize_jax_distributed():
@@ -106,14 +107,25 @@ def _initialize_jax_distributed():
         print(f"[SLURM] Process {process_id}/{num_processes}")
         print(f"[SLURM] Coordinator: {coordinator_address}:{coordinator_port}")
         print(f"[SLURM] CUDA_VISIBLE_DEVICES={cuda_vis} -> {n_local_gpus} local GPUs")
+        print(f"[Rank {process_id}] SLURM_NODELIST: {slurm_nodelist}", flush=True)
+        print(f"[Rank {process_id}] Hostname: {os.uname().nodename}", flush=True)
+        print(f"[Rank {process_id}] About to call jax.distributed.initialize()...", flush=True)
 
-        jax.distributed.initialize(
-            coordinator_address=f"{coordinator_address}:{coordinator_port}",
-            num_processes=num_processes,
-            process_id=process_id,
-            local_device_ids=local_ids,
-            initialization_timeout=600,
-        )
+        try:
+            print(f"[Rank {process_id}] Attempting jax.distributed.initialize()...", flush=True)
+            jax.distributed.initialize(
+                coordinator_address=f"{coordinator_address}:{coordinator_port}",
+                num_processes=num_processes,
+                process_id=process_id,
+                local_device_ids=local_ids,
+                initialization_timeout=600,
+            )
+            print(f"[Rank {process_id}] Successfully initialized!", flush=True)
+        except Exception as e:
+            print(f"[Rank {process_id}] FATAL: jax.distributed.initialize() failed: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
 
         rank = jax.process_index()
         world_size = jax.process_count()
@@ -329,6 +341,16 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     data_logger.info(f"[Preprocessing] Computed box: {np.asarray(box)}")
     data_logger.info(f"[Preprocessing] R_shift: {np.asarray(R_shift)}")
 
+    # Spline priors are an add-on mode; LBFGS pretraining is only valid for
+    # parametric prior parameters. Disable pretraining if both are enabled.
+    if config.use_spline_priors_enabled() and config.pretrain_prior_enabled():
+        config.set_pretrain_prior_enabled(False)
+        training_logger.warning(
+            "Both spline priors and training.pretrain_prior=true were configured. "
+            "Disabling prior pretraining because LBFGS is only supported for "
+            "parametric priors."
+        )
+
     # ===== Initialize model =====
     logging.info("\n" + "=" * 60)
     logging.info("INITIALIZING MODEL")
@@ -406,6 +428,7 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         "R": jnp.asarray(dataset["R"][:N_train]),
         "F": jnp.asarray(dataset["F"][:N_train]),
         "mask": jnp.asarray(dataset["mask"][:N_train]),
+        "species": jnp.asarray(dataset["species"][:N_train]),
     }
 
     trainer = Trainer(
@@ -493,9 +516,20 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     logging.info("GENERATING PLOTS")
     logging.info("=" * 60)
 
-    log_file = f"train_allegro_{job_id}.log"
-    if Path(log_file).exists():
-        plotter = LossPlotter(log_file, config=config)
+    # Look for log file in outputs/ directory (created by run_training.sh)
+    log_file_outputs = Path("outputs") / f"train_allegro_{job_id}.log"
+    log_file_legacy = Path(f"train_allegro_{job_id}.log")  # Fallback for old runs
+
+    # Try outputs/ first, then fall back to legacy location
+    if log_file_outputs.exists():
+        log_file = log_file_outputs
+    elif log_file_legacy.exists():
+        log_file = log_file_legacy
+    else:
+        log_file = None
+
+    if log_file is not None:
+        plotter = LossPlotter(str(log_file), config=config)
         plotter.parse_log()
 
         plot_path = export_dir / f"loss_curve_{job_id}_{model_id}.png"
@@ -506,7 +540,7 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         plotter.save_loss_data(data_path)
         logging.info(f"[Plot] Loss data: {data_path}")
     else:
-        logging.warning(f"[Plot] Log file not found: {log_file}")
+        logging.warning(f"[Plot] Log file not found in outputs/ or current directory (job_id={job_id})")
 
     logging.info("\n" + "=" * 60)
     logging.info("TRAINING PIPELINE COMPLETE")

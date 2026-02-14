@@ -3,20 +3,29 @@
 Force Evaluation Script
 
 Evaluates trained model forces against reference data and creates diagnostic plots.
-Output files are named using the model_id from the config file.
+Supports three evaluation modes:
+  - full: Evaluate complete model (ML + priors if configured)
+  - prior-only: Evaluate ONLY prior terms (parametric, spline, or trained)
+  - ml-only: Evaluate ONLY ML model (force disable priors)
 
 Usage:
-    python scripts/evaluate_forces.py <params.pkl> <config.yaml> [--frames N] [--output DIR]
+    python scripts/evaluate_forces.py [params.pkl] <config.yaml> [options]
 
 Examples:
-    # Evaluate on first 10 frames
+    # Full model evaluation (default)
     python scripts/evaluate_forces.py exported_models/model_params.pkl config.yaml
 
-    # Evaluate on 50 random frames
-    python scripts/evaluate_forces.py exported_models/model_params.pkl config.yaml --frames 50
+    # Evaluate parametric priors only (from config)
+    python scripts/evaluate_forces.py config_preprior.yaml --mode prior-only
 
-    # Custom output directory
-    python scripts/evaluate_forces.py exported_models/model_params.pkl config.yaml --output eval_results/
+    # Evaluate spline priors only (from config)
+    python scripts/evaluate_forces.py config_template.yaml --mode prior-only --frames 50
+
+    # Evaluate trained priors (from params.pkl)
+    python scripts/evaluate_forces.py exported_models/params.pkl config.yaml --mode prior-only
+
+    # ML-only (disable priors even if config enables them)
+    python scripts/evaluate_forces.py exported_models/params.pkl config.yaml --mode ml-only
 """
 
 import sys
@@ -55,7 +64,7 @@ import pickle
 import numpy as np
 import jax.numpy as jnp
 from tqdm import tqdm
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, redirect_stderr
 import io
 
 from config.manager import ConfigManager
@@ -68,12 +77,23 @@ from evaluation.visualizer import ForceAnalyzer
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate trained model forces")
-    parser.add_argument("params", help="Path to trained parameters pickle file")
+    parser.add_argument("params", nargs='?', default=None,
+                        help="Path to trained parameters pickle file (optional for prior-only mode)")
     parser.add_argument("config", help="Path to config YAML file")
-    parser.add_argument("--frames", type=int, default=10, help="Number of frames to evaluate (default: 10)")
-    parser.add_argument("--output", default="./force_eval", help="Output directory for plots")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for frame selection")
+    parser.add_argument("--frames", type=int, default=10,
+                        help="Number of frames to evaluate (default: 10)")
+    parser.add_argument("--output", default="./force_eval",
+                        help="Output directory for plots")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for frame selection")
+    parser.add_argument("--mode", choices=['full', 'prior-only', 'ml-only'],
+                        default='full',
+                        help="Evaluation mode: full (ML+priors), prior-only, or ml-only (default: full)")
     args = parser.parse_args()
+
+    # Validate mode and params combination
+    if args.mode != 'prior-only' and args.params is None:
+        parser.error(f"params file is required for --mode {args.mode}")
 
     # Setup
     output_dir = Path(args.output)
@@ -82,7 +102,8 @@ def main():
     print("=" * 60)
     print("Force Evaluation")
     print("=" * 60)
-    print(f"Parameters: {args.params}")
+    print(f"Mode: {args.mode}")
+    print(f"Parameters: {args.params if args.params else 'None (using config priors)'}")
     print(f"Config: {args.config}")
     print(f"Frames: {args.frames}")
     print(f"Output: {args.output}")
@@ -91,15 +112,151 @@ def main():
     # Load config
     config = ConfigManager(args.config)
 
+    # Validate prior-only mode requirements
+    if args.mode == 'prior-only' and not config.use_priors():
+        print("\nERROR: --mode prior-only requires model.use_priors=true in config")
+        print("       Please enable priors in your config file")
+        sys.exit(1)
+
+    # Validate spline file exists if configured
+    if config.use_spline_priors_enabled():
+        spline_path_str = config.get_spline_file_path()
+        spline_path = Path(spline_path_str)
+        if not spline_path.is_absolute():
+            spline_path = clean_code_base / spline_path_str
+        if not spline_path.exists():
+            print(f"\nERROR: Spline file not found: {spline_path}")
+            sys.exit(1)
+
     # Get model_id for file naming
     model_id = config.get("model_id", default="model")
     print(f"Model ID: {model_id}")
 
-    # Load parameters
-    print("\nLoading parameters...")
-    with open(args.params, 'rb') as f:
-        params = pickle.load(f)
-    print(f"  Loaded parameters with keys: {list(params.keys()) if isinstance(params, dict) else 'single array'}")
+    # Load parameters (optional for prior-only mode)
+    params = None
+    prior_type = None  # Track which prior type we're using
+
+    if args.mode == 'prior-only':
+        # Prior-only mode: params file is optional
+        if args.params is not None:
+            print("\nLoading trained prior parameters...")
+            with open(args.params, 'rb') as f:
+                loaded = pickle.load(f)
+
+                # Handle different checkpoint formats
+                full_params = None
+                # First check if it's a dict (most common case)
+                if isinstance(loaded, dict):
+                    # Check for chemtrain checkpoint dict with 'trainer_state' key
+                    if 'trainer_state' in loaded:
+                        print(f"  Detected chemtrain checkpoint dict")
+                        trainer_state = loaded['trainer_state']
+                        if isinstance(trainer_state, dict) and 'params' in trainer_state:
+                            full_params = trainer_state['params']
+                        elif hasattr(trainer_state, 'params'):
+                            full_params = trainer_state.params
+                    # Check for exported checkpoint dict with 'params' key
+                    elif 'params' in loaded and isinstance(loaded['params'], dict):
+                        full_params = loaded['params']
+                    else:
+                        # Direct params dict
+                        full_params = loaded
+                # Check if it's a trainer object
+                elif hasattr(loaded, 'trainer_state'):
+                    print(f"  Detected trainer object")
+                    if hasattr(loaded.trainer_state, 'params'):
+                        full_params = loaded.trainer_state.params
+                    elif isinstance(loaded.trainer_state, dict) and 'params' in loaded.trainer_state:
+                        full_params = loaded.trainer_state['params']
+                elif hasattr(loaded, 'params'):
+                    print(f"  Detected legacy trainer object")
+                    full_params = loaded.params
+                else:
+                    print(f"  Warning: Unknown checkpoint format, using config priors")
+                    full_params = None
+
+                # Extract prior params if available
+                if full_params is not None and isinstance(full_params, dict) and 'prior' in full_params:
+                    params = {'prior': full_params['prior']}
+                    prior_type = "trained"
+                    print(f"  Loaded trained prior params")
+                else:
+                    print("  Warning: No 'prior' key in params file, using config priors")
+                    params = None
+
+        # Determine prior type from config if not trained
+        if params is None:
+            if config.use_spline_priors_enabled():
+                prior_type = "spline"
+                spline_path = config.get_spline_file_path()
+                print(f"\nUsing spline priors from: {spline_path}")
+            else:
+                prior_type = "parametric"
+                print("\nUsing parametric priors from config (histogram-fitted)")
+    else:
+        # Full or ml-only mode: params file is required
+        print("\nLoading parameters...")
+        with open(args.params, 'rb') as f:
+            loaded = pickle.load(f)
+
+            # Handle different checkpoint formats
+            # First check if it's a dict (most common case)
+            if isinstance(loaded, dict):
+                # Check for chemtrain checkpoint dict with 'trainer_state' key
+                if 'trainer_state' in loaded:
+                    print(f"  Detected chemtrain checkpoint dict")
+                    trainer_state = loaded['trainer_state']
+                    # trainer_state can be dict or object
+                    if isinstance(trainer_state, dict) and 'params' in trainer_state:
+                        params = trainer_state['params']
+                    elif hasattr(trainer_state, 'params'):
+                        params = trainer_state.params
+                    else:
+                        print(f"  ERROR: Could not extract params from trainer_state")
+                        print(f"  trainer_state type: {type(trainer_state)}")
+                        if isinstance(trainer_state, dict):
+                            print(f"  trainer_state keys: {list(trainer_state.keys())}")
+                        else:
+                            print(f"  trainer_state attrs: {dir(trainer_state)}")
+                        sys.exit(1)
+                # Check for exported checkpoint dict with 'params' key
+                elif 'params' in loaded:
+                    # Could be exported checkpoint or nested dict
+                    if isinstance(loaded['params'], dict) and ('allegro' in loaded['params'] or 'prior' in loaded['params']):
+                        print(f"  Detected exported checkpoint dict")
+                        params = loaded['params']
+                    else:
+                        # Nested structure, might need to go deeper
+                        print(f"  Detected nested params dict")
+                        params = loaded['params']
+                else:
+                    # Direct params dict
+                    print(f"  Detected direct params dict")
+                    params = loaded
+            # Check if it's a trainer object (less common)
+            elif hasattr(loaded, 'trainer_state'):
+                print(f"  Detected trainer object")
+                if hasattr(loaded.trainer_state, 'params'):
+                    params = loaded.trainer_state.params
+                elif isinstance(loaded.trainer_state, dict) and 'params' in loaded.trainer_state:
+                    params = loaded.trainer_state['params']
+                else:
+                    print(f"  ERROR: Could not extract params from trainer object")
+                    sys.exit(1)
+            elif hasattr(loaded, 'params'):
+                # Legacy trainer format - params is an attribute
+                print(f"  Detected legacy trainer object")
+                params = loaded.params
+            else:
+                print(f"  ERROR: Unknown checkpoint format")
+                print(f"  Type: {type(loaded)}")
+                if isinstance(loaded, dict):
+                    print(f"  Keys: {list(loaded.keys())}")
+                else:
+                    print(f"  Attributes: {dir(loaded)}")
+                sys.exit(1)
+
+        print(f"  Loaded parameters with keys: {list(params.keys()) if isinstance(params, dict) else 'single array'}")
 
     # Load dataset
     print("\nLoading dataset...")
@@ -132,16 +289,47 @@ def main():
     R0 = dataset["R"][0]
     species0 = dataset["species"][0]
 
-    with redirect_stdout(io.StringIO()):
+    # Override config based on mode
+    if args.mode == 'prior-only':
+        # Force enable priors for prior-only evaluation
+        if not config._config.get('model'):
+            config._config['model'] = {}
+        config._config['model']['use_priors'] = True
+        print("  Mode: prior-only (priors enabled, ML will not be used)")
+    elif args.mode == 'ml-only':
+        # Force disable priors for ML-only evaluation
+        if not config._config.get('model'):
+            config._config['model'] = {}
+        config._config['model']['use_priors'] = False
+        print("  Mode: ml-only (priors disabled)")
+    else:
+        print(f"  Mode: full (use_priors={config.use_priors()})")
+
+    # Suppress both stdout and stderr during model initialization
+    # (Allegro prints to both, and we don't need to see it for prior-only mode)
+    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
         model = CombinedModel(
             config=config,
             R0=R0,
             box=box,
             species=species0,
-            N_max=loader.N_max
+            N_max=loader.N_max,
+            prior_only=(args.mode == 'prior-only')  # Skip ML computation for prior-only mode
         )
     print(f"  Model: {model}")
     print(f"  Use priors: {model.use_priors}")
+
+    # For prior-only mode, ensure params dict structure
+    if args.mode == 'prior-only':
+        if params is None:
+            # Create empty params dict - PriorEnergy will use its own params from config
+            params = {}
+
+        # Prior-only mode now truly skips ML computation, so we need a dummy ML param
+        # for Evaluator compatibility (it expects params['allegro'] to exist)
+        if 'allegro' not in params:
+            # Use a minimal dummy dict instead of full initialization
+            params['allegro'] = {'dummy': jnp.array(0.0)}
 
     # Create evaluator
     evaluator = Evaluator(model, params, config)
@@ -207,32 +395,44 @@ def main():
 
     print("=" * 60)
 
-    # Create plots (named with model_id to avoid overwriting)
+    # Create plots (named with model_id and mode to avoid overwriting)
     print("\nGenerating plots...")
 
+    # Build filename base with mode suffix
+    mode_suffix = ""
+    if args.mode == 'prior-only':
+        mode_suffix = f"_prior_only_{prior_type}" if prior_type else "_prior_only"
+    elif args.mode == 'ml-only':
+        mode_suffix = "_ml_only"
+
+    filename_base = f"{model_id}{mode_suffix}"
+
     # 1. Force component scatter plots (pred vs ref for x, y, z)
-    component_plot = output_dir / f"{model_id}_force_components.png"
+    component_plot = output_dir / f"{filename_base}_force_components.png"
     ForceAnalyzer.plot_force_components(F_pred_real, F_ref_real, component_plot)
     print(f"  Saved: {component_plot}")
 
     # 2. Force distribution plots
-    distribution_plot = output_dir / f"{model_id}_force_distribution.png"
+    distribution_plot = output_dir / f"{filename_base}_force_distribution.png"
     ForceAnalyzer.plot_force_distribution(F_pred_real, F_ref_real, distribution_plot)
     print(f"  Saved: {distribution_plot}")
 
     # 3. Force magnitude plot (using first frame's coordinates for position info)
     R_all = np.concatenate([dataset["R"][i] for i in frame_indices], axis=0)
     R_real = R_all[real_mask]
-    magnitude_plot = output_dir / f"{model_id}_force_magnitude.png"
+    magnitude_plot = output_dir / f"{filename_base}_force_magnitude.png"
     ForceAnalyzer.plot_force_magnitude(F_pred_real, F_ref_real, R_real, magnitude_plot)
     print(f"  Saved: {magnitude_plot}")
 
     # Save numerical results
-    results_file = output_dir / f"{model_id}_force_metrics.txt"
+    results_file = output_dir / f"{filename_base}_force_metrics.txt"
     with open(results_file, 'w') as f:
         f.write("Force Evaluation Results\n")
         f.write("=" * 40 + "\n")
-        f.write(f"Parameters: {args.params}\n")
+        f.write(f"Mode: {args.mode}\n")
+        if args.mode == 'prior-only':
+            f.write(f"Prior type: {prior_type}\n")
+        f.write(f"Parameters: {args.params if args.params else 'None (config priors)'}\n")
         f.write(f"Config: {args.config}\n")
         f.write(f"Frames evaluated: {n_frames}\n")
         f.write(f"Total atoms: {len(F_pred_real)}\n")
