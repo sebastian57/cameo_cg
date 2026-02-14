@@ -83,6 +83,10 @@ class Trainer:
         # Store training data for prior pre-training
         if train_data is not None:
             self._train_data = train_data
+            if "species" not in self._train_data:
+                self._train_data["species"] = jnp.zeros_like(
+                    self._train_data["mask"], dtype=jnp.int32
+                )
         else:
             # Try to extract from loader (for backwards compatibility)
             # NumpyDataLoader stores data in _chains internally
@@ -93,6 +97,11 @@ class Trainer:
                         "R": jnp.asarray(chain_data["R"]),
                         "F": jnp.asarray(chain_data["F"]),
                         "mask": jnp.asarray(chain_data["mask"]),
+                        "species": jnp.asarray(
+                            chain_data["species"]
+                            if "species" in chain_data
+                            else np.zeros_like(chain_data["mask"], dtype=np.int32)
+                        ),
                     }
                 else:
                     training_logger.warning("Could not extract training data from loader. Prior pre-training may not work.")
@@ -322,6 +331,14 @@ class Trainer:
             training_logger.info("Skipping prior pre-training (use_priors=False)")
             return {"train_loss": 0.0, "val_loss": 0.0, "converged": True}
 
+        prior = self.model.prior
+        if prior is not None and getattr(prior, "uses_splines", False):
+            training_logger.info(
+                "Spline priors detected - skipping LBFGS prior pre-training "
+                "(no parametric prior parameters to optimize)."
+            )
+            return {"train_loss": 0.0, "val_loss": 0.0, "converged": True}
+
         # Check if we're in multi-node distributed mode
         is_distributed = jax.process_count() > 1
         rank = jax.process_index()
@@ -343,7 +360,6 @@ class Trainer:
         train_data = self._train_data
 
         # Get prior components
-        prior = self.model.prior
         displacement = prior.displacement
         bonds = prior.bonds
         angles = prior.angles
@@ -353,10 +369,12 @@ class Trainer:
         params0 = prior.params
 
         # Define prior force computation
-        def prior_forces(params, R, mask):
+        def prior_forces(params, R, mask, species):
             """Compute forces from prior energy only."""
             def energy_of_R(R_):
-                return prior.compute_total_energy_from_params(params, R_, mask)
+                return prior.compute_total_energy_from_params(
+                    params, R_, mask, species=species
+                )
             return -jax.grad(energy_of_R)(R)
 
         # Define force matching loss
@@ -365,11 +383,12 @@ class Trainer:
             R = train_data["R"]
             F_ref = train_data["F"]
             mask = train_data["mask"]
+            species = train_data["species"]
 
             # Vectorized force prediction over batch
             F_pred = jax.vmap(
-                lambda R_f, m_f: prior_forces(params, R_f, m_f)
-            )(R, mask)
+                lambda R_f, m_f, s_f: prior_forces(params, R_f, m_f, s_f)
+            )(R, mask, species)
 
             # Masked squared error
             m3 = mask[..., None]  # Broadcast mask to (batch, atoms, 3)
