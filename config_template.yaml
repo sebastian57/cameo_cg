@@ -4,14 +4,14 @@
 seed: 193749
 debug_priors: false
 
-model_context: "allegro_cg_protein_4zohB01"
-protein_name: "4zohB01"
-model_id: "clean_recreate_old"
+model_context: "allegro_cg_protein_2g4q4z5k"
+protein_name: "2g4q4z5k"
+model_id: "bigger_spline_test_resumed"
 
 data:
-  path: "data_prep/datasets/4zohB01_320K_kcalmol_1bead_notnorm_aggforce.npz"
-  #path: "data_prep/datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz"
-  max_frames: 2500  # Maximum frames to use from dataset (null = use all)
+  #path: "data_prep/datasets/4zohB01_320K_kcalmol_1bead_notnorm_aggforce.npz"
+  path: "data_prep/datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz"
+  max_frames: 10000  # Maximum frames to use from dataset (null = use all)
 
 preprocessing:
   buffer_multiplier: 2.0  # Multiplier for box buffer (box = max_range + 2 * buffer_multiplier * cutoff)
@@ -19,7 +19,7 @@ preprocessing:
 
 model:
   use_priors: true  # Set to false for pure Allegro (ML only)
-  train_priors: true  # Train prior parameters during force-matching stages
+  train_priors: false  # Train prior parameters during force-matching stages
 
   allegro_size: "default"  # Options: "default", "large", "med"
 
@@ -64,6 +64,9 @@ model:
 
   # Prior energy parameters (used if use_priors=true)
   priors:
+    use_spline_priors: true
+    spline_file: "data_prep/datasets/fitted_priors_spline.npz"
+    residue_specific_angles: true 
     # ========================================================================
     # Energy term weights
     # ========================================================================
@@ -108,10 +111,10 @@ optimizer:
 
   adabelief:
     lr: 5.0e-2
-    peak_lr: 0.01
+    peak_lr: 0.05 #0.03 (value from before resuming training)
     end_lr: 5.0e-3
-    warmup_epochs: 15
-    decay_steps: 2500
+    warmup_epochs: 5
+    decay_steps: 10000
     beta1: 0.95
     beta2: 0.999
     eps: 1.0e-8
@@ -176,11 +179,11 @@ training:
   stage1_optimizer: "adabelief"  # First training stage optimizer
   stage2_optimizer: "yogi"  # Second training stage (fine-tuning)
 
-  epochs_adabelief: 10 # looks like 30 epochs in 4 hours with 10k structures and moderate model size / cutoff
+  epochs_adabelief: 40 # looks like 30 epochs in 4 hours with 10k structures and moderate model size / cutoff
   epochs_yogi: 0  # Set to 0 to skip this stage
 
   val_fraction: 0.1  # Validation set fraction
-  batch_per_device: 16  # Batch size per GPU
+  batch_per_device: 4  # Batch size per GPU
   batch_cache: 10  # Number of batches to cache
 
   gammas:
@@ -193,4 +196,3 @@ training:
 
   # Export
   export_path: "./exported_models"
-
