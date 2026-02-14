@@ -223,6 +223,11 @@ class AllegroExporter(exporter.Exporter):
         # Get prior parameters (if priors are used)
         if model.use_priors:
             prior_params = params.get("prior", model.prior.params)
+            if getattr(model.prior, "uses_splines", False):
+                export_logger.info(
+                    "Spline priors detected: spline arrays will be captured as constants "
+                    "through model.compute_total_energy during MLIR tracing."
+                )
         else:
             # Empty prior params if not using priors
             prior_params = {}
