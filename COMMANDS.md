@@ -75,17 +75,24 @@ Output:
 
 ### Quick Force Evaluation (with plots)
 
+The `evaluate_forces.py` script supports three evaluation modes to compare different model components:
+- **`full`** (default): Evaluate complete model (ML + priors if configured)
+- **`prior-only`**: Evaluate ONLY prior terms (parametric, spline, or trained priors)
+- **`ml-only`**: Evaluate ONLY ML model (disable priors)
+
+#### Full Model Evaluation (ML + Priors)
+
 ```bash
 cd /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base
 
-# Evaluate on 10 random frames (default)
+# Evaluate full model on 10 random frames (default)
 python scripts/evaluate_forces.py \
     exported_models/model_params.pkl \
     config.yaml
 
-# Evaluate on 50 frames
+# Evaluate from training checkpoint (supports chemtrain checkpoint format)
 python scripts/evaluate_forces.py \
-    exported_models/model_params.pkl \
+    checkpoints_allegro/epoch00040.pkl \
     config.yaml \
     --frames 50
 
@@ -97,11 +104,71 @@ python scripts/evaluate_forces.py \
     --output ./my_eval_results/
 ```
 
-Output (saved to `./force_eval/` by default):
-- `<model_id>_force_components.png` - Pred vs Ref scatter plots for X/Y/Z
-- `<model_id>_force_distribution.png` - Force magnitude distributions
-- `<model_id>_force_magnitude.png` - Magnitude comparison
-- `<model_id>_force_metrics.txt` - Numerical RMSE/MAE values
+**Note**: The script automatically detects and supports:
+- Exported model files (`model_params.pkl`)
+- Training checkpoints (`epoch*.pkl`, `stage_*.pkl`)
+- Both chemtrain trainer format and direct params dict format
+
+#### Prior-Only Evaluation
+
+Evaluate physics-based priors without ML component. Supports three prior types:
+- **Parametric priors**: Histogram-fitted parameters from config YAML
+- **Spline priors**: Cubic spline PMFs from NPZ file
+- **Trained priors**: Optimized prior parameters from training
+
+```bash
+# Evaluate parametric priors (from config YAML)
+python scripts/evaluate_forces.py \
+    config_preprior.yaml \
+    --mode prior-only \
+    --frames 10
+
+# Evaluate spline priors (from config with spline_file specified)
+python scripts/evaluate_forces.py \
+    config_template.yaml \
+    --mode prior-only \
+    --frames 50
+
+# Evaluate trained priors (from params.pkl if train_priors was enabled)
+python scripts/evaluate_forces.py \
+    exported_models/model_params.pkl \
+    config.yaml \
+    --mode prior-only
+
+# Evaluate trained priors from checkpoint
+python scripts/evaluate_forces.py \
+    checkpoints_allegro/stage_adabelief_epoch50.pkl \
+    config.yaml \
+    --mode prior-only
+```
+
+**Note**: Prior-only mode is much faster than full evaluation since it skips the expensive ML computation entirely.
+
+#### ML-Only Evaluation
+
+Evaluate only the ML model, disabling priors even if configured:
+
+```bash
+# Force disable priors for pure ML evaluation
+python scripts/evaluate_forces.py \
+    exported_models/model_params.pkl \
+    config.yaml \
+    --mode ml-only \
+    --frames 50
+```
+
+#### Output Files
+
+Saved to `./force_eval/` by default, with mode-specific naming:
+- **Full mode**: `<model_id>_force_*.png`
+- **Prior-only**: `<model_id>_prior_only_{prior_type}_force_*.png`
+- **ML-only**: `<model_id>_ml_only_force_*.png`
+
+Files generated:
+- `*_force_components.png` - Pred vs Ref scatter plots for X/Y/Z
+- `*_force_distribution.png` - Force magnitude distributions
+- `*_force_magnitude.png` - Magnitude comparison
+- `*_force_metrics.txt` - Numerical RMSE/MAE values
 
 ### Full Dataset Evaluation
 
@@ -152,6 +219,38 @@ python data_prep/cg_1bead.py \
     --output data_prep/datasets/protein_cg.npz
 ```
 
+### Prior Fitting (Legacy + Spline)
+
+Fit legacy parametric priors (histogram/Fourier path):
+
+```bash
+cd /p/project1/cameo/schmidt36/cameo_cg
+
+python data_prep/prior_fitting_script.py \
+    --data /path/to/combined_dataset.npz \
+    --out_yaml data_prep/fitted_priors.yaml \
+    --plots_dir data_prep/plots \
+    --T 320.0
+```
+
+Fit spline priors as an add-on (also writes legacy YAML above):
+
+```bash
+cd /p/project1/cameo/schmidt36/cameo_cg
+
+python data_prep/prior_fitting_script.py \
+    --data /path/to/combined_dataset.npz \
+    --out_yaml data_prep/fitted_priors.yaml \
+    --plots_dir data_prep/plots \
+    --T 320.0 \
+    --spline \
+    --spline_out data_prep/datasets/fitted_priors_spline.npz \
+    --residue_specific_angles \
+    --angle_min_samples 500 \
+    --kde_bandwidth_factor 1.0 \
+    --spline_grid_points 500
+```
+
 ---
 
 ## Checking Job Status
@@ -166,9 +265,14 @@ scontrol show job <JOB_ID>
 # Cancel a job
 scancel <JOB_ID>
 
-# View job output in real-time
-tail -f slurm-<JOB_ID>.out
+# View SLURM output in real-time
+tail -f outputs/slurm-<JOB_ID>.out
+
+# View training log in real-time
+tail -f outputs/train_allegro_<JOB_ID>.log
 ```
+
+**Note:** All SLURM outputs and training logs are now saved in the `outputs/` directory for better organization.
 
 ---
 
@@ -207,6 +311,9 @@ training:
 
 # Datasets
 /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/data_prep/datasets/
+
+# Training outputs (SLURM logs, training logs)
+./outputs/
 
 # Checkpoints (during training)
 ./checkpoints_allegro/
