@@ -145,6 +145,27 @@ class ConfigManager:
         """Get prior energy parameters (r0, kr, a, b, etc.)."""
         return self.get("model", "priors", default={})
 
+    def use_spline_priors_enabled(self) -> bool:
+        """
+        Check if spline priors are enabled.
+
+        Backward compatibility:
+        - If explicit boolean `model.priors.use_spline_priors` is set, use it.
+        - Otherwise, enable spline priors if `model.priors.spline_file` exists.
+        """
+        explicit = self.get("model", "priors", "use_spline_priors", default=None)
+        if explicit is not None:
+            return bool(explicit)
+        return self.get("model", "priors", "spline_file", default=None) is not None
+
+    def get_spline_file_path(self) -> Optional[str]:
+        """Get spline prior file path (if configured)."""
+        return self.get("model", "priors", "spline_file", default=None)
+
+    def get_residue_specific_angles(self) -> bool:
+        """Check if residue-specific angle splines are requested."""
+        return self.get("model", "priors", "residue_specific_angles", default=False)
+
     # ----- Optimizer Section -----
 
     def get_optimizer_config(self, name: str) -> Dict[str, Any]:
@@ -294,6 +315,11 @@ class ConfigManager:
     def pretrain_prior_enabled(self) -> bool:
         """Check if prior pre-training is enabled."""
         return self.get("training", "pretrain_prior", default=False)
+
+    def set_pretrain_prior_enabled(self, enabled: bool) -> None:
+        """Set prior pre-training flag at runtime."""
+        self._config.setdefault("training", {})
+        self._config["training"]["pretrain_prior"] = bool(enabled)
 
     def get_pretrain_prior_max_steps(self) -> int:
         """Get maximum LBFGS steps for prior pre-training."""

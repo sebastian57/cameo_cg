@@ -146,6 +146,21 @@ class PriorParams(TypedDict, total=False):
     gamma_dih: jax.Array  # Dihedral phase angles
 
 
+class SplineArrays(TypedDict, total=False):
+    """Spline prior arrays loaded from fitted_priors_spline.npz."""
+    bond_knots: jax.Array
+    bond_coeffs: jax.Array
+    angle_knots: jax.Array
+    angle_coeffs: jax.Array
+    dih_knots: jax.Array
+    dih_coeffs: jax.Array
+    angle_n_types: Optional[int]
+    angle_type_knots: Optional[jax.Array]
+    angle_type_coeffs: Optional[jax.Array]
+    angle_type_mask: Optional[jax.Array]
+    residue_specific_angles: Optional[bool]
+
+
 class ModelParams(TypedDict, total=False):
     """Combined model parameters."""
     prior: Optional[PriorParams]
