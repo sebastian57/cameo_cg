@@ -7,6 +7,10 @@ Implements physics-based energy terms:
 - Dihedrals: Periodic torsion potential
 - Repulsive: Soft-sphere non-bonded interactions
 
+Supports two evaluation modes:
+- Parametric (legacy): harmonic bond, Fourier angle, periodic dihedral
+- Spline (new): cubic spline PMF from KDE + Boltzmann inversion
+
 Consolidated from:
 - allegro_energyfn_multiple_proteins.py
 - prior_energyfn.py
@@ -14,8 +18,16 @@ Consolidated from:
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+from pathlib import Path
 from typing import Dict, Tuple, Optional
 from .topology import TopologyBuilder
+from .spline_eval import (
+    evaluate_cubic_spline,
+    evaluate_cubic_spline_periodic,
+    evaluate_cubic_spline_by_type,
+)
+from utils.logging import model_logger
 
 
 # =============================================================================
@@ -220,7 +232,11 @@ class PriorEnergy:
     Physics-based prior energy for coarse-grained proteins.
 
     Computes energy from bonds, angles, dihedrals, and repulsive interactions.
-    All parameters are loaded from config.
+    Parameters are loaded from config (parametric) or from a spline NPZ file.
+
+    Two modes controlled by presence of `spline_file` in config:
+    - Parametric (default): harmonic bond, Fourier angle, periodic dihedral
+    - Spline: cubic spline PMF from KDE + Boltzmann inversion
 
     Example:
         >>> config = ConfigManager("config.yaml")
@@ -243,19 +259,6 @@ class PriorEnergy:
         self.topology = topology
         self.displacement = displacement
 
-        # Load prior parameters from config
-        prior_params = config.get_prior_params()
-        self.params = {
-            "r0": jnp.asarray(prior_params.get("r0", 3.8), dtype=jnp.float32),
-            "kr": jnp.asarray(prior_params.get("kr", 150.0), dtype=jnp.float32),
-            "a": jnp.asarray(prior_params.get("a", [0.0]), dtype=jnp.float32),
-            "b": jnp.asarray(prior_params.get("b", [0.0]), dtype=jnp.float32),
-            "epsilon": jnp.asarray(prior_params.get("epsilon", 1.0), dtype=jnp.float32),
-            "sigma": jnp.asarray(prior_params.get("sigma", 3.0), dtype=jnp.float32),
-            "k_dih": jnp.asarray(prior_params.get("k_dih", [0.5]), dtype=jnp.float32),
-            "gamma_dih": jnp.asarray(prior_params.get("gamma_dih", [0.0]), dtype=jnp.float32),
-        }
-
         # Load energy term weights from config
         self.weights = config.get("model", "priors", "weights", default={
             "bond": 0.5,
@@ -269,6 +272,101 @@ class PriorEnergy:
         self.dihedrals = topology.get_dihedrals()
         self.rep_pairs = topology.get_repulsive_pairs()
 
+        # Check for spline-based priors.
+        # New path: explicit boolean gate in config.
+        # Backward compatibility: if boolean is not set, enable splines when
+        # a spline file is provided.
+        spline_path = config.get("model", "priors", "spline_file", default=None)
+        use_spline_cfg = config.get("model", "priors", "use_spline_priors", default=None)
+        use_spline_priors = bool(spline_path is not None) if use_spline_cfg is None else bool(use_spline_cfg)
+
+        if use_spline_priors:
+            if spline_path is None:
+                raise ValueError(
+                    "model.priors.use_spline_priors is true, but model.priors.spline_file is not set."
+                )
+            self._init_spline_priors(spline_path, config)
+        else:
+            self._init_parametric_priors(config)
+
+    def _init_spline_priors(self, spline_path: str, config):
+        """Initialize spline-based priors from NPZ file."""
+        self.uses_splines = True
+
+        # Resolve relative paths
+        spline_path = Path(spline_path)
+        if not spline_path.is_absolute():
+            # Resolve relative to config file location
+            config_dir = config.config_path.parent
+            spline_path = config_dir / spline_path
+
+        if not spline_path.exists():
+            raise FileNotFoundError(f"Spline prior file not found: {spline_path}")
+
+        model_logger.info(f"Loading spline priors from: {spline_path}")
+        spline_data = np.load(str(spline_path), allow_pickle=True)
+
+        # Bond spline (global)
+        self.bond_knots = jnp.asarray(spline_data["bond_knots"], dtype=jnp.float32)
+        self.bond_coeffs = jnp.asarray(spline_data["bond_coeffs"], dtype=jnp.float32)
+
+        # Angle spline (global fallback)
+        self.angle_knots = jnp.asarray(spline_data["angle_knots"], dtype=jnp.float32)
+        self.angle_coeffs = jnp.asarray(spline_data["angle_coeffs"], dtype=jnp.float32)
+
+        # Angle splines (per-AA, if available and enabled by config)
+        file_has_type_angles = bool(spline_data.get("residue_specific_angles", False))
+        cfg_wants_type_angles = bool(
+            config.get("model", "priors", "residue_specific_angles", default=file_has_type_angles)
+        )
+        self.residue_specific_angles = bool(file_has_type_angles and cfg_wants_type_angles)
+
+        if cfg_wants_type_angles and not file_has_type_angles:
+            model_logger.warning(
+                "Config requests residue_specific_angles=true, but spline file has no angle_type_* arrays. "
+                "Falling back to global angle spline."
+            )
+
+        if self.residue_specific_angles:
+            self.angle_type_knots = jnp.asarray(spline_data["angle_type_knots"], dtype=jnp.float32)
+            self.angle_type_coeffs = jnp.asarray(spline_data["angle_type_coeffs"], dtype=jnp.float32)
+            self.angle_type_mask = jnp.asarray(spline_data["angle_type_mask"], dtype=jnp.float32)
+            n_types = int(spline_data.get("angle_n_types", self.angle_type_mask.shape[0]))
+            model_logger.info(f"Residue-specific angle priors: {n_types} types, "
+                            f"{int(self.angle_type_mask.sum())} with own splines")
+        else:
+            model_logger.info("Global angle prior (no residue-specific typing)")
+
+        # Dihedral spline (global)
+        self.dih_knots = jnp.asarray(spline_data["dih_knots"], dtype=jnp.float32)
+        self.dih_coeffs = jnp.asarray(spline_data["dih_coeffs"], dtype=jnp.float32)
+
+        # Only repulsive params from YAML (still parametric)
+        prior_params = config.get_prior_params()
+        self.params = {
+            "epsilon": jnp.asarray(prior_params.get("epsilon", 1.0), dtype=jnp.float32),
+            "sigma": jnp.asarray(prior_params.get("sigma", 3.0), dtype=jnp.float32),
+        }
+
+        model_logger.info("Spline priors loaded: bond, angle, dihedral (repulsive stays parametric)")
+
+    def _init_parametric_priors(self, config):
+        """Initialize parametric priors from config YAML."""
+        self.uses_splines = False
+        self.residue_specific_angles = False
+
+        prior_params = config.get_prior_params()
+        self.params = {
+            "r0": jnp.asarray(prior_params.get("r0", 3.8), dtype=jnp.float32),
+            "kr": jnp.asarray(prior_params.get("kr", 150.0), dtype=jnp.float32),
+            "a": jnp.asarray(prior_params.get("a", [0.0]), dtype=jnp.float32),
+            "b": jnp.asarray(prior_params.get("b", [0.0]), dtype=jnp.float32),
+            "epsilon": jnp.asarray(prior_params.get("epsilon", 1.0), dtype=jnp.float32),
+            "sigma": jnp.asarray(prior_params.get("sigma", 3.0), dtype=jnp.float32),
+            "k_dih": jnp.asarray(prior_params.get("k_dih", [0.5]), dtype=jnp.float32),
+            "gamma_dih": jnp.asarray(prior_params.get("gamma_dih", [0.0]), dtype=jnp.float32),
+        }
+
     def compute_bond_energy(
         self,
         R: jax.Array,
@@ -276,13 +374,15 @@ class PriorEnergy:
         params: Optional[Dict[str, jax.Array]] = None
     ) -> jax.Array:
         """
-        Compute harmonic bond stretching energy.
+        Compute bond stretching energy.
 
-        E_bond = 0.5 * kr * sum[ (r - r0)^2 ]  (for valid bonds)
+        Spline mode: evaluates cubic spline PMF.
+        Parametric mode: E_bond = 0.5 * kr * sum[ (r - r0)^2 ]
 
         Args:
             R: Coordinates, shape (n_atoms, 3)
             mask: Validity mask, shape (n_atoms,)
+            params: Optional prior params dict (for train_priors mode)
 
         Returns:
             Total bond energy (scalar)
@@ -298,9 +398,13 @@ class PriorEnergy:
         dR = jax.vmap(self.displacement)(Ri, Rj)
         r = _safe_norm(dR)
 
-        # Harmonic energy with jnp.where for forward pass NaN prevention
-        bond_energy = (r - p["r0"]) ** 2
-        E_bond = 0.5 * p["kr"] * jnp.sum(jnp.where(bond_valid, bond_energy, 0.0))
+        if self.uses_splines:
+            U_bond = evaluate_cubic_spline(r, self.bond_knots, self.bond_coeffs)
+            E_bond = jnp.sum(jnp.where(bond_valid, U_bond, 0.0))
+        else:
+            # Harmonic energy with jnp.where for forward pass NaN prevention
+            bond_energy = (r - p["r0"]) ** 2
+            E_bond = 0.5 * p["kr"] * jnp.sum(jnp.where(bond_valid, bond_energy, 0.0))
 
         return E_bond
 
@@ -308,16 +412,20 @@ class PriorEnergy:
         self,
         R: jax.Array,
         mask: jax.Array,
+        species: Optional[jax.Array] = None,
         params: Optional[Dict[str, jax.Array]] = None
     ) -> jax.Array:
         """
-        Compute angle bending energy using Fourier series.
+        Compute angle bending energy.
 
-        E_angle = sum[ U_angle(theta) ]  (for valid angles)
+        Spline mode: evaluates cubic spline PMF (optionally residue-specific).
+        Parametric mode: Fourier series.
 
         Args:
             R: Coordinates, shape (n_atoms, 3)
             mask: Validity mask, shape (n_atoms,)
+            species: Species IDs, shape (n_atoms,). Required for residue-specific angles.
+            params: Optional prior params dict (for train_priors mode)
 
         Returns:
             Total angle energy (scalar)
@@ -337,8 +445,24 @@ class PriorEnergy:
         # By applying stop_gradient to theta for invalid angles, we block NaN gradients.
         theta = jnp.where(angle_valid, theta, jax.lax.stop_gradient(theta))
 
-        # Fourier series energy
-        U_angle = _angular_fourier_energy(theta, p["a"], p["b"])
+        if self.uses_splines:
+            if self.residue_specific_angles and species is not None:
+                central_species = species[self.angles[:, 1]]
+                central_species = jnp.clip(
+                    central_species,
+                    0,
+                    self.angle_type_mask.shape[0] - 1
+                ).astype(jnp.int32)
+                U_angle = evaluate_cubic_spline_by_type(
+                    theta, central_species,
+                    self.angle_type_knots, self.angle_type_coeffs, self.angle_type_mask,
+                    self.angle_knots, self.angle_coeffs,
+                )
+            else:
+                U_angle = evaluate_cubic_spline(theta, self.angle_knots, self.angle_coeffs)
+        else:
+            # Fourier series energy
+            U_angle = _angular_fourier_energy(theta, p["a"], p["b"])
 
         # Use jnp.where to avoid NaN propagation in forward pass
         E_angle = jnp.sum(jnp.where(angle_valid, U_angle, 0.0))
@@ -354,11 +478,12 @@ class PriorEnergy:
         """
         Compute soft-sphere repulsive energy for non-bonded pairs.
 
-        E_rep = epsilon * sum[ (sigma / r)^4 ]  (for valid pairs)
+        Always parametric: E_rep = epsilon * sum[ (sigma / r)^4 ]
 
         Args:
             R: Coordinates, shape (n_atoms, 3)
             mask: Validity mask, shape (n_atoms,)
+            params: Optional prior params dict (for train_priors mode)
 
         Returns:
             Total repulsive energy (scalar)
@@ -467,13 +592,15 @@ class PriorEnergy:
         params: Optional[Dict[str, jax.Array]] = None
     ) -> jax.Array:
         """
-        Compute dihedral torsion energy using periodic potential.
+        Compute dihedral torsion energy.
 
-        E_dihedral = sum[ U_dihedral(phi) ]  (for valid dihedrals)
+        Spline mode: evaluates periodic cubic spline PMF.
+        Parametric mode: periodic cosine.
 
         Args:
             R: Coordinates, shape (n_atoms, 3)
             mask: Validity mask, shape (n_atoms,)
+            params: Optional prior params dict (for train_priors mode)
 
         Returns:
             Total dihedral energy (scalar)
@@ -495,8 +622,11 @@ class PriorEnergy:
         # gradient propagation at the source.
         phi = jnp.where(dih_valid, phi, jax.lax.stop_gradient(phi))
 
-        # Periodic energy
-        U_dih = _dihedral_periodic_energy(phi, p["k_dih"], p["gamma_dih"])
+        if self.uses_splines:
+            U_dih = evaluate_cubic_spline_periodic(phi, self.dih_knots, self.dih_coeffs)
+        else:
+            # Periodic energy
+            U_dih = _dihedral_periodic_energy(phi, p["k_dih"], p["gamma_dih"])
 
         # Use jnp.where to avoid NaN propagation in forward pass
         E_dih = jnp.sum(jnp.where(dih_valid, U_dih, 0.0))
@@ -507,6 +637,7 @@ class PriorEnergy:
         self,
         R: jax.Array,
         mask: jax.Array,
+        species: Optional[jax.Array] = None,
         params: Optional[Dict[str, jax.Array]] = None
     ) -> Dict[str, jax.Array]:
         """
@@ -515,6 +646,8 @@ class PriorEnergy:
         Args:
             R: Coordinates, shape (n_atoms, 3)
             mask: Validity mask, shape (n_atoms,)
+            species: Species IDs, shape (n_atoms,). Needed for residue-specific angles.
+            params: Optional prior params dict (for train_priors mode)
 
         Returns:
             Dictionary with energy components:
@@ -527,7 +660,7 @@ class PriorEnergy:
         # Compute raw energies
         p = params if params is not None else self.params
         E_bond_raw = self.compute_bond_energy(R, mask, params=p)
-        E_angle_raw = self.compute_angle_energy(R, mask, params=p)
+        E_angle_raw = self.compute_angle_energy(R, mask, species=species, params=p)
         E_rep_raw = self.compute_repulsive_energy(R, mask, params=p)
         E_dih_raw = self.compute_dihedral_energy(R, mask, params=p)
 
@@ -555,6 +688,7 @@ class PriorEnergy:
         self,
         R: jax.Array,
         mask: jax.Array,
+        species: Optional[jax.Array] = None,
         params: Optional[Dict[str, jax.Array]] = None
     ) -> jax.Array:
         """
@@ -563,17 +697,20 @@ class PriorEnergy:
         Args:
             R: Coordinates, shape (n_atoms, 3)
             mask: Validity mask, shape (n_atoms,)
+            species: Species IDs, shape (n_atoms,). Needed for residue-specific angles.
+            params: Optional prior params dict (for train_priors mode)
 
         Returns:
             Total energy (scalar)
         """
-        return self.compute_energy(R, mask, params=params)["E_total"]
+        return self.compute_energy(R, mask, species=species, params=params)["E_total"]
 
     def compute_total_energy_from_params(
         self,
         params: Dict[str, jax.Array],
         R: jax.Array,
-        mask: jax.Array
+        mask: jax.Array,
+        species: Optional[jax.Array] = None
     ) -> jax.Array:
         """
         Compute total prior energy with given parameters.
@@ -584,11 +721,13 @@ class PriorEnergy:
             params: Prior parameters dict
             R: Coordinates, shape (n_atoms, 3)
             mask: Validity mask, shape (n_atoms,)
+            species: Species IDs, shape (n_atoms,)
 
         Returns:
             Total energy (scalar)
         """
-        return self.compute_total_energy(R, mask, params=params)
+        return self.compute_total_energy(R, mask, species=species, params=params)
 
     def __repr__(self) -> str:
-        return f"PriorEnergy(N_max={self.topology.N_max}, weights={self.weights})"
+        mode = "spline" if self.uses_splines else "parametric"
+        return f"PriorEnergy(N_max={self.topology.N_max}, mode={mode}, weights={self.weights})"

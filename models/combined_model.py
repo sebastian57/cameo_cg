@@ -42,7 +42,8 @@ class CombinedModel:
         >>> components = model.compute_components(params, R, mask, species)
     """
 
-    def __init__(self, config, R0: jax.Array, box: jax.Array, species: jax.Array, N_max: int):
+    def __init__(self, config, R0: jax.Array, box: jax.Array, species: jax.Array, N_max: int,
+                 prior_only: bool = False):
         """
         Initialize combined model.
 
@@ -52,9 +53,11 @@ class CombinedModel:
             box: Simulation box dimensions, shape (3,)
             species: Species IDs, shape (n_atoms,)
             N_max: Maximum number of atoms
+            prior_only: If True, skip ML computation entirely (only compute priors)
         """
         self.config = config
         self.N_max = N_max
+        self.prior_only = prior_only
 
         # Check if priors are enabled
         self.use_priors = config.use_priors()
@@ -115,7 +118,7 @@ class CombinedModel:
         neighbor: Optional[Any] = None
     ) -> jax.Array:
         """
-        Compute total energy (Allegro + Prior if enabled).
+        Compute total energy (Allegro + Prior if enabled, or prior-only).
 
         Args:
             params: Model parameters dict with 'allegro' and optionally 'prior'
@@ -127,6 +130,24 @@ class CombinedModel:
         Returns:
             Total energy (scalar)
         """
+        # Prior-only mode: skip ML computation entirely
+        if self.prior_only:
+            if not self.use_priors:
+                raise ValueError("prior_only=True requires use_priors=True in config")
+            mask_3d = mask[:, None]
+            R_masked = jnp.where(
+                mask_3d > 0,
+                R,
+                jax.lax.stop_gradient(R)  # Block gradient for padded atoms
+            )
+            if self.train_priors and "prior" in params:
+                return self.prior.compute_total_energy(
+                    R_masked, mask, species=species, params=params["prior"]
+                )
+            else:
+                return self.prior.compute_total_energy(R_masked, mask, species=species)
+
+        # Normal mode: compute ML (and optionally add priors)
         # ML energy (has internal R_masked handling)
         E_ml = self.ml_model.compute_energy(
             params['allegro'], R, mask, species, neighbor
@@ -147,10 +168,10 @@ class CombinedModel:
             )
             if self.train_priors and "prior" in params:
                 E_prior = self.prior.compute_total_energy(
-                    R_masked, mask, params=params["prior"]
+                    R_masked, mask, species=species, params=params["prior"]
                 )
             else:
-                E_prior = self.prior.compute_total_energy(R_masked, mask)
+                E_prior = self.prior.compute_total_energy(R_masked, mask, species=species)
             return E_ml + E_prior
         else:
             return E_ml
@@ -202,17 +223,20 @@ class CombinedModel:
         Returns:
             Dictionary with energy components:
                 - E_total: Total energy
-                - E_allegro: Allegro ML energy
+                - E_allegro: Allegro ML energy (0.0 if prior_only)
                 - E_bond: Bond energy (if use_priors)
                 - E_angle: Angle energy (if use_priors)
                 - E_repulsive: Repulsive energy (if use_priors)
                 - E_dihedral: Dihedral energy (if use_priors)
                 - E_prior_total: Total prior energy (if use_priors)
         """
-        # ML energy
-        E_ml = self.ml_model.compute_energy(
-            params['allegro'], R, mask, species, neighbor
-        )
+        # ML energy (skip if prior_only mode)
+        if self.prior_only:
+            E_ml = 0.0
+        else:
+            E_ml = self.ml_model.compute_energy(
+                params['allegro'], R, mask, species, neighbor
+            )
 
         components = {
             "E_allegro": E_ml,  # Key kept as "E_allegro" for backward compat
@@ -229,10 +253,10 @@ class CombinedModel:
             )
             if self.train_priors and "prior" in params:
                 prior_components = self.prior.compute_energy(
-                    R_masked, mask, params=params["prior"]
+                    R_masked, mask, species=species, params=params["prior"]
                 )
             else:
-                prior_components = self.prior.compute_energy(R_masked, mask)
+                prior_components = self.prior.compute_energy(R_masked, mask, species=species)
             components.update({
                 "E_bond": prior_components["E_bond"],
                 "E_angle": prior_components["E_angle"],
