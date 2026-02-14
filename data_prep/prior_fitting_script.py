@@ -12,6 +12,7 @@ import logging
 import sys
 from pathlib import Path
 import argparse
+from typing import Optional, Tuple
 
 # JAX/jax_md compatibility patch (must be before any jax_md imports)
 # jax_md uses jax.random.KeyArray which was removed in newer JAX versions
@@ -242,6 +243,202 @@ def prior_pdf_from_U_phi(phi, U, T=320.0, kB=0.0019872041):
     return w / Z
 
 
+def _require_scipy_for_splines():
+    """Import scipy spline/KDE dependencies only when spline mode is requested."""
+    try:
+        from scipy.interpolate import CubicSpline
+        from scipy.stats import gaussian_kde
+    except Exception as exc:
+        raise ImportError(
+            "Spline fitting requires scipy (scipy.interpolate + scipy.stats). "
+            "Install scipy or run without --spline."
+        ) from exc
+    return CubicSpline, gaussian_kde
+
+
+def _extract_spline_coeffs(cs) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Convert scipy CubicSpline object into (knots, coeffs) for JAX runtime.
+
+    scipy stores coeffs with shape (4, N-1) in descending powers:
+      S_i(x) = c[0,i](dx)^3 + c[1,i](dx)^2 + c[2,i](dx) + c[3,i]
+    Runtime evaluator expects shape (N-1, 4) in ascending order:
+      [c0, c1, c2, c3] => c0 + c1*dx + c2*dx^2 + c3*dx^3
+    """
+    knots = np.asarray(cs.x, dtype=np.float64)
+    c_desc = np.asarray(cs.c, dtype=np.float64)  # (4, N-1)
+    coeffs = np.stack([c_desc[3], c_desc[2], c_desc[1], c_desc[0]], axis=1)
+    return knots, coeffs
+
+
+def _safe_probability_to_pmf(prob, T, kB, floor_rel=1e-8):
+    """Convert probability density to PMF with floor and min-shift."""
+    p = np.asarray(prob, dtype=np.float64)
+    pmax = max(float(np.max(p)), 1e-300)
+    p_floor = max(floor_rel * pmax, 1e-300)
+    p_safe = np.clip(p, p_floor, None)
+    U = -(kB * T) * np.log(p_safe)
+    U -= float(np.min(U))
+    return U
+
+
+def _periodic_extend(values, period=2.0 * np.pi):
+    """Duplicate angular samples by +/- one period for periodic KDE."""
+    v = np.asarray(values, dtype=np.float64)
+    return np.concatenate([v - period, v, v + period], axis=0)
+
+
+def _kde_on_grid(samples, grid, bw_factor=1.0, weights=None):
+    """Evaluate gaussian_kde on a fixed grid with optional bandwidth scaling."""
+    _, gaussian_kde = _require_scipy_for_splines()
+    kde = gaussian_kde(samples, weights=weights)
+    if bw_factor != 1.0:
+        kde.set_bandwidth(kde.factor * float(bw_factor))
+    dens = kde(grid)
+    return np.asarray(dens, dtype=np.float64)
+
+
+def fit_bond_spline(all_bonds, T, kB, n_grid, bw_factor):
+    """Fit bond PMF using KDE -> BI -> natural cubic spline."""
+    CubicSpline, _ = _require_scipy_for_splines()
+
+    x = np.asarray(all_bonds, dtype=np.float64)
+    p1, p99 = np.percentile(x, [1.0, 99.0])
+    span = max(p99 - p1, 1e-3)
+    xmin = max(1e-6, p1 - 0.05 * span)
+    xmax = p99 + 0.05 * span
+    grid = np.linspace(xmin, xmax, int(n_grid), dtype=np.float64)
+
+    dens = _kde_on_grid(x, grid, bw_factor=bw_factor)
+    U = _safe_probability_to_pmf(dens, T=T, kB=kB)
+    cs = CubicSpline(grid, U, bc_type="natural")
+    knots, coeffs = _extract_spline_coeffs(cs)
+    return knots, coeffs, grid, dens, U, cs
+
+
+def fit_angle_spline(all_angles, T, kB, n_grid, bw_factor, theta_min=0.5, theta_max=None):
+    """Fit global angle PMF with Jacobian-aware KDE weighting and natural spline."""
+    CubicSpline, _ = _require_scipy_for_splines()
+    if theta_max is None:
+        theta_max = np.pi - 0.01
+
+    x = np.asarray(all_angles, dtype=np.float64)
+    x = x[(x > theta_min) & (x < theta_max)]
+    grid = np.linspace(theta_min, theta_max, int(n_grid), dtype=np.float64)
+
+    # Jacobian correction P_intrinsic(theta) ~ P_raw(theta) / sin(theta)
+    sinx = np.clip(np.sin(x), 1e-8, None)
+    weights = 1.0 / sinx
+    dens = _kde_on_grid(x, grid, bw_factor=bw_factor, weights=weights)
+    U = _safe_probability_to_pmf(dens, T=T, kB=kB)
+    cs = CubicSpline(grid, U, bc_type="natural")
+    knots, coeffs = _extract_spline_coeffs(cs)
+    return knots, coeffs, grid, dens, U, cs
+
+
+def fit_angle_spline_by_type(
+    all_angles,
+    all_central_species,
+    n_types,
+    T,
+    kB,
+    n_grid,
+    bw_factor,
+    min_samples=500,
+    theta_min=0.5,
+    theta_max=None,
+):
+    """Fit residue-specific angle splines with global fallback mask."""
+    if theta_max is None:
+        theta_max = np.pi - 0.01
+
+    # Fit global spline first; this defines the shared grid for all types
+    g_knots, g_coeffs, grid, _, _, _ = fit_angle_spline(
+        all_angles, T=T, kB=kB, n_grid=n_grid, bw_factor=bw_factor,
+        theta_min=theta_min, theta_max=theta_max
+    )
+
+    all_knots = np.tile(g_knots[None, :], (int(n_types), 1))
+    all_coeffs = np.tile(g_coeffs[None, :, :], (int(n_types), 1, 1))
+    type_mask = np.zeros((int(n_types),), dtype=np.int32)
+    counts = np.zeros((int(n_types),), dtype=np.int64)
+
+    CubicSpline, _ = _require_scipy_for_splines()
+    angles = np.asarray(all_angles, dtype=np.float64)
+    species = np.asarray(all_central_species, dtype=np.int32)
+
+    for s in range(int(n_types)):
+        sel = species == s
+        x_s = angles[sel]
+        x_s = x_s[(x_s > theta_min) & (x_s < theta_max)]
+        counts[s] = int(x_s.size)
+        if x_s.size < int(min_samples):
+            continue
+
+        sinx = np.clip(np.sin(x_s), 1e-8, None)
+        w_s = 1.0 / sinx
+        dens_s = _kde_on_grid(x_s, grid, bw_factor=bw_factor, weights=w_s)
+        U_s = _safe_probability_to_pmf(dens_s, T=T, kB=kB)
+        cs_s = CubicSpline(grid, U_s, bc_type="natural")
+        k_s, c_s = _extract_spline_coeffs(cs_s)
+        all_knots[s] = k_s
+        all_coeffs[s] = c_s
+        type_mask[s] = 1
+
+    return g_knots, g_coeffs, all_knots, all_coeffs, type_mask, counts
+
+
+def fit_dihedral_spline(all_dihedrals, T, kB, n_grid, bw_factor):
+    """Fit periodic dihedral PMF via periodic KDE extension and periodic spline."""
+    CubicSpline, _ = _require_scipy_for_splines()
+
+    x = np.asarray(all_dihedrals, dtype=np.float64)
+    x_ext = _periodic_extend(x, period=2.0 * np.pi)
+    grid = np.linspace(-np.pi, np.pi, int(n_grid), endpoint=True, dtype=np.float64)
+
+    dens = _kde_on_grid(x_ext, grid, bw_factor=bw_factor)
+    # Required by periodic cubic BC: y[0] == y[-1]
+    dens[-1] = dens[0]
+    U = _safe_probability_to_pmf(dens, T=T, kB=kB)
+    U[-1] = U[0]
+
+    cs = CubicSpline(grid, U, bc_type="periodic")
+    knots, coeffs = _extract_spline_coeffs(cs)
+    return knots, coeffs, grid, dens, U, cs
+
+
+def eval_piecewise_spline_numpy(x, knots, coeffs, periodic=False):
+    """Evaluate exported spline coefficients in NumPy (for diagnostics)."""
+    x = np.asarray(x, dtype=np.float64)
+    k = np.asarray(knots, dtype=np.float64)
+    c = np.asarray(coeffs, dtype=np.float64)
+    if periodic:
+        period = float(k[-1] - k[0])
+        x = k[0] + np.mod(x - k[0], period)
+    x = np.clip(x, k[0], np.nextafter(k[-1], k[0]))
+    idx = np.searchsorted(k, x, side="right") - 1
+    idx = np.clip(idx, 0, k.shape[0] - 2)
+    dx = x - k[idx]
+    ci = c[idx]
+    return ci[:, 0] + ci[:, 1] * dx + ci[:, 2] * dx * dx + ci[:, 3] * dx * dx * dx
+
+
+def eval_piecewise_spline_derivative_numpy(x, knots, coeffs, periodic=False):
+    """Evaluate dU/dx from exported spline coefficients (NumPy diagnostics)."""
+    x = np.asarray(x, dtype=np.float64)
+    k = np.asarray(knots, dtype=np.float64)
+    c = np.asarray(coeffs, dtype=np.float64)
+    if periodic:
+        period = float(k[-1] - k[0])
+        x = k[0] + np.mod(x - k[0], period)
+    x = np.clip(x, k[0], np.nextafter(k[-1], k[0]))
+    idx = np.searchsorted(k, x, side="right") - 1
+    idx = np.clip(idx, 0, k.shape[0] - 2)
+    dx = x - k[idx]
+    ci = c[idx]
+    return ci[:, 1] + 2.0 * ci[:, 2] * dx + 3.0 * ci[:, 3] * dx * dx
+
+
 def ensure_dir(p):
     Path(p).mkdir(parents=True, exist_ok=True)
 
@@ -269,6 +466,21 @@ def main():
     parser.add_argument("--epsilon", type=float, default=1.0, help="Repulsion epsilon to write to YAML.")
     parser.add_argument("--sigma", type=float, default=3.0, help="Repulsion sigma to write to YAML.")
     parser.add_argument("--rep_power", type=int, default=4, help="Repulsion power in (sigma/r)^power (for plotting only).")
+    # Add-on spline fitting path (keeps legacy parametric fitting intact)
+    parser.add_argument("--spline", action="store_true", default=False,
+                        help="Enable spline fitting (KDE -> BI -> CubicSpline) and write NPZ output.")
+    parser.add_argument("--spline_out", default="fitted_priors_spline.npz",
+                        help="Output NPZ path for spline coefficients.")
+    parser.add_argument("--residue_specific_angles", action="store_true", default=False,
+                        help="Enable per-species angle splines with global fallback.")
+    parser.add_argument("--angle_min_samples", type=int, default=500,
+                        help="Minimum samples per species to fit type-specific angle spline.")
+    parser.add_argument("--kde_bandwidth_factor", type=float, default=1.0,
+                        help="Bandwidth multiplier for gaussian_kde (1.0 = default/Silverman).")
+    parser.add_argument("--spline_grid_points", type=int, default=500,
+                        help="Number of grid points for spline fitting.")
+    parser.add_argument("--n_species", type=int, default=None,
+                        help="Override number of species types for residue-specific angles.")
     parser.add_argument("--skip_plots", action="store_true", default=False,
                         help="Skip all matplotlib figure generation.")
     parser.add_argument("--verbose", action="store_true", default=False,
@@ -290,8 +502,10 @@ def main():
     all_bonds = []
     all_angles = []
     all_dihedrals = []
+    all_angle_central_species = []
 
     all_rep_dists = []
+    inferred_n_species = 0
 
     for path in dataset_paths:
         logger.info(f"Loading: {path}")
@@ -299,6 +513,18 @@ def main():
 
         R = data["R"].astype(np.float32)       # (T,N,3)
         resid = data["resid"]                  # (T,N) or (N,)
+        mask = data["mask"] if "mask" in data else np.ones(R.shape[:2], dtype=np.float32)
+        species = data["species"] if "species" in data else None
+
+        if mask.ndim == 1:
+            mask = np.broadcast_to(mask[None, :], (R.shape[0], R.shape[1]))
+        mask = np.asarray(mask, dtype=np.float32)
+
+        if species is not None:
+            species = np.asarray(species)
+            if species.ndim == 1:
+                species = np.broadcast_to(species[None, :], (R.shape[0], R.shape[1]))
+            inferred_n_species = max(inferred_n_species, int(np.max(species)) + 1)
 
         Tframes, N, _ = R.shape
         bonds, angles, dihedrals = build_bonds_angles_dihedrals(resid)
@@ -309,17 +535,38 @@ def main():
         ang_all  = jax.vmap(angles_single_frame, in_axes=(0, None, None))(R_jax, angles, displacement)
         dih_all  = jax.vmap(dihedral_angles_single_frame, in_axes=(0, None, None))(R_jax, dihedrals, displacement)
 
-        d_np = np.asarray(bond_all).ravel()
-        a_np = np.asarray(ang_all).ravel()
-        phi_np = np.asarray(dih_all).ravel()
+        # Per-frame tuple validity masks to exclude padded atoms.
+        bond_valid = (mask[:, bonds[:, 0]] * mask[:, bonds[:, 1]]) > 0
+        angle_valid = (mask[:, angles[:, 0]] * mask[:, angles[:, 1]] * mask[:, angles[:, 2]]) > 0
+        if dihedrals.shape[0] > 0:
+            dih_valid = (
+                mask[:, dihedrals[:, 0]] * mask[:, dihedrals[:, 1]] *
+                mask[:, dihedrals[:, 2]] * mask[:, dihedrals[:, 3]]
+            ) > 0
+        else:
+            dih_valid = np.zeros((R.shape[0], 0), dtype=bool)
 
-        d_np = d_np[np.isfinite(d_np)]
-        a_np = a_np[np.isfinite(a_np)]
-        phi_np = phi_np[np.isfinite(phi_np)]
+        d_raw = np.asarray(bond_all)[bond_valid]
+        a_raw = np.asarray(ang_all)[angle_valid]
+        phi_raw = np.asarray(dih_all)[dih_valid]
+
+        d_fin = np.isfinite(d_raw)
+        a_fin = np.isfinite(a_raw)
+        phi_fin = np.isfinite(phi_raw)
+
+        d_np = d_raw[d_fin]
+        a_np = a_raw[a_fin]
+        phi_np = phi_raw[phi_fin]
 
         all_bonds.append(d_np)
         all_angles.append(a_np)
         all_dihedrals.append(phi_np)
+
+        if species is not None:
+            # Central atom species for each valid angle sample.
+            central_sp = species[:, angles[:, 1]][angle_valid]
+            central_sp = central_sp[a_fin]
+            all_angle_central_species.append(np.asarray(central_sp, dtype=np.int32))
 
         order = order_from_resid(resid)
         if N > 6:
@@ -327,8 +574,10 @@ def main():
             jj = order[6:]
             sample_frames = np.linspace(0, Tframes - 1, num=min(Tframes, 200), dtype=int)
             Rsub = R[sample_frames]
+            Msub = mask[sample_frames]
+            rep_valid = (Msub[:, ii] * Msub[:, jj]) > 0
             dr = Rsub[:, ii, :] - Rsub[:, jj, :]
-            rep_d = np.linalg.norm(dr, axis=-1).ravel()
+            rep_d = np.linalg.norm(dr, axis=-1)[rep_valid]
             rep_d = rep_d[np.isfinite(rep_d)]
             all_rep_dists.append(rep_d)
 
@@ -336,6 +585,12 @@ def main():
     all_angles = np.concatenate(all_angles, axis=0)
     all_dihedrals = np.concatenate(all_dihedrals, axis=0)
     all_rep_dists = np.concatenate(all_rep_dists, axis=0) if len(all_rep_dists) else None
+    all_angle_central_species = (
+        np.concatenate(all_angle_central_species, axis=0)
+        if len(all_angle_central_species) else None
+    )
+
+    n_species = int(args.n_species) if args.n_species is not None else int(max(inferred_n_species, 0))
 
     logger.info(f"Total samples: bonds={all_bonds.shape[0]}, angles={all_angles.shape[0]}, dihedrals={all_dihedrals.shape[0]}")
 
@@ -489,6 +744,241 @@ def main():
         plt.legend()
         savefig(Path(args.plots_dir) / "dihedral_prior_implied_P.png")
 
+    # --- Optional add-on: spline fits (keeps legacy parametric outputs) ---
+    if args.spline:
+        logger.info("Spline fitting enabled: KDE -> BI -> CubicSpline")
+
+        theta_min_spline = max(0.5, float(args.theta_min))
+        theta_max_spline = min(float(args.theta_max), float(np.pi - 0.01))
+
+        # Global splines
+        bond_knots, bond_coeffs, grid_bond, dens_bond, U_bond_kde, _ = fit_bond_spline(
+            all_bonds, T=args.T, kB=args.kB, n_grid=args.spline_grid_points, bw_factor=args.kde_bandwidth_factor
+        )
+        angle_knots, angle_coeffs, grid_ang, dens_ang, U_ang_kde, _ = fit_angle_spline(
+            all_angles, T=args.T, kB=args.kB, n_grid=args.spline_grid_points, bw_factor=args.kde_bandwidth_factor,
+            theta_min=theta_min_spline, theta_max=theta_max_spline
+        )
+        dih_knots, dih_coeffs, grid_dih, dens_dih, U_dih_kde, _ = fit_dihedral_spline(
+            all_dihedrals, T=args.T, kB=args.kB, n_grid=args.spline_grid_points, bw_factor=args.kde_bandwidth_factor
+        )
+
+        residue_specific_used = False
+        angle_type_knots = None
+        angle_type_coeffs = None
+        angle_type_mask = None
+        angle_type_counts = None
+        angle_n_types = 0
+
+        # Residue-specific angle splines (optional)
+        if args.residue_specific_angles:
+            if all_angle_central_species is None:
+                logger.warning(
+                    "residue_specific_angles requested, but no species arrays found in input datasets; "
+                    "falling back to global angle spline."
+                )
+            else:
+                if n_species <= 0:
+                    n_species = int(np.max(all_angle_central_species)) + 1
+                angle_n_types = int(n_species)
+                (
+                    _gk, _gc,
+                    angle_type_knots,
+                    angle_type_coeffs,
+                    angle_type_mask,
+                    angle_type_counts,
+                ) = fit_angle_spline_by_type(
+                    all_angles=all_angles,
+                    all_central_species=all_angle_central_species,
+                    n_types=angle_n_types,
+                    T=args.T,
+                    kB=args.kB,
+                    n_grid=args.spline_grid_points,
+                    bw_factor=args.kde_bandwidth_factor,
+                    min_samples=args.angle_min_samples,
+                    theta_min=theta_min_spline,
+                    theta_max=theta_max_spline,
+                )
+                residue_specific_used = True
+                n_own = int(np.sum(angle_type_mask))
+                logger.info(
+                    "Residue-specific angle splines: %d/%d types have dedicated splines (min_samples=%d)",
+                    n_own, angle_n_types, int(args.angle_min_samples)
+                )
+
+        # Save spline payload for model runtime use.
+        spline_out = Path(args.spline_out)
+        spline_out.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "bond_knots": np.asarray(bond_knots, dtype=np.float32),
+            "bond_coeffs": np.asarray(bond_coeffs, dtype=np.float32),
+            "angle_knots": np.asarray(angle_knots, dtype=np.float32),
+            "angle_coeffs": np.asarray(angle_coeffs, dtype=np.float32),
+            "dih_knots": np.asarray(dih_knots, dtype=np.float32),
+            "dih_coeffs": np.asarray(dih_coeffs, dtype=np.float32),
+            "temperature": np.asarray(float(args.T), dtype=np.float32),
+            "kB": np.asarray(float(args.kB), dtype=np.float32),
+            "grid_points": np.asarray(int(args.spline_grid_points), dtype=np.int32),
+            "kde_bandwidth_factor": np.asarray(float(args.kde_bandwidth_factor), dtype=np.float32),
+            "residue_specific_angles": np.asarray(bool(residue_specific_used)),
+        }
+        if residue_specific_used:
+            payload.update({
+                "angle_n_types": np.asarray(int(angle_n_types), dtype=np.int32),
+                "angle_type_knots": np.asarray(angle_type_knots, dtype=np.float32),
+                "angle_type_coeffs": np.asarray(angle_type_coeffs, dtype=np.float32),
+                "angle_type_mask": np.asarray(angle_type_mask, dtype=np.int32),
+                "angle_type_counts": np.asarray(angle_type_counts, dtype=np.int64),
+            })
+        np.savez(str(spline_out), **payload)
+        logger.info(f"Wrote spline priors NPZ: {spline_out}")
+
+        if not args.skip_plots:
+            beta = 1.0 / (args.kB * args.T)
+
+            # PMF overlay: histogram PMF vs KDE PMF vs exported spline PMF
+            grid_eval_bond = np.linspace(grid_bond[0], grid_bond[-1], 1200)
+            U_bond_spline = eval_piecewise_spline_numpy(grid_eval_bond, bond_knots, bond_coeffs)
+            hist_bond, edges_bond = np.histogram(all_bonds, bins=120, range=(grid_bond[0], grid_bond[-1]), density=True)
+            cent_bond = 0.5 * (edges_bond[:-1] + edges_bond[1:])
+            U_bond_hist = _safe_probability_to_pmf(hist_bond, T=args.T, kB=args.kB)
+            plt.figure()
+            plt.plot(cent_bond, U_bond_hist, color="0.6", linewidth=1.2, label="Histogram PMF")
+            plt.plot(grid_bond, U_bond_kde, color="C0", linewidth=2.0, label="KDE PMF")
+            plt.plot(grid_eval_bond, U_bond_spline, "r--", linewidth=1.6, label="Spline PMF")
+            plt.xlabel("r (Å)")
+            plt.ylabel("U(r) [kcal/mol, shifted]")
+            plt.title("Bond PMF: histogram vs KDE vs spline")
+            plt.legend()
+            savefig(Path(args.plots_dir) / "spline_bond_pmf_overlay.png")
+
+            grid_eval_ang = np.linspace(grid_ang[0], grid_ang[-1], 1200)
+            U_ang_spline = eval_piecewise_spline_numpy(grid_eval_ang, angle_knots, angle_coeffs)
+            hist_ang, edges_ang = np.histogram(all_angles, bins=120, range=(grid_ang[0], grid_ang[-1]), density=True)
+            cent_ang = 0.5 * (edges_ang[:-1] + edges_ang[1:])
+            U_ang_hist = _safe_probability_to_pmf(hist_ang / np.clip(np.sin(cent_ang), 1e-8, None), T=args.T, kB=args.kB)
+            plt.figure()
+            plt.plot(cent_ang, U_ang_hist, color="0.6", linewidth=1.2, label="Histogram PMF (Jacobian corrected)")
+            plt.plot(grid_ang, U_ang_kde, color="C0", linewidth=2.0, label="KDE PMF")
+            plt.plot(grid_eval_ang, U_ang_spline, "r--", linewidth=1.6, label="Spline PMF")
+            plt.xlabel("θ (rad)")
+            plt.ylabel("U(θ) [kcal/mol, shifted]")
+            plt.title("Angle PMF: histogram vs KDE vs spline")
+            plt.legend()
+            savefig(Path(args.plots_dir) / "spline_angle_pmf_overlay.png")
+
+            grid_eval_dih = np.linspace(-np.pi, np.pi, 1400, endpoint=False)
+            U_dih_spline = eval_piecewise_spline_numpy(grid_eval_dih, dih_knots, dih_coeffs, periodic=True)
+            hist_dih, edges_dih = np.histogram(all_dihedrals, bins=120, range=(-np.pi, np.pi), density=True)
+            cent_dih = 0.5 * (edges_dih[:-1] + edges_dih[1:])
+            U_dih_hist = _safe_probability_to_pmf(hist_dih, T=args.T, kB=args.kB)
+            plt.figure()
+            plt.plot(cent_dih, U_dih_hist, color="0.6", linewidth=1.2, label="Histogram PMF")
+            plt.plot(grid_dih, U_dih_kde, color="C0", linewidth=2.0, label="KDE PMF")
+            plt.plot(grid_eval_dih, U_dih_spline, "r--", linewidth=1.6, label="Spline PMF")
+            plt.xlabel("φ (rad)")
+            plt.ylabel("U(φ) [kcal/mol, shifted]")
+            plt.title("Dihedral PMF: histogram vs KDE vs spline")
+            plt.legend()
+            savefig(Path(args.plots_dir) / "spline_dihedral_pmf_overlay.png")
+
+            # Implied distributions
+            p_bond = np.exp(-beta * (U_bond_spline - np.min(U_bond_spline)))
+            p_bond /= np.trapz(p_bond, grid_eval_bond)
+            plt.figure()
+            plt.plot(cent_bond, hist_bond, color="0.6", linewidth=1.2, label="Empirical P(r)")
+            plt.plot(grid_eval_bond, p_bond, "r-", linewidth=2.0, label="Spline-implied P(r)")
+            plt.xlabel("r (Å)")
+            plt.ylabel("density")
+            plt.title("Bond implied distribution")
+            plt.legend()
+            savefig(Path(args.plots_dir) / "spline_bond_implied_distribution.png")
+
+            p_ang = np.sin(grid_eval_ang) * np.exp(-beta * (U_ang_spline - np.min(U_ang_spline)))
+            p_ang /= np.trapz(p_ang, grid_eval_ang)
+            plt.figure()
+            plt.plot(cent_ang, hist_ang, color="0.6", linewidth=1.2, label="Empirical P(θ)")
+            plt.plot(grid_eval_ang, p_ang, "r-", linewidth=2.0, label="Spline-implied P(θ)")
+            plt.xlabel("θ (rad)")
+            plt.ylabel("density")
+            plt.title("Angle implied distribution (includes sinθ Jacobian)")
+            plt.legend()
+            savefig(Path(args.plots_dir) / "spline_angle_implied_distribution.png")
+
+            p_dih = np.exp(-beta * (U_dih_spline - np.min(U_dih_spline)))
+            p_dih /= np.trapz(p_dih, grid_eval_dih)
+            plt.figure()
+            plt.plot(cent_dih, hist_dih, color="0.6", linewidth=1.2, label="Empirical P(φ)")
+            plt.plot(grid_eval_dih, p_dih, "r-", linewidth=2.0, label="Spline-implied P(φ)")
+            plt.xlabel("φ (rad)")
+            plt.ylabel("density")
+            plt.title("Dihedral implied distribution")
+            plt.legend()
+            savefig(Path(args.plots_dir) / "spline_dihedral_implied_distribution.png")
+
+            # Derivative sanity checks (numeric vs analytic from coeffs)
+            dU_num_bond = np.gradient(U_bond_spline, grid_eval_bond)
+            dU_ana_bond = eval_piecewise_spline_derivative_numpy(grid_eval_bond, bond_knots, bond_coeffs)
+            plt.figure()
+            plt.plot(grid_eval_bond, dU_num_bond, label="Numeric dU/dr")
+            plt.plot(grid_eval_bond, dU_ana_bond, "--", label="Analytic dU/dr")
+            plt.xlabel("r (Å)")
+            plt.ylabel("dU/dr")
+            plt.title("Bond spline derivative sanity check")
+            plt.legend()
+            savefig(Path(args.plots_dir) / "spline_bond_force_sanity.png")
+
+            dU_num_ang = np.gradient(U_ang_spline, grid_eval_ang)
+            dU_ana_ang = eval_piecewise_spline_derivative_numpy(grid_eval_ang, angle_knots, angle_coeffs)
+            plt.figure()
+            plt.plot(grid_eval_ang, dU_num_ang, label="Numeric dU/dθ")
+            plt.plot(grid_eval_ang, dU_ana_ang, "--", label="Analytic dU/dθ")
+            plt.xlabel("θ (rad)")
+            plt.ylabel("dU/dθ")
+            plt.title("Angle spline derivative sanity check")
+            plt.legend()
+            savefig(Path(args.plots_dir) / "spline_angle_force_sanity.png")
+
+            dU_num_dih = np.gradient(U_dih_spline, grid_eval_dih)
+            dU_ana_dih = eval_piecewise_spline_derivative_numpy(grid_eval_dih, dih_knots, dih_coeffs, periodic=True)
+            plt.figure()
+            plt.plot(grid_eval_dih, dU_num_dih, label="Numeric dU/dφ")
+            plt.plot(grid_eval_dih, dU_ana_dih, "--", label="Analytic dU/dφ")
+            plt.xlabel("φ (rad)")
+            plt.ylabel("dU/dφ")
+            plt.title("Dihedral spline derivative sanity check")
+            plt.legend()
+            savefig(Path(args.plots_dir) / "spline_dihedral_force_sanity.png")
+
+            if residue_specific_used:
+                ncols = 4
+                nrows = int(np.ceil(angle_n_types / ncols))
+                fig, axes = plt.subplots(nrows, ncols, figsize=(4.2 * ncols, 2.8 * nrows), squeeze=False)
+                for s in range(angle_n_types):
+                    ax = axes[s // ncols, s % ncols]
+                    U_global_eval = eval_piecewise_spline_numpy(grid_eval_ang, angle_knots, angle_coeffs)
+                    U_type_eval = eval_piecewise_spline_numpy(
+                        grid_eval_ang, angle_type_knots[s], angle_type_coeffs[s]
+                    )
+                    ax.plot(grid_eval_ang, U_global_eval, color="0.6", linewidth=1.2, label="global")
+                    if int(angle_type_mask[s]) == 1:
+                        ax.plot(grid_eval_ang, U_type_eval, color="C0", linewidth=1.4, label="typed")
+                        title = f"type {s} (n={int(angle_type_counts[s])})"
+                    else:
+                        ax.plot(grid_eval_ang, U_type_eval, color="C3", linestyle="--", linewidth=1.2, label="fallback")
+                        title = f"type {s} fallback (n={int(angle_type_counts[s])})"
+                    ax.set_title(title, fontsize=9)
+                    ax.set_xlim(grid_eval_ang[0], grid_eval_ang[-1])
+                    ax.tick_params(labelsize=8)
+                for s in range(angle_n_types, nrows * ncols):
+                    axes[s // ncols, s % ncols].axis("off")
+                handles, labels = axes[0, 0].get_legend_handles_labels()
+                fig.legend(handles, labels, loc="upper right")
+                fig.suptitle("Residue-specific angle spline diagnostics", y=1.01)
+                fig.tight_layout()
+                fig.savefig(Path(args.plots_dir) / "spline_angle_by_type_diagnostics.png", dpi=220, bbox_inches="tight")
+                plt.close(fig)
+
     # --- Repulsion plots (verification only, no fit) ---
     if not args.skip_plots:
         if all_rep_dists is not None and all_rep_dists.size > 0:
@@ -518,8 +1008,11 @@ def main():
         "kr": float(kr),
         "a": [float(x) for x in np.asarray(a_coeff).ravel()],
         "b": [float(x) for x in np.asarray(b_coeff).ravel()],
+        # Keep legacy keys and add config-native keys for compatibility.
         "k_dihedral": [float(k1), float(k2)],
         "gamma_dihedral": [float(g1), float(g2)],
+        "k_dih": [float(k1), float(k2)],
+        "gamma_dih": [float(g1), float(g2)],
         "epsilon": float(args.epsilon),
         "sigma": float(args.sigma),
     }
@@ -538,6 +1031,12 @@ def main():
             "min_count": int(args.min_count),
             "ridge": float(args.ridge),
             "pseudocount": float(args.pseudocount),
+            "spline_enabled": bool(args.spline),
+            "spline_out": str(args.spline_out) if args.spline else None,
+            "residue_specific_angles": bool(args.residue_specific_angles),
+            "angle_min_samples": int(args.angle_min_samples),
+            "kde_bandwidth_factor": float(args.kde_bandwidth_factor),
+            "spline_grid_points": int(args.spline_grid_points),
         }
     }
 
@@ -546,6 +1045,8 @@ def main():
 
     logger.info("=== Done ===")
     logger.info(f"Wrote YAML: {args.out_yaml}")
+    if args.spline:
+        logger.info(f"Wrote spline NPZ: {args.spline_out}")
     if not args.skip_plots:
         logger.info(f"Plots saved in: {args.plots_dir}")
     logger.info(f"YAML priors keys: {list(priors.keys())}")
