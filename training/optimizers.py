@@ -45,19 +45,23 @@ def create_optimizer(name: str, config: Dict[str, Any], global_grad_clip: float 
     lr = config.get("lr", 0.001)
     peak_lr = config.get("peak_lr", lr)
     end_lr = config.get("end_lr", lr / 10)
-    warmup_epochs = config.get("warmup_epochs", 0)
+    # warmup_steps is the number of gradient update steps for warmup (not epochs).
+    # The old key was 'warmup_epochs' which was misleading; both keys are accepted
+    # for backward compatibility with existing config files.
+    warmup_steps = config.get("warmup_steps", config.get("warmup_epochs", 0))
     decay_steps = config.get("decay_steps", 100)
     weight_decay = config.get("weight_decay", 0.0)
 
     # Gradient clipping (use global if provided, else from config)
     grad_clip = global_grad_clip if global_grad_clip is not None else config.get("grad_clip", 1.0)
 
-    # Create learning rate schedule
+    # Create learning rate schedule.
+    # decay_steps * 2 matches the original implementation convention.
     schedule = optax.warmup_cosine_decay_schedule(
         init_value=lr,
         peak_value=peak_lr,
-        warmup_steps=warmup_epochs,
-        decay_steps=decay_steps * 2,  # Original code uses decay_steps * 2
+        warmup_steps=warmup_steps,
+        decay_steps=decay_steps * 2,
         end_value=end_lr,
         exponent=1.0
     )
@@ -94,6 +98,13 @@ def create_optimizer(name: str, config: Dict[str, Any], global_grad_clip: float 
             b2=config.get("beta2", 0.99)
         )
 
+    elif name.lower() == "sgd_nesterov":
+        base_optimizer = optax.sgd(
+            learning_rate=schedule,
+            momentum=config.get("momentum", 0.9),
+            nesterov=True
+        )
+
     elif name.lower() == "polyak_sgd":
         # Special case: uses different parameters
         f_star = config.get("f_star", 0.0)
@@ -108,7 +119,7 @@ def create_optimizer(name: str, config: Dict[str, Any], global_grad_clip: float 
     else:
         raise ValueError(
             f"Unknown optimizer: {name}. "
-            f"Supported: adabelief, yogi, adam, lion, polyak_sgd, fromage"
+            f"Supported: adabelief, yogi, adam, lion, sgd_nesterov, polyak_sgd, fromage"
         )
 
     # Compose optimizer with gradient clipping and weight decay
@@ -149,4 +160,4 @@ def get_available_optimizers() -> list:
     Returns:
         List of optimizer names
     """
-    return ["adabelief", "yogi", "adam", "lion", "polyak_sgd", "fromage"]
+    return ["adabelief", "yogi", "adam", "lion", "sgd_nesterov", "polyak_sgd", "fromage"]

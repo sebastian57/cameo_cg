@@ -15,6 +15,7 @@ import optax
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 import pickle
+import time
 
 from chemtrain.trainers.trainers import ForceMatching
 from jax_sgmc.data.numpy_loader import NumpyDataLoader
@@ -79,6 +80,38 @@ class Trainer:
         self.gammas = config.get_gammas()
         self.checkpoint_path = Path(config.get_checkpoint_path())
         self.checkpoint_path.mkdir(parents=True, exist_ok=True)
+        self._rank = jax.process_index()
+        self._world_size = jax.process_count()
+
+        # Optional JAX profiler configuration (controlled by YAML)
+        profiling_cfg = config.get_profiling_config()
+        self._profiling_enabled = bool(profiling_cfg.get("enabled", False))
+        self._profiling_trace_dir = Path(str(profiling_cfg.get("trace_dir", "./profiles")))
+        self._profiling_trace_rank0_only = bool(profiling_cfg.get("trace_rank0_only", True))
+        self._profiling_log_compiles = bool(profiling_cfg.get("log_compiles", False))
+        self._batch_profiler_enabled = bool(profiling_cfg.get("batch_profiler_enabled", False))
+        self._batch_profiler_warmup = int(profiling_cfg.get("batch_profiler_warmup", 5))
+        self._batch_profiler_samples = int(profiling_cfg.get("batch_profiler_samples", 50))
+
+        if self._profiling_log_compiles:
+            try:
+                jax.config.update("jax_log_compiles", True)
+                training_logger.info("[Profiling] Enabled jax_log_compiles=True")
+            except Exception as e:
+                training_logger.warning(f"[Profiling] Could not enable jax_log_compiles: {e}")
+
+        if self._profiling_enabled:
+            self._profiling_trace_dir.mkdir(parents=True, exist_ok=True)
+            if self._profiling_trace_rank0_only and self._rank != 0:
+                training_logger.info(
+                    f"[Profiling] Enabled in config, but rank {self._rank} tracing is disabled "
+                    "(trace_rank0_only=true)"
+                )
+            else:
+                training_logger.info(
+                    f"[Profiling] JAX tracing enabled (rank={self._rank}, "
+                    f"output={self._profiling_trace_dir})"
+                )
 
         # Store training data for prior pre-training
         if train_data is not None:
@@ -123,6 +156,9 @@ class Trainer:
         # Current trainer instance (will be set during training)
         self._chemtrain_trainer = None
 
+        # Optimizer state to restore on next train_stage call (set by load_chemtrain_checkpoint)
+        self._resume_opt_state = None
+
         # Apply NumpyDataLoader patch if needed
         self._apply_dataloader_patch()
 
@@ -147,6 +183,177 @@ class Trainer:
             _NDL._original_get_indices = _orig_get_indices
             training_logger.info("Applied NumpyDataLoader patch")
 
+    def _should_trace_this_rank(self) -> bool:
+        """Return True if JAX tracing should run on this rank."""
+        if not self._profiling_enabled:
+            return False
+        if self._profiling_trace_rank0_only and self._rank != 0:
+            return False
+        return True
+
+    def _build_trace_dir(
+        self, optimizer_name: str, start_epoch: int, remaining_epochs: int
+    ) -> Path:
+        """Build a unique trace output directory for one stage."""
+        stage_end = start_epoch + remaining_epochs
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        run_name = (
+            f"stage_{optimizer_name}_rank{self._rank}_"
+            f"epoch{start_epoch:04d}_to_{stage_end:04d}_{timestamp}"
+        )
+        return self._profiling_trace_dir / run_name
+
+    def _start_jax_trace(
+        self, optimizer_name: str, start_epoch: int, remaining_epochs: int
+    ) -> Optional[Path]:
+        """Start JAX profiler tracing for a stage."""
+        if not self._should_trace_this_rank():
+            return None
+
+        trace_dir = self._build_trace_dir(optimizer_name, start_epoch, remaining_epochs)
+        trace_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            jax.profiler.start_trace(str(trace_dir))
+            training_logger.info(f"[Profiling] Started JAX trace: {trace_dir}")
+            return trace_dir
+        except Exception as e:
+            training_logger.warning(f"[Profiling] Failed to start JAX trace: {e}")
+            return None
+
+    def _stop_jax_trace(self, trace_dir: Optional[Path]) -> None:
+        """Stop JAX profiler tracing if active."""
+        if trace_dir is None:
+            return
+        try:
+            jax.profiler.stop_trace()
+            training_logger.info(f"[Profiling] Saved JAX trace to: {trace_dir}")
+        except Exception as e:
+            training_logger.warning(f"[Profiling] Failed to stop JAX trace cleanly: {e}")
+
+    def _attach_batch_profiler(
+        self, trainer, n_warmup: int = 5, n_samples: int = 50
+    ) -> None:
+        """
+        Monkey-patch trainer._update_fn to record per-batch timing.
+
+        Three timestamps are captured around each profiled _update_fn call:
+          t0  — entry into _update_fn (dispatch start)
+          t1  — return from _update_fn (dispatch end; GPU work is async at this point)
+          t2  — return from jax.effects_barrier() (GPU compute complete)
+
+        Derived metrics
+        ---------------
+        dispatch_ms  = t1 - t0   ~ time to queue the JIT work (should be ~0 if async)
+        barrier_ms   = t2 - t1   ~ pure GPU compute time per batch
+        gap_ms       = t0[i+1] - t0[i]  ~ wall time between batch starts
+
+        Key diagnostic — gap / barrier ratio:
+          ≈ 1.0  CPU blocks every step (current code: onp.asarray forces a sync per batch)
+          ≈ 0.0  GPU is fully pipelined with data loading (target after async-sync fix)
+        """
+        call_ts: list = []
+        dispatch_ts: list = []
+        barrier_ts: list = []
+        step = [0]
+        original_fn = trainer._update_fn
+
+        # Prefer effects_barrier (precise); fall back to block_until_ready on a dummy op.
+        if hasattr(jax, "effects_barrier"):
+            _barrier = jax.effects_barrier
+        else:
+            def _barrier():
+                jax.block_until_ready(jnp.zeros(()))
+
+        def _timed_update_fn(params, opt_state, batch, per_target=False):
+            idx = step[0]
+            step[0] += 1
+
+            if idx < n_warmup or idx >= n_warmup + n_samples:
+                return original_fn(params, opt_state, batch, per_target=per_target)
+
+            t0 = time.perf_counter()
+            result = original_fn(params, opt_state, batch, per_target=per_target)
+            t1 = time.perf_counter()
+            _barrier()
+            t2 = time.perf_counter()
+
+            call_ts.append(t0)
+            dispatch_ts.append(t1)
+            barrier_ts.append(t2)
+            return result
+
+        trainer._update_fn = _timed_update_fn
+        # Store on self so _report_batch_profiler can access after train() returns.
+        self._batch_profiler_data = (call_ts, dispatch_ts, barrier_ts, n_warmup, n_samples)
+
+    def _report_batch_profiler(self) -> None:
+        """Log batch-profiler statistics collected by _attach_batch_profiler."""
+        if not hasattr(self, "_batch_profiler_data"):
+            return
+
+        call_ts, dispatch_ts, barrier_ts, n_warmup, n_samples = self._batch_profiler_data
+        del self._batch_profiler_data  # clean up
+
+        n = len(call_ts)
+        if n < 2:
+            training_logger.warning("[BatchProfiler] Too few samples collected (n=%d).", n)
+            return
+
+        dispatch_ms = np.array([(dispatch_ts[i] - call_ts[i]) * 1e3 for i in range(n)])
+        barrier_ms  = np.array([(barrier_ts[i]  - dispatch_ts[i]) * 1e3 for i in range(n)])
+        gap_ms      = np.array([(call_ts[i + 1] - call_ts[i]) * 1e3 for i in range(n - 1)])
+
+        def _fmt(arr):
+            return (
+                f"mean={arr.mean():.2f} ± {arr.std():.2f} ms  "
+                f"p50={np.median(arr):.2f}  p95={np.percentile(arr, 95):.2f}"
+            )
+
+        ratio = float(np.mean(gap_ms) / max(float(np.mean(barrier_ms)), 1e-6))
+
+        training_logger.info(
+            "\n[BatchProfiler] Per-batch timing (%d samples, %d warmup skipped):",
+            n, n_warmup,
+        )
+        training_logger.info("  dispatch_fn  : %s", _fmt(dispatch_ms))
+        training_logger.info("  gpu_barrier  : %s", _fmt(barrier_ms))
+        training_logger.info("  inter-batch gap: %s", _fmt(gap_ms))
+        training_logger.info(
+            "  gap / barrier ratio: %.3f  "
+            "(1.0 = CPU blocks each step; 0.0 = GPU fully pipelined)",
+            ratio,
+        )
+
+        if ratio > 0.8:
+            training_logger.warning(
+                "  [!!] CPU is BLOCKING on every batch step. "
+                "The onp.asarray() syncs in chemtrain._update are the dominant overhead. "
+                "Deferred batch-sync fix will reduce this gap."
+            )
+        elif ratio < 0.3:
+            training_logger.info(
+                "  [OK] GPU is well-pipelined. Async dispatch is working."
+            )
+        else:
+            training_logger.info(
+                "  [~] Partial pipelining — some async benefit but host overhead visible."
+            )
+
+    @staticmethod
+    def _block_until_ready(tree: Any) -> None:
+        """Block host until device work for a pytree is complete."""
+        try:
+            jax.block_until_ready(tree)
+            return
+        except Exception:
+            pass
+
+        # Fallback: block every leaf individually
+        leaves = jax.tree_util.tree_leaves(tree)
+        for leaf in leaves:
+            if hasattr(leaf, "block_until_ready"):
+                leaf.block_until_ready()
+
     def _create_chemtrain_loaders(self) -> DataLoaders:
         """
         Create chemtrain DataLoaders from our loaders.
@@ -154,13 +361,14 @@ class Trainer:
         Returns:
             chemtrain.data.data_loaders.DataLoaders instance
         """
-        # Convert our DatasetLoader to NumpyDataLoader if needed
+        # Convert our DatasetLoader to NumpyDataLoader if needed.
+        # DatasetLoader stores NumPy arrays, so no device transfer is required.
         if not isinstance(self.train_loader, NumpyDataLoader):
             train_np_loader = NumpyDataLoader(
-                R=np.array(self.train_loader.R),
-                F=np.array(self.train_loader.F),
-                mask=np.array(self.train_loader.mask),
-                species=np.array(self.train_loader.species),
+                R=self.train_loader.R,
+                F=self.train_loader.F,
+                mask=self.train_loader.mask,
+                species=self.train_loader.species,
                 copy=False
             )
         else:
@@ -169,10 +377,10 @@ class Trainer:
         if self.val_loader is not None:
             if not isinstance(self.val_loader, NumpyDataLoader):
                 val_np_loader = NumpyDataLoader(
-                    R=np.array(self.val_loader.R),
-                    F=np.array(self.val_loader.F),
-                    mask=np.array(self.val_loader.mask),
-                    species=np.array(self.val_loader.species),
+                    R=self.val_loader.R,
+                    F=self.val_loader.F,
+                    mask=self.val_loader.mask,
+                    species=self.val_loader.species,
                     copy=False
                 )
             else:
@@ -239,8 +447,61 @@ class Trainer:
         trainer.set_loader(loaders.train_loader, stage="training")
         trainer.set_loader(loaders.val_loader, stage="validation")
 
+        # Restore optimizer state from checkpoint if available.
+        # This ensures the LR schedule continues from where it left off instead of
+        # restarting from step 0, which would cause the LR to jump to its initial value.
+        if self._resume_opt_state is not None:
+            try:
+                restored_opt_state = jax.tree_util.tree_map(jnp.asarray, self._resume_opt_state)
+                # TrainerState is a NamedTuple; use _replace to create an updated copy
+                trainer.state = trainer.state._replace(opt_state=restored_opt_state)
+                training_logger.info("Restored optimizer state from checkpoint (LR schedule continues)")
+            except Exception as e:
+                training_logger.warning(
+                    f"Could not restore optimizer state: {e}. "
+                    "LR schedule will restart from step 0."
+                )
+            finally:
+                self._resume_opt_state = None  # Only restore once per resume
+
+        # Attach per-batch timing profiler if requested (non-invasive monkey-patch).
+        # Must be done BEFORE trainer.train() so it intercepts from step 0.
+        if self._batch_profiler_enabled and self._should_trace_this_rank():
+            training_logger.info(
+                "[BatchProfiler] Attaching to _update_fn "
+                f"(warmup={self._batch_profiler_warmup}, "
+                f"samples={self._batch_profiler_samples})"
+            )
+            self._attach_batch_profiler(
+                trainer,
+                n_warmup=self._batch_profiler_warmup,
+                n_samples=self._batch_profiler_samples,
+            )
+
         # Train with periodic checkpointing
-        trainer.train(remaining_epochs, checkpoint_freq=checkpoint_freq if checkpoint_freq > 0 else None)
+        stage_start_time = time.perf_counter()
+        trace_dir = self._start_jax_trace(optimizer_name, start_epoch, remaining_epochs)
+        trace_annotation = getattr(jax.profiler, "TraceAnnotation", None)
+        try:
+            if trace_annotation is not None:
+                with trace_annotation(f"train_stage_{optimizer_name}"):
+                    trainer.train(
+                        remaining_epochs,
+                        checkpoint_freq=checkpoint_freq if checkpoint_freq > 0 else None
+                    )
+            else:
+                trainer.train(
+                    remaining_epochs,
+                    checkpoint_freq=checkpoint_freq if checkpoint_freq > 0 else None
+                )
+            self._block_until_ready(trainer.params)
+        finally:
+            self._stop_jax_trace(trace_dir)
+        stage_wall_seconds = time.perf_counter() - stage_start_time
+
+        # Report batch profiler results (clears internal state).
+        if self._batch_profiler_enabled:
+            self._report_batch_profiler()
 
         # Update parameters
         self.params = trainer.params
@@ -253,11 +514,46 @@ class Trainer:
         if checkpoint_freq > 0:
             self._save_stage_checkpoint(optimizer_name, epochs)
 
+        # Extract gradient norm history (per-step, logged by chemtrain internally)
+        grad_norms = list(getattr(trainer, 'gradient_norm_history', []))
+        if grad_norms:
+            training_logger.info(
+                f"Gradient norms — mean: {np.mean(grad_norms):.4e}, "
+                f"max: {max(grad_norms):.4e}, "
+                f"final: {grad_norms[-1]:.4e}"
+            )
+        # Store on self so _save_stage_checkpoint can include it in metadata
+        self._last_gradient_norms = grad_norms
+
+        # Compute total parameter L2 norm on-device (single scalar transfer)
+        total_param_norm = float(jnp.sqrt(
+            jax.tree_util.tree_reduce(
+                lambda acc, v: acc + jnp.sum(v * v),
+                self.params,
+                initializer=jnp.float32(0.0),
+            )
+        ))
+        training_logger.info(f"Total parameter L2 norm: {total_param_norm:.4e}")
+
         # Get final losses
         final_losses = {
             "train_loss": float(trainer.train_losses[-1]) if trainer.train_losses else 0.0,
             "val_loss": float(trainer.val_losses[-1]) if trainer.val_losses else 0.0,
+            "grad_norm_mean": float(np.mean(grad_norms)) if grad_norms else 0.0,
+            "grad_norm_final": float(grad_norms[-1]) if grad_norms else 0.0,
+            "param_norm": total_param_norm,
+            "stage_wall_seconds": stage_wall_seconds,
+            "stage_wall_minutes": stage_wall_seconds / 60.0,
+            "epoch_wall_seconds_est": stage_wall_seconds / max(remaining_epochs, 1),
         }
+        if trace_dir is not None:
+            final_losses["jax_trace_dir"] = str(trace_dir)
+
+        training_logger.info(
+            f"Stage wall time: {stage_wall_seconds:.2f} s "
+            f"({stage_wall_seconds / 60.0:.2f} min), "
+            f"~{final_losses['epoch_wall_seconds_est']:.2f} s/epoch"
+        )
 
         training_logger.info(f"\nStage complete: train_loss={final_losses['train_loss']:.6f}, "
                            f"val_loss={final_losses['val_loss']:.6f}")
@@ -289,6 +585,7 @@ class Trainer:
                 "timestamp": time.time(),
                 "train_losses": list(self._chemtrain_trainer.train_losses),
                 "val_losses": list(self._chemtrain_trainer.val_losses),
+                "gradient_norm_history": getattr(self, '_last_gradient_norms', []),
             }
             with open(meta_file, 'wb') as f:
                 pickle.dump(metadata, f)
@@ -553,13 +850,17 @@ class Trainer:
         if 'prior' in self.params:
             self.params['prior'] = fitted_params
 
-        # Print fitted parameters
+        # Print fitted parameters (transfer only scalars/small arrays)
         training_logger.info("\n[LBFGS] Fitted parameters:")
         for key, val in fitted_params.items():
             if jnp.ndim(val) == 0:
                 training_logger.info(f"  {key}: {float(val):.6f}")
             else:
-                training_logger.info(f"  {key}: {val}")
+                val_np = np.asarray(val)
+                if val_np.size <= 10:
+                    training_logger.info(f"  {key}: {val_np}")
+                else:
+                    training_logger.info(f"  {key}: shape={val_np.shape}, norm={np.linalg.norm(val_np):.6f}")
 
         # Prepare loss history (may be None for non-rank-0 in distributed mode)
         if loss_hist is not None:
@@ -790,8 +1091,12 @@ class Trainer:
         """
         Load a chemtrain trainer checkpoint for resumption.
 
-        This loads checkpoints saved by chemtrain's save_trainer() method,
-        which includes the full trainer state (params, optimizer state, losses).
+        Supports two formats saved by chemtrain's save_trainer():
+        1. Dict format (full_checkpoint=False, default): keys are 'trainer_state',
+           'best_params', 'train_losses', 'val_losses', etc.
+        2. Full trainer object (full_checkpoint=True): has .params, .opt_state, etc.
+
+        Also restores the optimizer state so the LR schedule continues seamlessly.
 
         Args:
             checkpoint_path: Path to chemtrain checkpoint file (.pkl)
@@ -803,25 +1108,56 @@ class Trainer:
                 - train_losses: Training loss history
                 - val_losses: Validation loss history
         """
+        import re
         checkpoint_path = Path(checkpoint_path)
 
         if not checkpoint_path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
-        # Load the pickled trainer
         with open(checkpoint_path, 'rb') as f:
-            saved_trainer = pickle.load(f)
+            saved = pickle.load(f)
 
-        # Extract parameters from saved trainer
-        # chemtrain trainers have .params and .best_inference_params attributes
-        if hasattr(saved_trainer, 'params'):
-            self.params = saved_trainer.params
-        if hasattr(saved_trainer, 'best_inference_params'):
-            self.best_params = saved_trainer.best_inference_params
-        elif hasattr(saved_trainer, 'best_params'):
-            self.best_params = saved_trainer.best_params
+        # chemtrain's save_trainer() (full_checkpoint=False, the default) saves a plain
+        # dict with keys: 'trainer_state' (containing 'params' and 'opt_state'),
+        # 'best_params', 'train_losses', 'val_losses', etc.
+        if isinstance(saved, dict):
+            trainer_state = saved.get('trainer_state', {})
+
+            if 'params' in trainer_state:
+                self.params = jax.tree_util.tree_map(jnp.asarray, trainer_state['params'])
+                training_logger.info("Restored model params from trainer_state['params']")
+            else:
+                training_logger.warning("No 'params' key in trainer_state — params not restored!")
+
+            if 'opt_state' in trainer_state:
+                # Store for restoration in the next train_stage call
+                self._resume_opt_state = trainer_state['opt_state']
+                training_logger.info("Saved optimizer state for restoration in train_stage")
+
+            if 'best_params' in saved:
+                self.best_params = jax.tree_util.tree_map(jnp.asarray, saved['best_params'])
+                training_logger.info("Restored best_params from checkpoint")
+            else:
+                self.best_params = self.params
+
+            train_losses = list(saved.get('train_losses', []))
+            val_losses = list(saved.get('val_losses', []))
+
         else:
-            self.best_params = self.params
+            # Full trainer object (full_checkpoint=True) — less common
+            if hasattr(saved, 'params'):
+                self.params = saved.params
+            if hasattr(saved, 'best_inference_params'):
+                self.best_params = saved.best_inference_params
+            elif hasattr(saved, 'best_params'):
+                self.best_params = saved.best_params
+            else:
+                self.best_params = self.params
+            # Try to extract opt_state from the full trainer object
+            if hasattr(saved, 'state') and hasattr(saved.state, 'opt_state'):
+                self._resume_opt_state = saved.state.opt_state
+            train_losses = list(getattr(saved, 'train_losses', []))
+            val_losses = list(getattr(saved, 'val_losses', []))
 
         training_logger.info(f"Loaded chemtrain checkpoint from: {checkpoint_path}")
 
@@ -833,15 +1169,24 @@ class Trainer:
             training_logger.info(f"Loaded metadata: stage={metadata.get('stage')}, "
                                f"epochs={metadata.get('completed_epochs')}")
         else:
-            # Fallback: extract what we can from the trainer
+            # Infer epoch count from filename (e.g. epoch00040.pkl → 40)
+            epoch_match = re.match(r'epoch0*(\d+)', checkpoint_path.stem)
+            inferred_epoch = int(epoch_match.group(1)) if epoch_match else 0
+
+            # Default stage to stage1 optimizer since epoch*.pkl files are only written
+            # during stage 1 (stage checkpoints have a different naming convention)
+            inferred_stage = self.config.get_stage1_optimizer()
+
             metadata = {
-                "stage": "unknown",
-                "completed_epochs": getattr(saved_trainer, '_epoch', 0),
-                "train_losses": list(getattr(saved_trainer, 'train_losses', [])),
-                "val_losses": list(getattr(saved_trainer, 'val_losses', [])),
+                "stage": inferred_stage,
+                "completed_epochs": inferred_epoch,
+                "train_losses": train_losses,
+                "val_losses": val_losses,
             }
-            training_logger.info(f"No metadata file found, extracted from trainer: "
-                               f"epochs={metadata['completed_epochs']}")
+            training_logger.info(
+                f"No metadata file found — inferred from filename: "
+                f"stage='{inferred_stage}', completed_epochs={inferred_epoch}"
+            )
 
         return metadata
 
