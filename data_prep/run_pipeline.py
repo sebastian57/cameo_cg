@@ -92,7 +92,11 @@ from utils.logging import pipeline_logger  # noqa: E402
 # Local data_prep modules
 from h5_dataset_npz_transform import build_dataset  # noqa: E402
 from cg_1bead import build_cg_dataset  # noqa: E402
-from pad_and_combine_datasets import combine_and_pad_npz, pad_individual_npz  # noqa: E402
+from pad_and_combine_datasets import (  # noqa: E402
+    combine_and_pad_npz,
+    pad_individual_npz,
+    combine_and_pad_npz_bucketed,
+)
 
 
 # =============================================================================
@@ -189,6 +193,25 @@ def main() -> None:
         default=False,
         help="Pad each CG dataset individually to global N_max and keep as separate files "
              "instead of merging into one combined_dataset.npz."
+    )
+    parser.add_argument(
+        "--bucket_boundaries",
+        type=int,
+        nargs="+",
+        default=None,
+        metavar="N",
+        help="Explicit bucket boundaries for protein-aware batching "
+             "(e.g. --bucket_boundaries 100 200 → 3 buckets: ≤100, 101-200, >200). "
+             "Mutually exclusive with --no_combine."
+    )
+    parser.add_argument(
+        "--n_buckets",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Enable protein-aware bucketing with N auto-computed equal-count buckets "
+             "(e.g. --n_buckets 3). Ignored if --bucket_boundaries is also set. "
+             "Mutually exclusive with --no_combine."
     )
 
     # ===== Step 4 Options (Prior fitting) =====
@@ -346,7 +369,25 @@ def main() -> None:
     # =============================================================================
     data_paths: List[str]
 
-    if args.no_combine:
+    want_buckets = (args.bucket_boundaries is not None) or (args.n_buckets is not None)
+
+    if want_buckets and args.no_combine:
+        pipeline_logger.error("--bucket_boundaries / --n_buckets and --no_combine are mutually exclusive.")
+        sys.exit(1)
+
+    if want_buckets:
+        bucketed_dir: Path = out_dir / "03_bucketed_npz"
+        pipeline_logger.info(
+            f"Step 3: bucketed combine of {len(cg_paths)} CG datasets …"
+        )
+        bucket_out = combine_and_pad_npz_bucketed(
+            cg_paths,
+            str(bucketed_dir),
+            bucket_boundaries=args.bucket_boundaries,
+            n_buckets=args.n_buckets if args.n_buckets is not None else 3,
+        )
+        data_paths = list(bucket_out.values())
+    elif args.no_combine:
         padded_dir: Path = out_dir / "03_padded_npz"
         padded_dir.mkdir(parents=True, exist_ok=True)
         pipeline_logger.info(
@@ -411,7 +452,9 @@ def main() -> None:
     pipeline_logger.info("Pipeline complete")
     pipeline_logger.info("=" * 60)
 
-    if args.no_combine:
+    if want_buckets:
+        pipeline_logger.info(f"  Bucketed datasets: {bucketed_dir}  ({len(data_paths)} buckets)")
+    elif args.no_combine:
         pipeline_logger.info(f"  Padded datasets  : {padded_dir}  ({len(data_paths)} files)")
     else:
         pipeline_logger.info(f"  Combined dataset : {data_paths[0]}")
