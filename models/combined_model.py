@@ -134,12 +134,12 @@ class CombinedModel:
         if self.prior_only:
             if not self.use_priors:
                 raise ValueError("prior_only=True requires use_priors=True in config")
+            # Block gradient flow through padded atom coordinates.
+            # Start from a fully detached copy, then re-attach gradients only for
+            # valid atoms.  This avoids allocating a second full-size array.
+            R_detached = jax.lax.stop_gradient(R)
             mask_3d = mask[:, None]
-            R_masked = jnp.where(
-                mask_3d > 0,
-                R,
-                jax.lax.stop_gradient(R)  # Block gradient for padded atoms
-            )
+            R_masked = jnp.where(mask_3d > 0, R, R_detached)
             if self.train_priors and "prior" in params:
                 return self.prior.compute_total_energy(
                     R_masked, mask, species=species, params=params["prior"]
@@ -155,17 +155,12 @@ class CombinedModel:
 
         # Add prior energy if enabled
         if self.use_priors:
-            # CRITICAL: Apply stop_gradient to padded atom coordinates!
-            # This prevents NaN gradients from undefined geometry:
-            # - For parked atoms at same location, d(norm)/dR = v/||v|| is undefined
-            # - Without stop_gradient, this NaN propagates through the gradient
-            # - With stop_gradient, padded atoms don't contribute to gradients
+            # Block gradient flow through padded atom coordinates.
+            # Start from a fully detached copy, then re-attach gradients only for
+            # valid atoms.  This avoids allocating a second full-size array.
+            R_detached = jax.lax.stop_gradient(R)
             mask_3d = mask[:, None]
-            R_masked = jnp.where(
-                mask_3d > 0,
-                R,
-                jax.lax.stop_gradient(R)  # Block gradient for padded atoms
-            )
+            R_masked = jnp.where(mask_3d > 0, R, R_detached)
             if self.train_priors and "prior" in params:
                 E_prior = self.prior.compute_total_energy(
                     R_masked, mask, species=species, params=params["prior"]
@@ -244,13 +239,9 @@ class CombinedModel:
 
         # Add prior components if enabled
         if self.use_priors:
-            # Apply stop_gradient to padded atoms (same as in compute_energy)
+            R_detached = jax.lax.stop_gradient(R)
             mask_3d = mask[:, None]
-            R_masked = jnp.where(
-                mask_3d > 0,
-                R,
-                jax.lax.stop_gradient(R)
-            )
+            R_masked = jnp.where(mask_3d > 0, R, R_detached)
             if self.train_priors and "prior" in params:
                 prior_components = self.prior.compute_energy(
                     R_masked, mask, species=species, params=params["prior"]
@@ -262,6 +253,7 @@ class CombinedModel:
                 "E_angle": prior_components["E_angle"],
                 "E_repulsive": prior_components["E_repulsive"],
                 "E_dihedral": prior_components["E_dihedral"],
+                "E_excluded_volume": prior_components["E_excluded_volume"],
                 "E_prior_total": prior_components["E_total"],
             })
             components["E_total"] = E_ml + prior_components["E_total"]
@@ -280,6 +272,11 @@ class CombinedModel:
         """
         Compute force breakdown via autodiff.
 
+        Uses jax.vjp to perform ONE forward pass through the model, then runs a
+        separate backward pass per component.  This replaces the previous approach
+        of calling jax.grad N times (each of which triggered a full forward pass),
+        reducing forward-pass cost from O(N) to O(1).
+
         Args:
             params: Model parameters
             R: Coordinates, shape (n_atoms, 3)
@@ -290,49 +287,50 @@ class CombinedModel:
             Dictionary with force components:
                 - F_total: Total forces
                 - F_allegro: Allegro forces
-                - F_bond, F_angle, F_repulsive, F_dihedral (if use_priors)
+                - F_bond, F_angle, F_repulsive, F_dihedral, F_excluded_volume (if use_priors)
         """
-        # Define energy functions for each component
-        def energy_components_at_R(R_):
-            return self.compute_components(params, R_, mask, species)
-
-        def E_total_fn(R_):
-            return energy_components_at_R(R_)["E_total"]
-
-        def E_allegro_fn(R_):
-            return energy_components_at_R(R_)["E_allegro"]
-
-        # Compute forces
-        F_total = -jax.grad(E_total_fn)(R)
-        F_allegro = -jax.grad(E_allegro_fn)(R)
-
-        force_components = {
-            "F_total": F_total,
-            "F_allegro": F_allegro,
-        }
-
-        # Add prior force components if enabled
         if self.use_priors:
-            def E_bond_fn(R_):
-                return energy_components_at_R(R_)["E_bond"]
+            # Returns a 7-tuple of scalars: one per energy component.
+            def all_energies(R_):
+                comps = self.compute_components(params, R_, mask, species)
+                return (
+                    comps["E_total"],
+                    comps["E_allegro"],
+                    comps["E_bond"],
+                    comps["E_angle"],
+                    comps["E_repulsive"],
+                    comps["E_dihedral"],
+                    comps["E_excluded_volume"],
+                )
 
-            def E_angle_fn(R_):
-                return energy_components_at_R(R_)["E_angle"]
+            # Single forward pass; vjp_fn holds stored residuals for backward.
+            _, vjp_fn = jax.vjp(all_energies, R)
 
-            def E_rep_fn(R_):
-                return energy_components_at_R(R_)["E_repulsive"]
+            # Each vjp_fn call is a backward-only pass (no re-forward).
+            def _force(idx, n=7):
+                ct = tuple(1.0 if i == idx else 0.0 for i in range(n))
+                return -vjp_fn(ct)[0]
 
-            def E_dih_fn(R_):
-                return energy_components_at_R(R_)["E_dihedral"]
+            return {
+                "F_total":           _force(0),
+                "F_allegro":         _force(1),
+                "F_bond":            _force(2),
+                "F_angle":           _force(3),
+                "F_repulsive":       _force(4),
+                "F_dihedral":        _force(5),
+                "F_excluded_volume": _force(6),
+            }
+        else:
+            def all_energies(R_):
+                comps = self.compute_components(params, R_, mask, species)
+                return comps["E_total"], comps["E_allegro"]
 
-            force_components.update({
-                "F_bond": -jax.grad(E_bond_fn)(R),
-                "F_angle": -jax.grad(E_angle_fn)(R),
-                "F_repulsive": -jax.grad(E_rep_fn)(R),
-                "F_dihedral": -jax.grad(E_dih_fn)(R),
-            })
+            _, vjp_fn = jax.vjp(all_energies, R)
 
-        return force_components
+            return {
+                "F_total":   -vjp_fn((1.0, 0.0))[0],
+                "F_allegro": -vjp_fn((0.0, 1.0))[0],
+            }
 
     def energy_fn_template(self, params: Dict[str, Any]):
         """

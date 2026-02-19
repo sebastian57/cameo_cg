@@ -56,6 +56,15 @@ class AllegroModel:
         # Support different model sizes: default, large, med
         allegro_size = config.get_allegro_size()
         self.allegro_config = config.get_allegro_config(size=allegro_size)
+        self._pad_spacing = jnp.asarray(self.cutoff + self.dr_threshold + 1.0, dtype=jnp.float32)
+
+        # Precompute the final padded-atom parking positions (constant for given N_max).
+        n = N_max
+        idx = jnp.arange(n, dtype=jnp.float32)
+        offsets = jnp.stack(
+            [idx * self._pad_spacing, jnp.zeros(n), jnp.zeros(n)], axis=1
+        )
+        self._padded_positions = jnp.asarray([1e6, 1e6, 1e6], dtype=jnp.float32) + offsets
 
         model_logger.info(f"Using Allegro size: {allegro_size}")
 
@@ -73,12 +82,50 @@ class AllegroModel:
             fractional_coordinates=False
         )
 
+        # Sanitize padded entries for Allegro initialization.
+        species_arr = jnp.asarray(species)
+        init_padded_mask = species_arr < 0
+        R0_safe = self._spread_padded_coordinates(jnp.asarray(R0, dtype=jnp.float32), init_padded_mask)
+
         # Allocate initial neighbor list
-        self.nbrs_init = self.nneigh_fn.allocate(R0, extra_capacity=64)
+        self.nbrs_init = self.nneigh_fn.allocate(R0_safe, extra_capacity=64)
+
+        # Compute actual average number of neighbors from the initial neighbor list
+        # and use it instead of the hardcoded config value. The config value is often
+        # wrong (copy-pasted from other models/cutoffs), which mis-scales Allegro's
+        # many-body interaction output. Make a mutable copy of the dict first.
+        self.allegro_config = dict(self.allegro_config)
+        # Optional graph-cap controls from YAML:
+        #   model.allegro.max_edge_multiplier: float (default 1.25)
+        #   model.allegro.max_edges: int (default None -> inferred)
+        self.max_edge_multiplier = float(self.allegro_config.pop("max_edge_multiplier", 1.25))
+        max_edges_cfg = self.allegro_config.pop("max_edges", None)
+        self.max_edges = None if max_edges_cfg is None else int(max_edges_cfg)
+        n_atoms = int(R0_safe.shape[0])
+        valid_neighbor_slots = (self.nbrs_init.idx >= 0) & (self.nbrs_init.idx < n_atoms)
+        actual_avg_neighbors = float(jnp.mean(jnp.sum(valid_neighbor_slots, axis=-1).astype(jnp.float32)))
+        config_avg = self.allegro_config.get("avg_num_neighbors", 12)
+        if abs(actual_avg_neighbors - config_avg) > 2.0:
+            model_logger.warning(
+                f"avg_num_neighbors: config={config_avg}, "
+                f"computed from data={actual_avg_neighbors:.1f}. Using computed value."
+            )
+        self.allegro_config["avg_num_neighbors"] = actual_avg_neighbors
+        model_logger.info(f"avg_num_neighbors = {actual_avg_neighbors:.1f} (computed from initial neighbor list)")
+        if self.max_edges is not None:
+            model_logger.info(
+                f"Using configured Allegro max_edges={self.max_edges} "
+                f"(max_edge_multiplier={self.max_edge_multiplier:.3f})"
+            )
+        else:
+            model_logger.info(
+                f"Using inferred Allegro max_edges "
+                f"(max_edge_multiplier={self.max_edge_multiplier:.3f})"
+            )
 
         # Determine number of species
-        self.n_species = int(jnp.max(species)) + 1
-        species_safe = jnp.asarray(species, dtype=jnp.int32)
+        species_safe = jnp.where(species_arr >= 0, species_arr, 0).astype(jnp.int32)
+        self.n_species = int(jnp.max(species_safe)) + 1
 
         model_logger.info(f"Detected {self.n_species} unique species")
         model_logger.info(f"Using Allegro config size: {allegro_size}")
@@ -88,16 +135,25 @@ class AllegroModel:
             displacement=self.displacement,
             r_cutoff=self.cutoff,
             n_species=self.n_species,
-            positions_test=R0,
+            positions_test=R0_safe,
             neighbor_test=self.nbrs_init,
-            max_edge_multiplier=1.25,
+            max_edge_multiplier=self.max_edge_multiplier,
+            max_edges=self.max_edges,
             mode="energy",
             **self.allegro_config
         )
 
         # Store initialization parameters
-        self._R0 = R0
+        self._R0 = R0_safe
         self._species0 = species_safe
+
+    def _spread_padded_coordinates(self, R: jax.Array, padded_mask: jax.Array) -> jax.Array:
+        """
+        Place padded atoms far apart from all atoms so they cannot form spurious edges.
+
+        Uses self._padded_positions (precomputed at init) — a single jnp.where per call.
+        """
+        return jnp.where(padded_mask[:, None], self._padded_positions, R)
 
     def initialize_params(self, rng_key: jax.random.PRNGKey) -> Any:
         """
@@ -124,7 +180,7 @@ class AllegroModel:
             Updated neighbor list
         """
         if nbrs is None:
-            nbrs = self.nneigh_fn.allocate(R)
+            nbrs = self.nbrs_init
 
         nbrs = self.nneigh_fn.update(R, nbrs)
         return nbrs
@@ -150,26 +206,24 @@ class AllegroModel:
         Returns:
             Total energy (scalar)
         """
-        # Apply mask to coordinates (stop gradient for padded atoms)
-        mask_3d = mask[:, None]
-        R_masked = jnp.where(
-            mask_3d > 0,
-            R,
-            jax.lax.stop_gradient(R)
-        )
+        # Apply mask to coordinates and spread padded atoms away from all real atoms.
+        valid_mask = mask > 0
+        padded_mask = jnp.logical_not(valid_mask)
+        R_safe = self._spread_padded_coordinates(R, padded_mask)
+        R_masked = jnp.where(valid_mask[:, None], R, jax.lax.stop_gradient(R_safe))
 
-        # Get or update neighbor list
-        if neighbor is None:
-            nbrs = self.nneigh_fn.allocate(R_masked)
-            nbrs = self.nneigh_fn.update(R_masked, nbrs)
-        else:
-            nbrs = neighbor
+        # Reuse the pre-allocated neighbor list structure; only update positions.
+        # Avoids expensive O(N^2) allocate() on every forward pass.
+        nbrs = neighbor if neighbor is not None else self.nbrs_init
+        nbrs = self.nneigh_fn.update(R_masked, nbrs)
 
         # Ensure species are valid (masked atoms -> species 0)
-        species_masked = jnp.where(mask > 0, species, 0).astype(jnp.int32)
+        species_masked = jnp.where(valid_mask, species, 0).astype(jnp.int32)
 
         # Compute energy
-        E_allegro = self.apply_allegro(params, R_masked, nbrs, species_masked)
+        E_allegro = self.apply_allegro(
+            params, R_masked, nbrs, species_masked, mask=valid_mask.astype(jnp.bool_)
+        )
 
         return E_allegro
 

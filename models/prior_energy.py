@@ -164,7 +164,7 @@ def _compute_angles(R: jax.Array, angles: jax.Array, displacement) -> jax.Array:
     Args:
         R: Coordinates, shape (n_atoms, 3)
         angles: Angle triplet indices, shape (n_angles, 3)
-        displacement: JAX-MD displacement function
+        displacement: JAX-MD displacement function (unused, kept for API compat)
 
     Returns:
         Angles in radians, shape (n_angles,)
@@ -172,9 +172,9 @@ def _compute_angles(R: jax.Array, angles: jax.Array, displacement) -> jax.Array:
     ia, ib, ic = angles[:, 0], angles[:, 1], angles[:, 2]
     Ra, Rb, Rc = R[ia], R[ib], R[ic]
 
-    # Vectors from central atom
-    v_ba = jax.vmap(displacement)(Rb, Ra)  # b -> a
-    v_bc = jax.vmap(displacement)(Rb, Rc)  # b -> c
+    # Vectors from central atom (free-space: displacement is subtraction)
+    v_ba = Ra - Rb  # b -> a
+    v_bc = Rc - Rb  # b -> c
 
     # Angle via dot product
     # Use _safe_norm to ensure well-defined gradients at zero vectors
@@ -195,7 +195,7 @@ def _compute_dihedrals(R: jax.Array, dihedrals: jax.Array, displacement) -> jax.
     Args:
         R: Coordinates, shape (n_atoms, 3)
         dihedrals: Dihedral quadruplet indices, shape (n_dihedrals, 4)
-        displacement: JAX-MD displacement function
+        displacement: JAX-MD displacement function (unused, kept for API compat)
 
     Returns:
         Dihedral angles in radians, shape (n_dihedrals,)
@@ -203,10 +203,10 @@ def _compute_dihedrals(R: jax.Array, dihedrals: jax.Array, displacement) -> jax.
     i, j, k, l = dihedrals[:, 0], dihedrals[:, 1], dihedrals[:, 2], dihedrals[:, 3]
     Ri, Rj, Rk, Rl = R[i], R[j], R[k], R[l]
 
-    # Bond vectors
-    b1 = jax.vmap(displacement)(Rj, Ri)  # i -> j
-    b2 = jax.vmap(displacement)(Rk, Rj)  # j -> k
-    b3 = jax.vmap(displacement)(Rl, Rk)  # k -> l
+    # Bond vectors (free-space: displacement is subtraction)
+    b1 = Rj - Ri  # i -> j
+    b2 = Rk - Rj  # j -> k
+    b3 = Rl - Rk  # k -> l
 
     # Normal vectors to planes
     n1 = jnp.cross(b1, b2)
@@ -265,12 +265,16 @@ class PriorEnergy:
             "angle": 0.1,
             "repulsive": 0.25,
             "dihedral": 0.15,
+            "excluded_volume": 1.0,
         })
 
         # Get topology
         self.bonds, self.angles = topology.get_bonds_and_angles()
         self.dihedrals = topology.get_dihedrals()
         self.rep_pairs = topology.get_repulsive_pairs()
+        # Excluded volume pairs: residues at sequence separation 2-5
+        # (not covered by bonds/angles/dihedrals or the long-range repulsion)
+        self.excluded_vol_pairs = topology.get_excluded_volume_pairs(min_sep=2, max_sep=5)
 
         # Check for spline-based priors.
         # New path: explicit boolean gate in config.
@@ -293,12 +297,22 @@ class PriorEnergy:
         """Initialize spline-based priors from NPZ file."""
         self.uses_splines = True
 
-        # Resolve relative paths
+        # Resolve relative paths — try config directory, then CWD
         spline_path = Path(spline_path)
         if not spline_path.is_absolute():
-            # Resolve relative to config file location
             config_dir = config.config_path.parent
-            spline_path = config_dir / spline_path
+            from_config = config_dir / spline_path
+            from_cwd = Path.cwd() / spline_path
+            if from_config.exists():
+                spline_path = from_config
+            elif from_cwd.exists():
+                model_logger.warning(
+                    f"Spline file not found relative to config dir ({config_dir}); "
+                    f"using CWD-relative path: {from_cwd}"
+                )
+                spline_path = from_cwd
+            else:
+                spline_path = from_config  # will fail below with a clear message
 
         if not spline_path.exists():
             raise FileNotFoundError(f"Spline prior file not found: {spline_path}")
@@ -346,6 +360,9 @@ class PriorEnergy:
         self.params = {
             "epsilon": jnp.asarray(prior_params.get("epsilon", 1.0), dtype=jnp.float32),
             "sigma": jnp.asarray(prior_params.get("sigma", 3.0), dtype=jnp.float32),
+            # Excluded volume params (softer than long-range repulsion, for sep 2-5)
+            "epsilon_ex": jnp.asarray(prior_params.get("epsilon_ex", 1.0), dtype=jnp.float32),
+            "sigma_ex": jnp.asarray(prior_params.get("sigma_ex", 3.5), dtype=jnp.float32),
         }
 
         model_logger.info("Spline priors loaded: bond, angle, dihedral (repulsive stays parametric)")
@@ -365,6 +382,9 @@ class PriorEnergy:
             "sigma": jnp.asarray(prior_params.get("sigma", 3.0), dtype=jnp.float32),
             "k_dih": jnp.asarray(prior_params.get("k_dih", [0.5]), dtype=jnp.float32),
             "gamma_dih": jnp.asarray(prior_params.get("gamma_dih", [0.0]), dtype=jnp.float32),
+            # Excluded volume params (softer than long-range repulsion, for sep 2-5)
+            "epsilon_ex": jnp.asarray(prior_params.get("epsilon_ex", 1.0), dtype=jnp.float32),
+            "sigma_ex": jnp.asarray(prior_params.get("sigma_ex", 3.5), dtype=jnp.float32),
         }
 
     def compute_bond_energy(
@@ -394,8 +414,8 @@ class PriorEnergy:
         # Mask: both atoms must be valid
         bond_valid = (mask[bi] * mask[bj]) > 0
 
-        # Compute distances using _safe_norm for well-defined gradients at zero
-        dR = jax.vmap(self.displacement)(Ri, Rj)
+        # Compute distances (free-space: displacement is subtraction)
+        dR = Ri - Rj
         r = _safe_norm(dR)
 
         if self.uses_splines:
@@ -494,9 +514,9 @@ class PriorEnergy:
         # Mask: both atoms must be valid
         rep_valid = (mask[pi] * mask[pj]) > 0
 
-        # Compute distances using _safe_norm for well-defined gradients at zero
+        # Compute distances (free-space: displacement is subtraction)
         Rp_i, Rp_j = R[pi], R[pj]
-        dR_rep = jax.vmap(self.displacement)(Rp_i, Rp_j)
+        dR_rep = Rp_i - Rp_j
         r_rep = _safe_norm(dR_rep)
 
         # CRITICAL FIX: Block gradients for invalid pairs!
@@ -517,73 +537,55 @@ class PriorEnergy:
 
         return E_rep
 
-    # ========================================================================
-    # SCIENTIFIC FIX: Excluded Volume for Nearby Residues (OPTIONAL)
-    # ========================================================================
-    # ISSUE: No repulsion for sequence separation 2-5 → backbone self-intersection
-    # FIX: Add soft excluded volume energy term
-    #
-    # TO ENABLE:
-    # 1. Uncomment this method
-    # 2. Add excluded_vol_pairs to __init__ (get from topology)
-    # 3. Add epsilon_ex, sigma_ex to config (softer than regular repulsion)
-    # 4. Add to compute_energy() and compute_total_energy()
-    # ========================================================================
-    # def compute_excluded_volume_energy(self, R: jax.Array, mask: jax.Array) -> jax.Array:
-    #     """
-    #     Compute soft excluded volume for nearby residues (sequence separation 2-5).
-    #
-    #     E_ex = epsilon_ex * sum[ (sigma_ex / r)^4 ]  (for valid pairs)
-    #
-    #     Args:
-    #         R: Coordinates, shape (n_atoms, 3)
-    #         mask: Validity mask, shape (n_atoms,)
-    #
-    #     Returns:
-    #         Total excluded volume energy (scalar)
-    #
-    #     Note:
-    #         Use SOFTER parameters than regular repulsion:
-    #         epsilon_ex ~ 1-2 kcal/mol (vs 5 kcal/mol for regular)
-    #         sigma_ex ~ 3.5 Å (vs 4 Å for regular)
-    #     """
-    #     # Requires: self.excluded_vol_pairs = topology.get_excluded_volume_pairs()
-    #     pi, pj = self.excluded_vol_pairs[:, 0], self.excluded_vol_pairs[:, 1]
-    #
-    #     # Mask: both atoms must be valid
-    #     ex_valid = (mask[pi] * mask[pj]) > 0
-    #
-    #     # Compute distances using _safe_norm for well-defined gradients at zero
-    #     Rp_i, Rp_j = R[pi], R[pj]
-    #     dR_ex = jax.vmap(self.displacement)(Rp_i, Rp_j)
-    #     r_ex = _safe_norm(dR_ex)
-    #
-    #     # Block gradients for invalid pairs
-    #     r_ex = jnp.where(ex_valid, r_ex, jax.lax.stop_gradient(r_ex))
-    #
-    #     # Avoid interactions with padded atoms (set large distance for forward pass)
-    #     r_ex = jnp.where(ex_valid, r_ex, 1e6)
-    #
-    #     # Avoid division by zero
-    #     r_min = jnp.array(1e-3, dtype=R.dtype)
-    #     r_safe = jnp.maximum(r_ex, r_min)
-    #
-    #     # Soft-sphere excluded volume (SOFTER than regular repulsion)
-    #     ex_term = (self.params["sigma_ex"] / r_safe) ** 4
-    #     E_ex = self.params["epsilon_ex"] * jnp.sum(jnp.where(ex_valid, ex_term, 0.0))
-    #
-    #     return E_ex
-    #
-    # TO ENABLE IN __init__:
-    # self.excluded_vol_pairs = topology.get_excluded_volume_pairs(min_sep=2, max_sep=5)
-    # self.params["epsilon_ex"] = jnp.asarray(prior_params.get("epsilon_ex", 1.5), dtype=jnp.float32)
-    # self.params["sigma_ex"] = jnp.asarray(prior_params.get("sigma_ex", 3.5), dtype=jnp.float32)
-    #
-    # TO ENABLE IN compute_energy():
-    # E_ex_raw = self.compute_excluded_volume_energy(R, mask)
-    # E_ex = self.weights.get("excluded_volume", 1.0) * E_ex_raw  # Usually weight=1.0
-    # Add E_ex to the returned dict and to E_total
-    # ========================================================================
+    def compute_excluded_volume_energy(
+        self,
+        R: jax.Array,
+        mask: jax.Array,
+        params: Optional[Dict[str, jax.Array]] = None
+    ) -> jax.Array:
+        """
+        Compute soft excluded volume for nearby residues (sequence separation 2-5).
+
+        These residues are too close for the long-range repulsion (which starts
+        at sep ≥ 6) but are not directly constrained by bonds/angles/dihedrals
+        to prevent unphysical backbone self-intersection.
+
+        Uses softer parameters than the long-range repulsion:
+        - sigma_ex ~ 3.5 Å  (vs sigma=3.0 for long-range)
+        - epsilon_ex ~ 1.0 kcal/mol (same scale, but can be tuned)
+
+        E_ex = epsilon_ex * sum[ (sigma_ex / r)^4 ]  (for valid pairs with sep 2-5)
+
+        Args:
+            R: Coordinates, shape (n_atoms, 3)
+            mask: Validity mask, shape (n_atoms,)
+            params: Optional prior params dict (for train_priors mode)
+
+        Returns:
+            Total excluded volume energy (scalar)
+        """
+        p = params if params is not None else self.params
+        pi, pj = self.excluded_vol_pairs[:, 0], self.excluded_vol_pairs[:, 1]
+
+        # Mask: both atoms must be valid
+        ex_valid = (mask[pi] * mask[pj]) > 0
+
+        Rp_i, Rp_j = R[pi], R[pj]
+        dR_ex = Rp_i - Rp_j
+        r_ex = _safe_norm(dR_ex)
+
+        # Block gradients for invalid pairs
+        r_ex = jnp.where(ex_valid, r_ex, jax.lax.stop_gradient(r_ex))
+
+        # Set large distance for padded/invalid pairs (no energy contribution)
+        r_ex = jnp.where(ex_valid, r_ex, 1e6)
+
+        r_safe = jnp.maximum(r_ex, jnp.array(1e-3, dtype=R.dtype))
+
+        ex_term = (p["sigma_ex"] / r_safe) ** 4
+        E_ex = p["epsilon_ex"] * jnp.sum(jnp.where(ex_valid, ex_term, 0.0))
+
+        return E_ex
 
     def compute_dihedral_energy(
         self,
@@ -663,24 +665,23 @@ class PriorEnergy:
         E_angle_raw = self.compute_angle_energy(R, mask, species=species, params=p)
         E_rep_raw = self.compute_repulsive_energy(R, mask, params=p)
         E_dih_raw = self.compute_dihedral_energy(R, mask, params=p)
+        E_ex_raw = self.compute_excluded_volume_energy(R, mask, params=p)
 
-        # Apply weights (matching original code behavior)
+        # Apply weights
         E_bond = self.weights["bond"] * E_bond_raw
         E_angle = self.weights["angle"] * E_angle_raw
         E_rep = self.weights["repulsive"] * E_rep_raw
         E_dih = self.weights["dihedral"] * E_dih_raw
+        E_ex = self.weights.get("excluded_volume", 1.0) * E_ex_raw
 
-        # Total is sum of weighted components
-        # NOTE: Dihedral is NOW INCLUDED after fixing the gradient NaN issue.
-        # The fix in compute_dihedral_energy() applies stop_gradient to phi for
-        # invalid dihedrals, which blocks NaN gradients from atan2(0,0).
-        E_total = E_bond + E_angle + E_rep + E_dih
+        E_total = E_bond + E_angle + E_rep + E_dih + E_ex
 
         return {
             "E_bond": E_bond,
             "E_angle": E_angle,
             "E_repulsive": E_rep,
             "E_dihedral": E_dih,
+            "E_excluded_volume": E_ex,
             "E_total": E_total,
         }
 
