@@ -165,11 +165,12 @@ class DatasetLoader:
         else:
             indices = np.arange(n_total)
 
-        # Store dataset
-        self.R = jnp.asarray(raw_data["R"][indices], dtype=jnp.float32)
-        self.F = jnp.asarray(raw_data["F"][indices], dtype=jnp.float32)
-        self.mask = jnp.asarray(raw_data["mask"][indices], dtype=jnp.float32)
-        self.species = jnp.asarray(raw_data["species"][indices], dtype=jnp.int32)
+        # Store dataset as NumPy arrays to avoid unnecessary device transfers.
+        # JAX arrays are created on-demand via .R_jax etc. when needed on device.
+        self.R = np.asarray(raw_data["R"][indices], dtype=np.float32)
+        self.F = np.asarray(raw_data["F"][indices], dtype=np.float32)
+        self.mask = np.asarray(raw_data["mask"][indices], dtype=np.float32)
+        self.species = np.asarray(raw_data["species"][indices], dtype=np.int32)
 
         # Store metadata
         self.N_max = raw_data["N_max"]
@@ -313,3 +314,72 @@ class DatasetLoader:
 
     def __len__(self) -> int:
         return self.n_frames
+
+
+class BucketedDatasetLoader:
+    """
+    Loader for protein-aware bucketed datasets.
+
+    Finds all bucket_N*.npz files in a directory (or accepts an explicit list)
+    and wraps each in a DatasetLoader.  Buckets are sorted by N_max so training
+    code can iterate from smallest to largest.
+
+    Example:
+        >>> loader = BucketedDatasetLoader("processed/03_bucketed_npz")
+        >>> for n_max, bucket in loader.buckets:
+        ...     print(f"N_max={n_max}: {len(bucket)} frames")
+    """
+
+    def __init__(
+        self,
+        bucket_dir_or_paths,
+        max_frames: Optional[int] = None,
+        seed: int = 42,
+    ):
+        """
+        Args:
+            bucket_dir_or_paths: path to a directory containing bucket_N*.npz
+                                 files, OR an explicit list/glob of NPZ paths.
+            max_frames:          maximum frames per bucket (None = use all)
+            seed:                random seed for frame shuffling
+        """
+        from pathlib import Path as _Path
+
+        if isinstance(bucket_dir_or_paths, (str, _Path)):
+            bucket_dir = _Path(bucket_dir_or_paths)
+            npz_paths = sorted(bucket_dir.glob("bucket_N*.npz"))
+            if not npz_paths:
+                raise FileNotFoundError(
+                    f"No bucket_N*.npz files found in {bucket_dir}"
+                )
+        else:
+            npz_paths = sorted(_Path(p) for p in bucket_dir_or_paths)
+
+        # Build (N_max, DatasetLoader) pairs sorted by N_max
+        self._buckets = []
+        for p in npz_paths:
+            dl = DatasetLoader(str(p), max_frames=max_frames, seed=seed)
+            self._buckets.append((dl.N_max, dl))
+
+        self._buckets.sort(key=lambda x: x[0])
+
+    @property
+    def buckets(self):
+        """List of (N_max, DatasetLoader) pairs sorted by N_max (ascending)."""
+        return self._buckets
+
+    @property
+    def n_buckets(self) -> int:
+        """Number of buckets."""
+        return len(self._buckets)
+
+    def summary(self) -> str:
+        lines = [f"BucketedDatasetLoader: {self.n_buckets} buckets"]
+        for n_max, dl in self._buckets:
+            lines.append(f"  N_max={n_max:4d}: {dl.n_frames} frames  [{dl.npz_path.name}]")
+        return "\n".join(lines)
+
+    def __repr__(self) -> str:
+        return (f"BucketedDatasetLoader(n_buckets={self.n_buckets}, "
+                f"N_max_range=[{self._buckets[0][0]}, {self._buckets[-1][0]}])"
+                if self._buckets else "BucketedDatasetLoader(empty)")
