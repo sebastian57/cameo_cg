@@ -15,6 +15,7 @@ checkpoints_allegro/
 checkpoints_scaling/
 checkpoints_mace/
 checkpoints_painn/
+checkpoints_phase1_r1/
 scaling_results/
 rand_plots/
 
