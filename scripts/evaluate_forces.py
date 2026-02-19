@@ -73,6 +73,11 @@ from data.preprocessor import CoordinatePreprocessor
 from models.combined_model import CombinedModel
 from evaluation.evaluator import Evaluator
 from evaluation.visualizer import ForceAnalyzer
+from evaluation.per_residue import (
+    compute_per_residue_errors,
+    plot_per_residue_rmse,
+    save_per_residue_txt,
+)
 
 
 def main():
@@ -86,13 +91,14 @@ def main():
                         help="Output directory for plots")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for frame selection")
-    parser.add_argument("--mode", choices=['full', 'prior-only', 'ml-only'],
+    parser.add_argument("--mode", choices=['full', 'prior-only', 'ml-only', 'per-residue'],
                         default='full',
-                        help="Evaluation mode: full (ML+priors), prior-only, or ml-only (default: full)")
+                        help="Evaluation mode: full (ML+priors), prior-only, ml-only, "
+                             "or per-residue (RMSE broken down by AA type) (default: full)")
     args = parser.parse_args()
 
     # Validate mode and params combination
-    if args.mode != 'prior-only' and args.params is None:
+    if args.mode not in ('prior-only', 'per-residue') and args.params is None:
         parser.error(f"params file is required for --mode {args.mode}")
 
     # Setup
@@ -118,15 +124,38 @@ def main():
         print("       Please enable priors in your config file")
         sys.exit(1)
 
-    # Validate spline file exists if configured
+    # Validate spline file exists and resolve to an absolute path.
+    # PriorEnergy resolves relative spline paths from the config file's
+    # directory, which breaks when evaluate_forces.py is called with a
+    # config copy saved inside exported_models/.  We resolve the path here
+    # and write the absolute path back into the config so that CombinedModel
+    # always sees an absolute path regardless of which config copy is used.
     if config.use_spline_priors_enabled():
         spline_path_str = config.get_spline_file_path()
         spline_path = Path(spline_path_str)
+
         if not spline_path.is_absolute():
-            spline_path = clean_code_base / spline_path_str
+            # Try in order: CWD, clean_code_base, config file's directory
+            candidates = [
+                Path.cwd() / spline_path_str,
+                clean_code_base / spline_path_str,
+                Path(args.config).parent / spline_path_str,
+            ]
+            for candidate in candidates:
+                if candidate.exists():
+                    spline_path = candidate
+                    break
+
         if not spline_path.exists():
-            print(f"\nERROR: Spline file not found: {spline_path}")
+            print(f"\nERROR: Spline file not found: {spline_path_str}")
+            print(f"  Searched in: CWD, {clean_code_base}, config dir")
             sys.exit(1)
+
+        # Patch config with the resolved absolute path so PriorEnergy
+        # does not attempt a second (wrong) relative resolution.
+        abs_spline = str(spline_path.resolve())
+        config._config.setdefault('model', {}).setdefault('priors', {})['spline_file'] = abs_spline
+        print(f"  Spline file: {abs_spline}")
 
     # Get model_id for file naming
     model_id = config.get("model_id", default="model")
@@ -318,6 +347,40 @@ def main():
         )
     print(f"  Model: {model}")
     print(f"  Use priors: {model.use_priors}")
+
+    # -------------------------------------------------------------------------
+    # Per-residue mode: early exit with dedicated evaluation
+    # -------------------------------------------------------------------------
+    if args.mode == 'per-residue':
+        if args.params is None:
+            print("\nERROR: --mode per-residue requires a params file")
+            sys.exit(1)
+
+        # Build id_to_aa from loader
+        id_to_aa = {v: k for k, v in loader.aa_to_id.items()} if loader.aa_to_id else {}
+
+        print(f"\nRunning per-residue RMSE evaluation ({args.frames} frames)…")
+        results = compute_per_residue_errors(
+            model=model,
+            params=params,
+            dataset=dataset,
+            n_frames=args.frames,
+            seed=args.seed,
+        )
+
+        filename_base = f"{model_id}_per_residue"
+        plot_path = output_dir / f"{filename_base}_rmse.png"
+        txt_path = output_dir / f"{filename_base}_rmse.txt"
+
+        plot_per_residue_rmse(results, id_to_aa, str(plot_path), title=f"Per-Residue RMSE — {model_id}")
+        save_per_residue_txt(results, id_to_aa, str(txt_path), model_id=model_id)
+
+        # Print summary
+        real_mask = results["mask"] > 0
+        rmse_real = results["rmse_per_atom"][real_mask]
+        print(f"\nOverall per-atom RMSE: {float(np.mean(rmse_real)):.4f} kcal/mol/Å")
+        print("Done!")
+        return
 
     # For prior-only mode, ensure params dict structure
     if args.mode == 'prior-only':

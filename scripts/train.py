@@ -187,7 +187,7 @@ from chemtrain.data.data_loaders import DataLoaders
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config.manager import ConfigManager
-from data.loader import DatasetLoader
+from data.loader import DatasetLoader, BucketedDatasetLoader
 from data.preprocessor import CoordinatePreprocessor
 from models.combined_model import CombinedModel
 from training.trainer import Trainer
@@ -338,8 +338,8 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     dataset["R"] = preprocessor.center_and_park(dataset["R"], dataset["mask"], extent, R_shift)
 
     box = extent
-    data_logger.info(f"[Preprocessing] Computed box: {np.asarray(box)}")
-    data_logger.info(f"[Preprocessing] R_shift: {np.asarray(R_shift)}")
+    data_logger.info(f"[Preprocessing] Computed box: {jax.device_get(box)}")
+    data_logger.info(f"[Preprocessing] R_shift: {jax.device_get(R_shift)}")
 
     # Spline priors are an add-on mode; LBFGS pretraining is only valid for
     # parametric prior parameters. Disable pretraining if both are enabled.
@@ -364,7 +364,8 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         R0=R0,
         box=box,
         species=species0,
-        N_max=N_max
+        N_max=N_max,
+        prior_only=config.prior_only_enabled()
     )
 
     model_logger.info(f"Initialized: {model}")
@@ -547,14 +548,173 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     logging.info("=" * 60)
 
 
+def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
+    """
+    Multi-protein training on bucketed datasets.
+
+    Trains sequentially over all bucket_N*.npz files found in bucket_dir,
+    transferring parameters from each bucket to the next (warm-start).
+    This ensures all proteins of different lengths contribute to the model
+    while each bucket uses its own (smaller) N_max, reducing wasted compute.
+
+    Args:
+        config_file:  Path to YAML config (shared across all buckets)
+        bucket_dir:   Directory containing bucket_N*.npz files from
+                      run_pipeline.py --bucket_boundaries or --n_buckets
+        job_id:       SLURM job ID (optional, for logging/file naming)
+    """
+    is_distributed = _IS_DISTRIBUTED
+    rank = _RANK
+
+    apply_numpy_dataloader_patch()
+
+    config = ConfigManager(config_file)
+
+    if job_id is None:
+        job_id = os.environ.get("SLURM_JOB_ID", "local")
+
+    export_dir = Path(config.get_export_path())
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    model_context = config.get_model_context()
+    model_id = config.get_model_id()
+    model_name = f"{model_context}_{model_id}"
+
+    config_path = export_dir / f"{model_name}_config.yaml"
+    config.save(config_path)
+
+    # Load all buckets
+    bucketed = BucketedDatasetLoader(bucket_dir, max_frames=config.get_max_frames(),
+                                     seed=config.get_seed())
+    training_logger.info(bucketed.summary())
+
+    cutoff = config.get_cutoff()
+    buffer_mult = config.get_buffer_multiplier()
+    park_mult = config.get_park_multiplier()
+    preprocessor = CoordinatePreprocessor(
+        cutoff=cutoff, buffer_multiplier=buffer_mult, park_multiplier=park_mult
+    )
+
+    prev_params = None
+    all_results = {}
+
+    for bucket_idx, (n_max, loader) in enumerate(bucketed.buckets):
+        training_logger.info(
+            f"\n{'=' * 60}\n"
+            f"Bucket {bucket_idx + 1}/{bucketed.n_buckets}: "
+            f"{loader.npz_path.name}  (N_max={n_max}, frames={len(loader)})\n"
+            f"{'=' * 60}"
+        )
+
+        species0 = loader.species[0]
+        extent, R_shift = preprocessor.compute_box_extent(loader.R, loader.mask)
+        dataset = loader.get_all()
+        dataset["R"] = preprocessor.center_and_park(
+            dataset["R"], dataset["mask"], extent, R_shift
+        )
+        box = extent
+        R0 = dataset["R"][0]
+        mask0 = dataset["mask"][0]
+
+        model = CombinedModel(
+            config=config, R0=R0, box=box, species=species0, N_max=n_max,
+            prior_only=config.prior_only_enabled()
+        )
+        model_logger.info(f"Bucket {bucket_idx}: {model}")
+
+        # Data loaders
+        val_fraction = config.get_val_fraction()
+        N_train = int(np.round(len(dataset["R"]) * (1 - val_fraction)))
+        N_val = len(dataset["R"]) - N_train
+        batch_per_device = config.get_batch_per_device()
+        n_devices = jax.local_device_count()
+        min_val_samples = batch_per_device * n_devices
+        if N_val < min_val_samples:
+            N_train = len(dataset["R"])
+            N_val = 0
+
+        train_loader = NumpyDataLoader(
+            R=dataset["R"][:N_train], F=dataset["F"][:N_train],
+            mask=dataset["mask"][:N_train], species=dataset["species"][:N_train],
+            copy=False
+        )
+        val_loader = (
+            NumpyDataLoader(
+                R=dataset["R"][N_train:N_train + N_val],
+                F=dataset["F"][N_train:N_train + N_val],
+                mask=dataset["mask"][N_train:N_train + N_val],
+                species=dataset["species"][N_train:N_train + N_val],
+                copy=False
+            ) if N_val > 0 else train_loader
+        )
+
+        train_data = {
+            "R": jnp.asarray(dataset["R"][:N_train]),
+            "F": jnp.asarray(dataset["F"][:N_train]),
+            "mask": jnp.asarray(dataset["mask"][:N_train]),
+            "species": jnp.asarray(dataset["species"][:N_train]),
+        }
+
+        trainer = Trainer(
+            model=model, config=config,
+            train_loader=train_loader, val_loader=val_loader,
+            train_data=train_data
+        )
+
+        # Warm-start from previous bucket's params
+        if prev_params is not None:
+            trainer.params = prev_params
+            trainer.best_params = prev_params
+            training_logger.info(
+                f"  Bucket {bucket_idx}: warm-start from previous bucket params"
+            )
+
+        results = trainer.train_full_pipeline()
+        prev_params = trainer.get_best_params()
+        all_results[loader.npz_path.stem] = results
+
+        training_logger.info(f"Bucket {bucket_idx} done: {results}")
+
+    # Export using final bucket's params (largest N_max)
+    final_n_max, final_loader = bucketed.buckets[-1]
+    final_species0 = final_loader.species[0]
+
+    training_logger.info(f"\nExporting model (N_max={final_n_max})…")
+
+    checkpoint_path = export_dir / f"{model_name}_checkpoint.pkl"
+    trainer.save_checkpoint(checkpoint_path, metadata={"job_id": job_id, "results": all_results})
+
+    mlir_path = export_dir / f"{model_name}.mlir"
+    exporter = AllegroExporter.from_combined_model(
+        model=model, params=prev_params,
+        box=box, species=final_species0
+    )
+    exporter.export_to_file(mlir_path)
+    export_logger.info(f"MLIR: {mlir_path}")
+
+    params_path = export_dir / f"{model_name}_params.pkl"
+    with open(params_path, 'wb') as f:
+        pickle.dump(prev_params, f)
+    export_logger.info(f"Parameters: {params_path}")
+
+    training_logger.info("\nMulti-protein training complete.")
+    for bucket_name, result in all_results.items():
+        training_logger.info(f"  {bucket_name}: {result}")
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        logging.error("Usage: python train.py <config.yaml> [job_id] [--resume checkpoint.pkl]")
+        logging.error(
+            "Usage:\n"
+            "  python train.py <config.yaml> [job_id] [--resume checkpoint.pkl]\n"
+            "  python train.py <config.yaml> --multi-protein-dir <bucket_dir> [job_id]"
+        )
         sys.exit(1)
 
     config_file = sys.argv[1]
     job_id = None
     resume_checkpoint = None
+    multi_protein_dir = None
 
     # Parse remaining arguments
     i = 2
@@ -567,10 +727,19 @@ if __name__ == "__main__":
             else:
                 logging.error("--resume requires a checkpoint path")
                 sys.exit(1)
+        elif arg == "--multi-protein-dir":
+            if i + 1 < len(sys.argv):
+                multi_protein_dir = sys.argv[i + 1]
+                i += 2
+            else:
+                logging.error("--multi-protein-dir requires a directory path")
+                sys.exit(1)
         else:
-            # Assume positional job_id if not a flag
             if job_id is None:
                 job_id = arg
             i += 1
 
-    main(config_file, job_id, resume_checkpoint)
+    if multi_protein_dir is not None:
+        main_multi_protein(config_file, multi_protein_dir, job_id)
+    else:
+        main(config_file, job_id, resume_checkpoint)

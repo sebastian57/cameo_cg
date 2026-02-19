@@ -1,6 +1,6 @@
 #!/bin/bash -x
 
-#SBATCH --account=atmlaml #cameo
+#SBATCH --account=cameo
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-task=4
