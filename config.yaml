@@ -1,0 +1,147 @@
+seed: 193749
+debug_priors: false
+
+model_context: "allegro_cg_protein_2g4q4z5k"
+protein_name: "2g4q4z5k"
+model_id: ""
+
+data:
+  path: "data_prep/datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz"
+  max_frames: 10000
+
+preprocessing:
+  buffer_multiplier: 2.0
+  park_multiplier: 0.95
+
+model:
+  use_priors: true
+  train_priors: false
+
+  allegro_size: "default"
+
+  cutoff: 10.0
+  dr_threshold: 1.0
+
+  allegro:  # Default size
+    max_ell: 2
+    num_layers: 3
+    n_radial_basis: 24
+    envelope_p: 6
+    embed_n_hidden: [64, 128]
+    species_embed: 22
+    mlp_n_hidden: 96
+    mlp_n_layers: 3
+    avg_num_neighbors: 21
+
+  allegro_large:
+    max_ell: 2
+    num_layers: 4
+    n_radial_basis: 36
+    envelope_p: 6
+    embed_n_hidden: [96, 192]
+    species_embed: 32
+    mlp_n_hidden: 192
+    mlp_n_layers: 3
+    avg_num_neighbors: 8
+
+  allegro_med:
+    num_types: 22
+    max_ell: 2
+    num_layers: 3
+    n_radial_basis: 18
+    envelope_p: 6
+    embed_n_hidden: [64, 128]
+    species_embed: 32
+    mlp_n_hidden: 128
+    mlp_n_layers: 2
+    avg_num_neighbors: 12
+
+  priors:
+    use_spline_priors: true
+    spline_file: "data_prep/datasets/fitted_priors_spline.npz"
+    residue_specific_angles: true
+    weights:
+      bond: 0.5
+      angle: 0.25
+      dihedral: 0.25
+      repulsive: 1.0
+      excluded_volume: 1.0  # Soft repulsion for seq sep 2-5; not fitted, full strength
+    r0: 3.8375435
+    kr: 154.50629422490843
+    a: [-0.02086511, -0.36341857, -0.50767196, 0.09906029, 0.8319552, -0.00770968, -0.13320648, -1.14116021, 0.18145372, -0.55828783]
+    b: [0.67521775, 0.14797897, -0.12157499, -0.8289584, 0.17162394, 0.48646108, 0.56000923, -0.13905056, -0.896762, -1.20144583]
+    theta0: 1.8335507
+    k_theta: 8.271271714604836
+    epsilon: 1.0
+    sigma: 3.0
+    epsilon_ex: 1.0   # Excluded volume strength (kcal/mol)
+    sigma_ex: 3.5     # Excluded volume radius (Å); softer than long-range repulsion
+    k_dih: [0.47037187851535034, 0.9495107825945361]
+    gamma_dih: [1.3759673785180062, 1.6211158177819938]
+
+optimizer:
+  grad_clip: 2.0
+
+  adabelief:
+    lr: 0.001           # Starting LR (init_value), low for smooth warmup
+    peak_lr: 0.03       # Peak LR after warmup
+    end_lr: 0.001       # Final LR after cosine decay
+    warmup_steps: 200   # Gradient update steps for warmup (≈ first epoch; ~280 steps/epoch on 2 nodes)
+    decay_steps: 10000  # Used as decay_steps*2=20000 in schedule; with ~280 steps/epoch
+                        # over 80 epochs (~22400 total steps), LR reaches end_lr ~epoch 71
+    beta1: 0.95
+    beta2: 0.999
+    eps: 1.0e-8
+    grad_clip: 5.0
+    weight_decay: 2.0e-5
+
+  yogi:
+    lr: 1.0e-3
+    peak_lr: 1.0e-3
+    end_lr: 5.0e-5
+    warmup_epochs: 5
+    decay_steps: 50
+    beta1: 0.9
+    beta2: 0.999
+    grad_clip: 4.0
+    eps: 1.0e-6
+    weight_decay: 5.0e-4
+
+  adam:
+    lr: 0.002
+    peak_lr: 0.005
+    end_lr: 0.001
+    warmup_epochs: 0
+    decay_steps: 160
+    beta1: 0.99
+    beta2: 0.999
+
+ensemble:
+  enabled: false
+  n_models: 5
+  base_seed: 42
+  save_all_models: false
+
+training:
+  pretrain_prior: false
+  pretrain_prior_min_steps: 10
+  pretrain_prior_max_steps: 200
+  pretrain_prior_tol_grad: 1.0e-6
+
+  stage1_optimizer: "adabelief"
+  stage2_optimizer: "yogi"
+
+  epochs_adabelief: 80
+  epochs_yogi: 0  
+
+  val_fraction: 0.1
+  batch_per_device: 4  
+  batch_cache: 10
+
+  gammas:
+    F: 1.0
+    U: 0.0
+
+  checkpoint_freq: 10  
+  checkpoint_path: "./checkpoints_allegro"
+  export_path: "./exported_models"

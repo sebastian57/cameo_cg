@@ -232,6 +232,38 @@ class ConfigManager:
         """Get model export directory path."""
         return self.get("training", "export_path", default="./exported_models")
 
+    def get_profiling_config(self) -> Dict[str, Any]:
+        """
+        Get JAX profiling configuration.
+
+        Returns:
+            Dictionary with profiling settings:
+                - enabled: enable JAX trace collection
+                - trace_dir: output directory for trace files
+                - trace_rank0_only: only trace rank 0 in distributed runs
+                - log_compiles: enable JAX/XLA compile logging
+                - batch_profiler_enabled: enable per-batch dispatch/barrier timing
+                - batch_profiler_warmup: batches to skip before sampling (JIT warmup)
+                - batch_profiler_samples: number of batches to profile per stage
+        """
+        return {
+            "enabled": self.get("training", "profiling", "enabled", default=False),
+            "trace_dir": self.get("training", "profiling", "trace_dir", default="./profiles"),
+            "trace_rank0_only": self.get(
+                "training", "profiling", "trace_rank0_only", default=True
+            ),
+            "log_compiles": self.get("training", "profiling", "log_compiles", default=False),
+            "batch_profiler_enabled": self.get(
+                "training", "profiling", "batch_profiler_enabled", default=False
+            ),
+            "batch_profiler_warmup": int(self.get(
+                "training", "profiling", "batch_profiler_warmup", default=5
+            )),
+            "batch_profiler_samples": int(self.get(
+                "training", "profiling", "batch_profiler_samples", default=50
+            )),
+        }
+
     # ----- Model Configuration (New) -----
 
     def use_priors(self) -> bool:
@@ -241,6 +273,10 @@ class ConfigManager:
     def train_priors_enabled(self) -> bool:
         """Check if prior parameters should be trained during force matching."""
         return self.get("model", "train_priors", default=False)
+
+    def prior_only_enabled(self) -> bool:
+        """Check if model should run in prior-only mode (no ML computation)."""
+        return self.get("model", "prior_only", default=False)
 
     def get_ml_model_type(self) -> str:
         """

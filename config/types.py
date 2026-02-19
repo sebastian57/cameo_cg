@@ -182,6 +182,8 @@ class AllegroConfig(TypedDict, total=False):
     mlp_n_hidden: int
     mlp_n_layers: int
     avg_num_neighbors: int
+    max_edge_multiplier: float
+    max_edges: int
 
 
 class OptimizerConfig(TypedDict, total=False):
@@ -196,3 +198,11 @@ class OptimizerConfig(TypedDict, total=False):
     eps: float
     grad_clip: float
     weight_decay: float
+
+
+class ProfilingConfig(TypedDict, total=False):
+    """JAX profiling configuration."""
+    enabled: bool
+    trace_dir: str
+    trace_rank0_only: bool
+    log_compiles: bool

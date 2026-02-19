@@ -1,0 +1,100 @@
+seed: 193749
+debug_priors: false
+
+model_context: "phase1_r1_allegro_sgd_nesterov"
+protein_name: "2g4q4z5k"
+model_id: "round1"
+
+data:
+  path: "data_prep/datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz"
+  max_frames: 10000
+
+preprocessing:
+  buffer_multiplier: 2.0
+  park_multiplier: 0.95
+
+model:
+  use_priors: false
+  train_priors: false
+
+  allegro_size: "normal"
+
+  cutoff: 10.0
+  dr_threshold: 1.0
+
+  allegro:
+    num_types: 22
+    max_ell: 2
+    num_layers: 2
+    n_radial_basis: 9
+    envelope_p: 4
+    embed_n_hidden: [32, 64]
+    species_embed: 22
+    mlp_n_hidden: 64
+    mlp_n_layers: 2
+    avg_num_neighbors: 9
+
+  priors:
+    use_spline_priors: false
+    residue_specific_angles: true
+    weights:
+      bond: 0.0
+      angle: 0.0
+      dihedral: 0.0
+      repulsive: 1.0
+      excluded_volume: 1.0
+    r0: 3.8375435
+    kr: 154.50629422490843
+    a: [-0.02086511, -0.36341857, -0.50767196, 0.09906029, 0.8319552, -0.00770968, -0.13320648, -1.14116021, 0.18145372, -0.55828783]
+    b: [0.67521775, 0.14797897, -0.12157499, -0.8289584, 0.17162394, 0.48646108, 0.56000923, -0.13905056, -0.896762, -1.20144583]
+    theta0: 1.8335507
+    k_theta: 8.271271714604836
+    epsilon: 5.0
+    sigma: 3.0
+    epsilon_ex: 6.0
+    sigma_ex: 3.5
+    k_dih: [0.47037187851535034, 0.9495107825945361]
+    gamma_dih: [1.3759673785180062, 1.6211158177819938]
+
+optimizer:
+  grad_clip: 2.0
+
+  sgd_nesterov:
+    lr: 0.001
+    peak_lr: 0.01
+    end_lr: 0.0001
+    warmup_steps: 200
+    decay_steps: 5000
+    momentum: 0.9
+    grad_clip: 5.0
+    weight_decay: 0.0
+
+training:
+  pretrain_prior: false
+  pretrain_prior_min_steps: 10
+  pretrain_prior_max_steps: 200
+  pretrain_prior_tol_grad: 1.0e-6
+
+  profiling:
+    enabled: true
+    trace_dir: "./profiles_phase1_r1"
+    trace_rank0_only: true
+    log_compiles: true
+
+  stage1_optimizer: "sgd_nesterov"
+  stage2_optimizer: "sgd_nesterov"
+
+  epochs_sgd_nesterov: 40
+  epochs_yogi: 0
+
+  val_fraction: 0.1
+  batch_per_device: 16
+  batch_cache: 10
+
+  gammas:
+    F: 1.0
+    U: 0.0
+
+  checkpoint_freq: 40
+  checkpoint_path: "./checkpoints_phase1_r1"
+  export_path: "./exported_models"

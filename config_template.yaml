@@ -6,7 +6,7 @@ debug_priors: false
 
 model_context: "allegro_cg_protein_2g4q4z5k"
 protein_name: "2g4q4z5k"
-model_id: "bigger_spline_test_resumed"
+model_id: "bigger_spline_test_actually_resumed"
 
 data:
   #path: "data_prep/datasets/4zohB01_320K_kcalmol_1bead_notnorm_aggforce.npz"
@@ -38,6 +38,11 @@ model:
     mlp_n_hidden: 96
     mlp_n_layers: 3
     avg_num_neighbors: 21
+    # Graph edge-cap controls:
+    # max_edges is the strongest knob. If omitted, code infers from test frame.
+    # max_edge_multiplier is used only for inferred mode.
+    # max_edges: 2000
+    max_edge_multiplier: 1.25
 
   allegro_large:  # Large model for complex systems
     max_ell: 2
@@ -85,6 +90,7 @@ model:
       angle: 0.25       # Fitted from histograms
       dihedral: 0.25   # Fitted from histograms
       repulsive: 1.0   # NOT fitted → full strength
+      excluded_volume: 1.0  # Soft repulsion for seq sep 2-5; NOT fitted → full strength
 
     # Bond parameters
     r0: 3.8375435  # Equilibrium bond length
@@ -98,8 +104,10 @@ model:
     theta0: 1.8335507
     k_theta: 8.271271714604836
 
-    epsilon: 1.0  # Repulsive energy scale
-    sigma: 3.0    # Repulsive length scale
+    epsilon: 1.0  # Repulsive energy scale (long-range, sep >= 6)
+    sigma: 3.0    # Repulsive length scale (long-range, sep >= 6)
+    epsilon_ex: 1.0  # Excluded volume strength (sep 2-5, kcal/mol)
+    sigma_ex: 3.5    # Excluded volume radius (sep 2-5, Å); softer than long-range
     # ========================================================================
 
     # Dihedral parameters (periodic)
@@ -113,7 +121,7 @@ optimizer:
     lr: 5.0e-2
     peak_lr: 0.05 #0.03 (value from before resuming training)
     end_lr: 5.0e-3
-    warmup_epochs: 5
+    warmup_steps: 5   # Gradient update steps for LR warmup (NOT epochs)
     decay_steps: 10000
     beta1: 0.95
     beta2: 0.999
@@ -125,7 +133,7 @@ optimizer:
     lr: 1.0e-3
     peak_lr: 1.0e-3
     end_lr: 5.0e-5
-    warmup_epochs: 5
+    warmup_steps: 5   # Gradient update steps for LR warmup (NOT epochs)
     decay_steps: 50
     beta1: 0.9
     beta2: 0.999
@@ -154,7 +162,7 @@ optimizer:
   polyak_sgd:
     f_star: 0.0
     eps: 1.0e-8
-    warmup_epochs: 5
+    warmup_steps: 5   # Gradient update steps for LR warmup (NOT epochs)
     peak_lr: 0.002
     end_lr: 0.0002
     decay_steps: 200
@@ -176,10 +184,16 @@ training:
   pretrain_prior_max_steps: 200  # Maximum LBFGS iterations
   pretrain_prior_tol_grad: 1.0e-6  # Gradient tolerance for convergence
 
+  profiling:
+    enabled: false           # Enable JAX profiler traces
+    trace_dir: "./profiles"  # Output directory for JAX trace files
+    trace_rank0_only: true   # In distributed runs, trace only rank 0
+    log_compiles: false      # Enable jax_log_compiles in logs
+
   stage1_optimizer: "adabelief"  # First training stage optimizer
   stage2_optimizer: "yogi"  # Second training stage (fine-tuning)
 
-  epochs_adabelief: 40 # looks like 30 epochs in 4 hours with 10k structures and moderate model size / cutoff
+  epochs_adabelief: 30 # looks like 30 epochs in 4 hours with 10k structures and moderate model size / cutoff
   epochs_yogi: 0  # Set to 0 to skip this stage
 
   val_fraction: 0.1  # Validation set fraction
