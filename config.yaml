@@ -31,6 +31,7 @@ model:
     species_embed: 22
     mlp_n_hidden: 96
     mlp_n_layers: 3
+    mlp_activation: "mish"
     avg_num_neighbors: 21
 
   allegro_large:
@@ -42,6 +43,7 @@ model:
     species_embed: 32
     mlp_n_hidden: 192
     mlp_n_layers: 3
+    mlp_activation: "mish"
     avg_num_neighbors: 8
 
   allegro_med:
@@ -54,6 +56,7 @@ model:
     species_embed: 32
     mlp_n_hidden: 128
     mlp_n_layers: 2
+    mlp_activation: "mish"
     avg_num_neighbors: 12
 
   priors:

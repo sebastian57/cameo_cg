@@ -136,10 +136,17 @@ class ConfigManager:
             Dictionary of Allegro hyperparameters
         """
         if size == "default":
-            return self.get("model", "allegro", default={})
+            cfg = self.get("model", "allegro", default={})
         else:
             key = f"allegro_{size}"
-            return self.get("model", key, default=self.get("model", "allegro", default={}))
+            cfg = self.get("model", key, default=self.get("model", "allegro", default={}))
+
+        # Keep activation explicit/configurable while preserving current behavior.
+        cfg = dict(cfg)
+        cfg.setdefault("mlp_activation", "mish")
+        cfg.setdefault("mlp_hidden_activation", cfg.get("mlp_activation", "mish"))
+        cfg.setdefault("mlp_output_activation", "linear")
+        return cfg
 
     def get_prior_params(self) -> Dict[str, Any]:
         """Get prior energy parameters (r0, kr, a, b, etc.)."""
@@ -211,6 +218,83 @@ class ConfigManager:
         """Get number of batches to cache."""
         return self.get("training", "batch_cache", default=10)
 
+    def mixed_precision_enabled(self) -> bool:
+        """
+        Check if mixed precision should be enabled.
+
+        Backward compatibility:
+        - If explicit boolean `training.enable_mixed_precision` is set, use it.
+        - Otherwise infer from `training.compute_dtype != "float32"`.
+        """
+        explicit = self.get("training", "enable_mixed_precision", default=None)
+        if explicit is not None:
+            return bool(explicit)
+        return self.get_compute_dtype() != "float32"
+
+    def get_compute_dtype(self) -> str:
+        """Get compute dtype for model forward/backward."""
+        raw = str(self.get("training", "compute_dtype", default="float32")).lower()
+        if raw not in ("float32", "bfloat16"):
+            raise ValueError(
+                f"Unsupported training.compute_dtype='{raw}'. "
+                "Expected one of: float32, bfloat16."
+            )
+        return raw
+
+    def get_param_dtype(self) -> str:
+        """Get master parameter dtype."""
+        raw = str(self.get("training", "param_dtype", default="float32")).lower()
+        if raw not in ("float32",):
+            raise ValueError(
+                f"Unsupported training.param_dtype='{raw}'. "
+                "Currently only float32 is supported."
+            )
+        return raw
+
+    def get_reduce_dtype(self) -> str:
+        """Get collective reduction / optimizer math dtype."""
+        raw = str(self.get("training", "reduce_dtype", default="float32")).lower()
+        if raw not in ("float32", "bfloat16"):
+            raise ValueError(
+                f"Unsupported training.reduce_dtype='{raw}'. "
+                "Expected one of: float32, bfloat16."
+            )
+        return raw
+
+    def buffer_donation_enabled(self) -> bool:
+        """Check if update-step buffer donation is enabled."""
+        return bool(self.get("training", "enable_buffer_donation", default=False))
+
+    def get_donate_mode(self) -> str:
+        """Get donation mode for JIT update functions."""
+        raw = str(self.get("training", "donate_mode", default="state_only")).lower()
+        if raw not in ("state_only", "state_and_batch"):
+            raise ValueError(
+                f"Unsupported training.donate_mode='{raw}'. "
+                "Expected one of: state_only, state_and_batch."
+            )
+        return raw
+
+    def get_remat_level(self) -> int:
+        """Get activation rematerialization level (0=off, 1=coarse, 2=deeper)."""
+        raw = int(self.get("training", "remat_level", default=0))
+        if raw not in (0, 1, 2):
+            raise ValueError(
+                f"Unsupported training.remat_level='{raw}'. "
+                "Expected one of: 0, 1, 2."
+            )
+        return raw
+
+    def get_remat_policy(self) -> str:
+        """Get remat policy name for model wrappers."""
+        raw = str(self.get("training", "remat_policy", default="none")).lower()
+        if raw not in ("none", "allegro_blocks_coarse", "allegro_blocks_deep"):
+            raise ValueError(
+                f"Unsupported training.remat_policy='{raw}'. "
+                "Expected one of: none, allegro_blocks_coarse, allegro_blocks_deep."
+            )
+        return raw
+
     def get_gammas(self) -> Dict[str, float]:
         """
         Get force matching weights (gammas).
@@ -238,7 +322,8 @@ class ConfigManager:
 
         Returns:
             Dictionary with profiling settings:
-                - enabled: enable JAX trace collection
+                - enabled: enable profiling features
+                - jax_trace_enabled: enable JAX trace collection/export
                 - trace_dir: output directory for trace files
                 - trace_rank0_only: only trace rank 0 in distributed runs
                 - log_compiles: enable JAX/XLA compile logging
@@ -248,6 +333,9 @@ class ConfigManager:
         """
         return {
             "enabled": self.get("training", "profiling", "enabled", default=False),
+            "jax_trace_enabled": self.get(
+                "training", "profiling", "jax_trace_enabled", default=True
+            ),
             "trace_dir": self.get("training", "profiling", "trace_dir", default="./profiles"),
             "trace_rank0_only": self.get(
                 "training", "profiling", "trace_rank0_only", default=True

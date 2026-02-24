@@ -3,18 +3,18 @@ debug_priors: false
 
 model_context: "phase1_r1_allegro_sgd_nesterov"
 protein_name: "2g4q4z5k"
-model_id: "round1"
+model_id: "profile_compare"
 
 data:
   path: "data_prep/datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz"
-  max_frames: 4096
+  max_frames: 1024 #10000
 
 preprocessing:
   buffer_multiplier: 2.0
   park_multiplier: 0.95
 
 model:
-  use_priors: true
+  use_priors: false
   train_priors: false
 
   allegro_size: "normal"
@@ -23,28 +23,24 @@ model:
   dr_threshold: 1.0
 
   allegro:
-    num_types: 22
     max_ell: 2
     num_layers: 2
     n_radial_basis: 9
     envelope_p: 4
     embed_n_hidden: [32, 64]
-    species_embed: 22
+    species_embed: 8
     mlp_n_hidden: 64
     mlp_n_layers: 2
-    mlp_activation: "silu"
-    mlp_hidden_activation: "silu"
-    mlp_output_activation: "tanh"
+    mlp_activation: "mish"
     avg_num_neighbors: 9
 
   priors:
-    use_spline_priors: true
-    spline_file: "data_prep/datasets/fitted_priors_spline.npz"
+    use_spline_priors: false
     residue_specific_angles: true
     weights:
-      bond: 0.5
-      angle: 0.25
-      dihedral: 0.25
+      bond: 0.0
+      angle: 0.0
+      dihedral: 0.0
       repulsive: 1.0
       excluded_volume: 1.0
     r0: 3.8375435
@@ -64,9 +60,9 @@ optimizer:
   grad_clip: 2.0
 
   sgd_nesterov:
-    lr: 0.002
+    lr: 0.001
     peak_lr: 0.01
-    end_lr: 0.0005
+    end_lr: 0.0001
     warmup_steps: 200
     decay_steps: 5000
     momentum: 0.9
@@ -74,39 +70,58 @@ optimizer:
     weight_decay: 0.0
 
 training:
+  # Runtime precision / compilation policy
+  enable_mixed_precision: true
+  compute_dtype: "bfloat16"
+  param_dtype: "float32"
+  reduce_dtype: "bfloat16"
+
+  # Keep donation explicit for profiling runs
+  enable_buffer_donation: true
+  donate_mode: "state_only"
+
+  # Activation checkpointing / rematerialization
+  remat_level: 0
+  remat_policy: "none"
+
   pretrain_prior: false
   pretrain_prior_min_steps: 10
   pretrain_prior_max_steps: 200
   pretrain_prior_tol_grad: 1.0e-6
 
   profiling:
-    enabled: false
+    enabled: true
+    # Keep text-based timing profilers enabled, but disable JAX trace export to
+    # avoid massive tensorflow.profiler.XSpace protobuf files (>2GB).
     jax_trace_enabled: false
-    trace_dir: "./profiles_phase1_r1"
+    trace_dir: "./profiles_compare"
+    # Restrict JAX trace collection to rank 0 to reduce trace volume.
     trace_rank0_only: true
     log_compiles: false
-    batch_profiler_enabled: false
-    batch_profiler_warmup: 0
-    batch_profiler_samples: 0
+    # BatchProfiler settings for this baseline:
+    # Warm up for 1 epoch, then sample 10 epochs.
+    # With batch_per_device=24 on 8 GPUs, global batch=192 and we observe
+    # ~5 update steps/epoch -> warmup 5 batches, sample 50 batches.
+    batch_profiler_enabled: true
+    batch_profiler_warmup: 5
+    batch_profiler_samples: 50
 
   stage1_optimizer: "sgd_nesterov"
   stage2_optimizer: "yogi"
 
-  epochs_sgd_nesterov: 60
+  # Profiling run: 1 warmup epoch + 10 measured epochs.
+  epochs_sgd_nesterov: 11
   epochs_yogi: 0
 
-  val_fraction: 0.1
-  batch_per_device: 24
+  val_fraction: 0.0
+  batch_per_device: 32
   batch_cache: 10
-  enable_mixed_precision: false
-  compute_dtype: "float32"
-  param_dtype: "float32"
-  reduce_dtype: "float32"
 
   gammas:
     F: 1.0
     U: 0.0
 
-  checkpoint_freq: 40
-  checkpoint_path: "./checkpoints_phase1_r1"
+  # No checkpoints during profiling runs (avoids I/O skewing timing).
+  checkpoint_freq: 0
+  checkpoint_path: "./checkpoints_profile_compare"
   export_path: "./exported_models"

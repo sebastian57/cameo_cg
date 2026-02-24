@@ -37,6 +37,7 @@ model:
     species_embed: 22
     mlp_n_hidden: 96
     mlp_n_layers: 3
+    mlp_activation: "mish"  # Options: mish, silu, relu, gelu, elu, tanh
     avg_num_neighbors: 21
     # Graph edge-cap controls:
     # max_edges is the strongest knob. If omitted, code infers from test frame.
@@ -53,6 +54,7 @@ model:
     species_embed: 32
     mlp_n_hidden: 192
     mlp_n_layers: 3
+    mlp_activation: "mish"
     avg_num_neighbors: 8
 
   allegro_med:  # Medium model (balanced)
@@ -65,6 +67,7 @@ model:
     species_embed: 32
     mlp_n_hidden: 128
     mlp_n_layers: 2
+    mlp_activation: "mish"
     avg_num_neighbors: 12
 
   # Prior energy parameters (used if use_priors=true)
@@ -179,13 +182,28 @@ ensemble:
   save_all_models: false      # If true, save all models; if false, only save best
 
 training:
+  # Runtime precision policy
+  enable_mixed_precision: false
+  compute_dtype: "float32"   # "float32" | "bfloat16"
+  param_dtype: "float32"     # Keep master params in FP32
+  reduce_dtype: "float32"    # Collective + optimizer math dtype
+
+  # Update-step JIT donation policy
+  enable_buffer_donation: false
+  donate_mode: "state_only"  # "state_only" | "state_and_batch"
+
+  # Activation checkpointing (rematerialization)
+  remat_level: 0  # 0=off, 1=coarse, 2=deeper
+  remat_policy: "none"  # "none" | "allegro_blocks_coarse" | "allegro_blocks_deep"
+
   pretrain_prior: false  # Enable prior-only pre-training before full training
   pretrain_prior_min_steps: 10  # Minimum LBFGS steps before convergence check
   pretrain_prior_max_steps: 200  # Maximum LBFGS iterations
   pretrain_prior_tol_grad: 1.0e-6  # Gradient tolerance for convergence
 
   profiling:
-    enabled: false           # Enable JAX profiler traces
+    enabled: false           # Enable profiling features
+    jax_trace_enabled: true  # Enable JAX trace export (.pb/.json); disable to avoid huge protobufs
     trace_dir: "./profiles"  # Output directory for JAX trace files
     trace_rank0_only: true   # In distributed runs, trace only rank 0
     log_compiles: false      # Enable jax_log_compiles in logs

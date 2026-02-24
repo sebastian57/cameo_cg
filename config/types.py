@@ -181,6 +181,9 @@ class AllegroConfig(TypedDict, total=False):
     species_embed: int
     mlp_n_hidden: int
     mlp_n_layers: int
+    mlp_activation: str
+    mlp_hidden_activation: str
+    mlp_output_activation: str
     avg_num_neighbors: int
     max_edge_multiplier: float
     max_edges: int
@@ -203,6 +206,22 @@ class OptimizerConfig(TypedDict, total=False):
 class ProfilingConfig(TypedDict, total=False):
     """JAX profiling configuration."""
     enabled: bool
+    jax_trace_enabled: bool
     trace_dir: str
     trace_rank0_only: bool
     log_compiles: bool
+    batch_profiler_enabled: bool
+    batch_profiler_warmup: int
+    batch_profiler_samples: int
+
+
+class TrainingRuntimeConfig(TypedDict, total=False):
+    """Training runtime precision and compilation options."""
+    enable_mixed_precision: bool
+    compute_dtype: str
+    param_dtype: str
+    reduce_dtype: str
+    enable_buffer_donation: bool
+    donate_mode: str
+    remat_level: int
+    remat_policy: str
