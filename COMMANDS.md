@@ -166,7 +166,9 @@ Saved to `./force_eval/` by default, with mode-specific naming:
 
 Files generated:
 - `*_force_components.png` - Pred vs Ref scatter plots for X/Y/Z
+- `*_force_vs_position.png` - For each axis, force component vs position (pred and ref overlaid)
 - `*_force_distribution.png` - Force magnitude distributions
+- `*_force_gaussian_distribution.png` - Gaussian-fit density comparison of ref vs pred/prior force components (X/Y/Z)
 - `*_force_magnitude.png` - Magnitude comparison
 - `*_force_metrics.txt` - Numerical RMSE/MAE values
 
