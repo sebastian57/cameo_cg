@@ -441,6 +441,154 @@ class ForceAnalyzer:
 
         eval_logger.info(f"Saved force distribution plot to: {output_path}")
 
+    @staticmethod
+    def plot_force_vs_position(
+        F_pred: np.ndarray,
+        F_ref: np.ndarray,
+        R: np.ndarray,
+        output_path: PathLike,
+        mask: Optional[np.ndarray] = None
+    ):
+        """
+        Plot predicted and reference force components against position components.
+
+        For each axis i in (x, y, z), plot:
+          - F_ref[:, i] vs R[:, i]
+          - F_pred[:, i] vs R[:, i]
+
+        Args:
+            F_pred: Predicted forces, shape (n_atoms, 3)
+            F_ref: Reference forces, shape (n_atoms, 3)
+            R: Coordinates, shape (n_atoms, 3)
+            output_path: Path to save plot
+            mask: Optional mask for real atoms, shape (n_atoms,)
+        """
+        output_path = as_path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if mask is not None:
+            real_mask = mask > 0
+            F_pred = F_pred[real_mask]
+            F_ref = F_ref[real_mask]
+            R = R[real_mask]
+
+        fig, axes = plt.subplots(1, 3, figsize=(16, 5), sharey=False)
+        component_names = ["x", "y", "z"]
+        colors = {"ref": "#1f77b4", "pred": "#d62728"}
+
+        for i, (ax, name) in enumerate(zip(axes, component_names)):
+            pos_i = R[:, i]
+            ref_i = F_ref[:, i]
+            pred_i = F_pred[:, i]
+
+            # Sort by position for a cleaner visual trend.
+            order = np.argsort(pos_i)
+            pos_sorted = pos_i[order]
+            ref_sorted = ref_i[order]
+            pred_sorted = pred_i[order]
+
+            ax.scatter(
+                pos_sorted, ref_sorted, s=8, alpha=0.35, color=colors["ref"],
+                label=f"F_ref_{name}"
+            )
+            ax.scatter(
+                pos_sorted, pred_sorted, s=8, alpha=0.35, color=colors["pred"],
+                label=f"F_pred_{name}"
+            )
+
+            ax.set_xlabel(f"Position {name} (A)", fontsize=11)
+            if i == 0:
+                ax.set_ylabel("Force Component (kcal/mol/A)", fontsize=11)
+            ax.set_title(f"{name.upper()}: Force vs Position", fontsize=12)
+            ax.grid(True, alpha=0.3)
+            ax.legend(loc="best", fontsize=9)
+
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=200, bbox_inches="tight")
+        plt.close()
+
+        eval_logger.info(f"Saved force-vs-position plot to: {output_path}")
+
+    @staticmethod
+    def plot_force_gaussian_distribution(
+        F_pred: np.ndarray,
+        F_ref: np.ndarray,
+        output_path: PathLike,
+        mask: Optional[np.ndarray] = None
+    ):
+        """
+        Plot component-wise force distributions with Gaussian fits for ref and pred.
+
+        Args:
+            F_pred: Predicted/prior forces, shape (n_atoms, 3)
+            F_ref: Reference forces, shape (n_atoms, 3)
+            output_path: Path to save plot
+            mask: Optional mask for real atoms, shape (n_atoms,)
+        """
+        output_path = as_path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if mask is not None:
+            real_mask = mask > 0
+            F_pred = F_pred[real_mask]
+            F_ref = F_ref[real_mask]
+
+        fig, axes = plt.subplots(1, 3, figsize=(16, 5), sharey=False)
+        component_names = ["x", "y", "z"]
+        colors = {"ref": "#1f77b4", "pred": "#d62728"}
+
+        for i, (ax, name) in enumerate(zip(axes, component_names)):
+            ref_i = F_ref[:, i]
+            pred_i = F_pred[:, i]
+
+            # Histogram ranges based on joint support.
+            lo = float(min(np.min(ref_i), np.min(pred_i)))
+            hi = float(max(np.max(ref_i), np.max(pred_i)))
+            if hi <= lo:
+                hi = lo + 1.0
+            bins = np.linspace(lo, hi, 60)
+
+            ax.hist(
+                ref_i, bins=bins, density=True, alpha=0.35,
+                color=colors["ref"], label=f"Ref {name}"
+            )
+            ax.hist(
+                pred_i, bins=bins, density=True, alpha=0.35,
+                color=colors["pred"], label=f"Pred/Prior {name}"
+            )
+
+            # Gaussian fits from sample mean/std.
+            ref_mu, ref_sigma = float(np.mean(ref_i)), float(np.std(ref_i))
+            pred_mu, pred_sigma = float(np.mean(pred_i)), float(np.std(pred_i))
+            x = np.linspace(lo, hi, 400)
+
+            def _gauss_pdf(xv, mu, sigma):
+                sigma = max(float(sigma), 1e-8)
+                norm = sigma * np.sqrt(2.0 * np.pi)
+                return np.exp(-0.5 * ((xv - mu) / sigma) ** 2) / norm
+
+            ax.plot(
+                x, _gauss_pdf(x, ref_mu, ref_sigma), color=colors["ref"], linewidth=2.0,
+                label=f"Ref N({ref_mu:.2f}, {ref_sigma:.2f})"
+            )
+            ax.plot(
+                x, _gauss_pdf(x, pred_mu, pred_sigma), color=colors["pred"], linewidth=2.0,
+                label=f"Pred N({pred_mu:.2f}, {pred_sigma:.2f})"
+            )
+
+            ax.set_xlabel(f"Force {name} (kcal/mol/A)", fontsize=11)
+            if i == 0:
+                ax.set_ylabel("Density", fontsize=11)
+            ax.set_title(f"{name.upper()} Gaussian Fit", fontsize=12)
+            ax.grid(True, alpha=0.3)
+            ax.legend(loc="best", fontsize=8)
+
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=200, bbox_inches="tight")
+        plt.close()
+
+        eval_logger.info(f"Saved Gaussian force distribution plot to: {output_path}")
+
 
 # =============================================================================
 # Standalone CLI for plotting from log files
