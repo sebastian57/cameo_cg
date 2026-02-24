@@ -99,7 +99,8 @@ def _initialize_jax_distributed():
         coordinator_port = 29400 + (int(slurm_job_id) % 1000)
 
         # Derive local device count from CUDA_VISIBLE_DEVICES
-        cuda_vis = os.environ.get("CUDA_VISIBLE_DEVICES", "0,1,2,3")
+        # Strip whitespace: SLURM may set CUDA_VISIBLE_DEVICES with trailing spaces
+        cuda_vis = os.environ.get("CUDA_VISIBLE_DEVICES", "0,1,2,3").strip()
         n_local_gpus = len(cuda_vis.split(","))
         local_ids = list(range(n_local_gpus))
 
@@ -118,7 +119,7 @@ def _initialize_jax_distributed():
                 num_processes=num_processes,
                 process_id=process_id,
                 local_device_ids=local_ids,
-                initialization_timeout=600,
+                initialization_timeout=1800,  # 30 min: allow for slow node startup / network delays
             )
             print(f"[Rank {process_id}] Successfully initialized!", flush=True)
         except Exception as e:

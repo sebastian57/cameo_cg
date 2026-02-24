@@ -487,6 +487,16 @@ def main():
     ForceAnalyzer.plot_force_magnitude(F_pred_real, F_ref_real, R_real, magnitude_plot)
     print(f"  Saved: {magnitude_plot}")
 
+    # 4. Component-wise force vs position (ref and pred in same subplot for x/y/z)
+    force_vs_pos_plot = output_dir / f"{filename_base}_force_vs_position.png"
+    ForceAnalyzer.plot_force_vs_position(F_pred_real, F_ref_real, R_real, force_vs_pos_plot)
+    print(f"  Saved: {force_vs_pos_plot}")
+
+    # 5. Component-wise Gaussian distributions (ref and pred/prior)
+    gaussian_plot = output_dir / f"{filename_base}_force_gaussian_distribution.png"
+    ForceAnalyzer.plot_force_gaussian_distribution(F_pred_real, F_ref_real, gaussian_plot)
+    print(f"  Saved: {gaussian_plot}")
+
     # Save numerical results
     results_file = output_dir / f"{filename_base}_force_metrics.txt"
     with open(results_file, 'w') as f:

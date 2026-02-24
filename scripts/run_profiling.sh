@@ -4,69 +4,48 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-task=4
-#SBATCH --time=04:00:00
+#SBATCH --time=02:00:00
 #SBATCH --partition=booster
 #SBATCH --output=outputs/slurm-%j.out
 
 # =============================================================================
-# Unified SLURM script for Allegro training (works for 1 or N nodes)
+# Profiling SLURM script — focused compute vs communication baseline
 # =============================================================================
 #
-# IMPORTANT: Submit this job from the clean_code_base/ directory
+# PURPOSE:
+#   Run a short training with focused profiling so we can compare compute vs
+#   communication timing with minimal extra instrumentation overhead.
 #
-# ARCHITECTURE:
-#   - 1 process per NODE (not per GPU!)
-#   - Each process sees 4 local GPUs
-#   - chemtrain uses pmap internally to distribute across local GPUs
-#   - JAX distributed coordinates gradient sync across NODES
+# PROFILING LAYERS ENABLED:
+#   1. UpdateFnInternal text timing (put_state, put_batch, dispatch, block_loss)
+#   2. UpdateFnComponents split (local grad, collectives, optimizer)
+#   3. BatchProfiler gap/barrier summary (configured in YAML)
+#   4. GPU telemetry (nvidia-smi CSV at 1 Hz)
 #
-# Memory model:
-#   - Data loaded ONCE per node (not per GPU)
-#   - pmap splits batches across 4 local GPUs
-#   - For 2 nodes: 2 processes, each with 4 GPUs = 8 total GPUs
+# USAGE:
+#   1-node (4 GPUs, default):
+#     sbatch scripts/run_profiling.sh config_profile_compare.yaml
 #
-# Usage:
-#   Single-node (1 node, 4 GPUs):
-#     sbatch scripts/run_training.sh config.yaml
+#   2-node (8 GPUs):
+#     sbatch --nodes=2 scripts/run_profiling.sh config_profile_compare.yaml
 #
-#   Multi-node (2 nodes, 8 GPUs):
-#     sbatch --nodes=2 scripts/run_training.sh config.yaml
+#   Resume is not supported for profiling runs (always starts fresh).
 #
-#   Resume from latest checkpoint:
-#     sbatch scripts/run_training.sh config.yaml --resume auto
-#
-#   Resume from specific checkpoint:
-#     sbatch scripts/run_training.sh config.yaml --resume ./checkpoints_allegro/epoch30.pkl
+# OUTPUTS (in outputs/ and ./profiles_compare/):
+#   - outputs/slurm-<JOB_ID>.out          — SLURM log (verification output)
+#   - outputs/train_allegro_<JOB_ID>.log  — training log with all timing data
+#   - outputs/gpu_telemetry_<JOB_ID>_<host>.csv — GPU utilization 1 Hz samples
+#   - profiles_compare/stage_sgd_nesterov_rank<R>_epoch*/ — JAX XLA traces
 #
 # =============================================================================
 
-CONFIG_FILE="$1"
-shift  # Remove config file from arguments
+CONFIG_FILE="${1:-config_profile_compare.yaml}"
 
 if [[ -z "$CONFIG_FILE" ]]; then
-    echo "Usage: sbatch run_training.sh <config.yaml> [--resume auto|<checkpoint.pkl>]"
+    echo "Usage: sbatch scripts/run_profiling.sh [config.yaml]"
+    echo "  Default config: config_profile_compare.yaml"
     exit 1
 fi
-
-# Parse --resume flag
-RESUME_FLAG=""
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --resume)
-            if [[ -n "$2" ]]; then
-                RESUME_FLAG="--resume $2"
-                shift 2
-            else
-                echo "ERROR: --resume requires an argument (auto or checkpoint path)"
-                exit 1
-            fi
-            ;;
-        *)
-            echo "WARNING: Unknown argument: $1"
-            shift
-            ;;
-    esac
-done
 
 source /p/project1/cameo/schmidt36/load_modules.sh
 source /p/project1/cameo/schmidt36/clean_booster_env/bin/activate
@@ -90,51 +69,64 @@ export LD_LIBRARY_PATH=$CUDA_ROOT:$(python -c "import site; print(site.getsitepa
 export CUDA_HOME=/p/software/juwelsbooster/stages/2025/software/CUDA/12
 export XLA_FLAGS="--xla_gpu_cuda_data_dir=$CUDA_HOME --xla_gpu_autotune_level=0"
 
-# ===== JAX Distributed Setup =====
-# JAX automatically detects SLURM environment (nodes, process IDs, coordinator)
-# No manual coordinator setup needed - jax.distributed.initialize() handles it
-
-# Memory settings for multi-GPU
+# Memory settings
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
 
-# GPU visibility: defaults to all 4 GPUs; can be overridden externally for scaling tests
-# Strip trailing whitespace that SLURM may inject when setting CUDA_VISIBLE_DEVICES automatically
+# GPU visibility
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES//[[:space:]]/}"
 
-# Force NCCL (GPU-GPU gradient sync) to use InfiniBand, not Ethernet.
-# Without this, NCCL may pick the wrong interface and stall during collective ops.
+# Force NCCL to use InfiniBand
 export NCCL_SOCKET_IFNAME=ib0
 export NCCL_DEBUG=WARN
-if is_truthy "${CHEMTRAIN_PROFILE_NCCL_INFO:-0}"; then
-    export NCCL_DEBUG=INFO
-    export NCCL_DEBUG_SUBSYS=INIT,COLL
-else
-    unset NCCL_DEBUG_SUBSYS
-fi
 
-# Normal training defaults (no profiling).
-# Keep K=8 fixed for this run to match prior microbatch behavior.
-export CHEMTRAIN_GRAD_ACCUM_STEPS=8
-export CHEMTRAIN_DISABLE_GRAD_NORM=0
-export CHEMTRAIN_DISABLE_TRAIN_TARGET_LOSS_SYNC=0
-export CHEMTRAIN_PROFILE_DATALOADER_NEXT=0
-export CHEMTRAIN_PROFILE_RANK0_ONLY=1
-export CHEMTRAIN_PROFILE_BATCH_BREAKDOWN=0
-export CHEMTRAIN_PROFILE_UPDATE_BREAKDOWN=0
-export CHEMTRAIN_PROFILE_TASK_TIMING=0
-export CHEMTRAIN_PROFILE_BATCH_BREAKDOWN_LIMIT=0
+# ===== Gradient accumulation =====
+# Keep K=8 to match production runs (so per-step timings are comparable).
+export CHEMTRAIN_GRAD_ACCUM_STEPS="${CHEMTRAIN_GRAD_ACCUM_STEPS:-8}"
+
+# ===== Focused profiling flags =====
+# JAX trace export can generate huge protobufs on long/high-event runs.
+# Force OFF for full training runs.
+export CHEMTRAIN_PROFILE_JAX_TRACE=0
+
+# Layer 1: Per-update detailed timing (forced off for full training).
 export CHEMTRAIN_PROFILE_UPDATE_FN_INTERNAL=0
 export CHEMTRAIN_PROFILE_UPDATE_FN_INTERNAL_BLOCK=0
+
+# Profiling rank selection (kept conservative; profiling flags are forced off).
+export CHEMTRAIN_PROFILE_RANK0_ONLY=1
 export CHEMTRAIN_PROFILE_UPDATE_FN_INTERNAL_RANK0_ONLY=1
+
+# Disable detailed per-step internal logs.
 export CHEMTRAIN_PROFILE_UPDATE_FN_INTERNAL_LIMIT=0
+
+# Layer 2: BatchProfiler gap/barrier ratio (enabled via config YAML).
+# No separate env var needed; controlled by profiling.batch_profiler_enabled in YAML.
+
+# Layer 2b: sampled edge-count diagnostics (forced off for full training).
+export CHEMTRAIN_PROFILE_EDGE_COUNTS=0
+export CHEMTRAIN_PROFILE_EDGE_COUNT_SAMPLES=1
+export CHEMTRAIN_PROFILE_EDGE_COUNT_STRIDE=1
+export CHEMTRAIN_PROFILE_EDGE_COUNT_RANK0_ONLY=1
+
+# Disable extra instrumentation that inflates overhead/noise for this baseline.
+export CHEMTRAIN_PROFILE_TASK_TIMING=0
+export CHEMTRAIN_PROFILE_BATCH_BREAKDOWN=0
+export CHEMTRAIN_PROFILE_BATCH_BREAKDOWN_LIMIT=0
+export CHEMTRAIN_PROFILE_DATALOADER_NEXT=0
+
+# Layer 3: GPU telemetry via nvidia-smi at 1 Hz (forced off for full training).
 export CHEMTRAIN_PROFILE_GPU_TELEMETRY=0
-# Keep runtime precision in FP32 for non-profiling training unless config
-# explicitly overrides inside the trainer.
-export CHEMTRAIN_COMPUTE_DTYPE=float32
-export CHEMTRAIN_PARAM_DTYPE=float32
-export CHEMTRAIN_REDUCE_DTYPE=float32
+
+# Layer 4: Component-level update timing (forced off for full training).
+export CHEMTRAIN_PROFILE_UPDATE_FN_COMPONENTS=0
+export CHEMTRAIN_PROFILE_UPDATE_FN_LOCAL_SPLIT=0
+
+# Keep gradient norm and train-target-loss sync (both off = less host overhead,
+# but we want them on for profiling so results match production semantics).
+export CHEMTRAIN_DISABLE_GRAD_NORM=0
+export CHEMTRAIN_DISABLE_TRAIN_TARGET_LOSS_SYNC=0
 
 # ===== Verification =====
 echo "============================================================"
@@ -143,24 +135,38 @@ echo "============================================================"
 module list
 echo ""
 echo "============================================================"
-echo "SLURM Job Configuration"
+echo "SLURM Profiling Run Configuration"
 echo "============================================================"
 echo "Config file:    $CONFIG_FILE"
 echo "Job ID:         $SLURM_JOB_ID"
 echo "Nodes:          $SLURM_NNODES"
-echo "Tasks/node:     1 (1 process per node)"
-echo "GPUs per node:  4 (pmap distributes across local GPUs)"
+echo "GPUs/node:      4 (pmap distributes across local GPUs)"
 echo "Total GPUs:     $((SLURM_NNODES * 4))"
-echo "CUDA_HOME:      $CUDA_HOME"
-echo "CUDA_VISIBLE:   $CUDA_VISIBLE_DEVICES"
 echo "Grad accum K:   $CHEMTRAIN_GRAD_ACCUM_STEPS"
+echo ""
+echo "Profiling flags:"
+echo "  UPDATE_FN_INTERNAL:       $CHEMTRAIN_PROFILE_UPDATE_FN_INTERNAL"
+echo "  UPDATE_FN_INTERNAL_BLOCK: $CHEMTRAIN_PROFILE_UPDATE_FN_INTERNAL_BLOCK"
+echo "  RANK0_ONLY:               $CHEMTRAIN_PROFILE_RANK0_ONLY"
+echo "  TASK_TIMING:              $CHEMTRAIN_PROFILE_TASK_TIMING"
+echo "  BATCH_BREAKDOWN:          $CHEMTRAIN_PROFILE_BATCH_BREAKDOWN"
+echo "  GPU_TELEMETRY:            $CHEMTRAIN_PROFILE_GPU_TELEMETRY"
+echo "  UPDATE_FN_COMPONENTS:     $CHEMTRAIN_PROFILE_UPDATE_FN_COMPONENTS"
+echo "  UPDATE_FN_LOCAL_SPLIT:    $CHEMTRAIN_PROFILE_UPDATE_FN_LOCAL_SPLIT"
+echo "  EDGE_COUNTS:              $CHEMTRAIN_PROFILE_EDGE_COUNTS"
+echo "  EDGE_COUNT_SAMPLES:       $CHEMTRAIN_PROFILE_EDGE_COUNT_SAMPLES"
+echo "  EDGE_COUNT_STRIDE:        $CHEMTRAIN_PROFILE_EDGE_COUNT_STRIDE"
+echo "  EDGE_COUNT_RANK0_ONLY:    $CHEMTRAIN_PROFILE_EDGE_COUNT_RANK0_ONLY"
+echo "  DATALOADER_NEXT:          $CHEMTRAIN_PROFILE_DATALOADER_NEXT"
+echo "  JAX_TRACE_EXPORT:         $CHEMTRAIN_PROFILE_JAX_TRACE"
+echo "  JAX traces:               profiles_compare/ (config-driven)"
 echo "============================================================"
 
 # Print device info from each node
 echo "Verifying GPU allocation per node..."
 srun --ntasks-per-node=1 bash -c 'echo "Host=$(hostname) CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"; nvidia-smi -L'
 
-# For multi-node: verify SLURM process IDs (JAX auto-detects coordinator)
+# Multi-node: verify connectivity
 if [[ $SLURM_NNODES -gt 1 ]]; then
     echo ""
     echo "============================================================"
@@ -168,10 +174,7 @@ if [[ $SLURM_NNODES -gt 1 ]]; then
     echo "============================================================"
     srun --ntasks-per-node=1 bash -c 'echo "Node=$(hostname) SLURM_PROCID=$SLURM_PROCID SLURM_NTASKS=$SLURM_NTASKS"'
     echo "JAX will auto-detect coordinator from SLURM environment"
-    echo "============================================================"
 
-    # Verify inter-node network reachability before starting training.
-    # A failure here means the coordinator port will also be unreachable.
     COORD_NODE=$(scontrol show hostname "$SLURM_JOB_NODELIST" | head -1)
     COORD_PORT=$((29400 + (SLURM_JOB_ID % 1000)))
     echo "Coordinator node: ${COORD_NODE}.juwels  Port: ${COORD_PORT}"
@@ -184,12 +187,9 @@ if [[ $SLURM_NNODES -gt 1 ]]; then
 fi
 
 # ===== Determine paths =====
-# Use SLURM_SUBMIT_DIR (directory from which job was submitted)
-# Assumes you submit from clean_code_base/ directory
 if [[ -n "$SLURM_SUBMIT_DIR" ]]; then
     CLEAN_CODE_BASE_DIR="$SLURM_SUBMIT_DIR"
 else
-    # Fallback: use current directory
     CLEAN_CODE_BASE_DIR="$(pwd)"
 fi
 
@@ -199,18 +199,17 @@ TRAIN_SCRIPT="${SCRIPT_DIR}/train.py"
 echo "Submit directory: ${CLEAN_CODE_BASE_DIR}"
 echo "Training script:  ${TRAIN_SCRIPT}"
 
-# Verify script exists
 if [[ ! -f "${TRAIN_SCRIPT}" ]]; then
     echo "ERROR: Training script not found at ${TRAIN_SCRIPT}"
-    echo "Please submit this job from the clean_code_base/ directory"
+    echo "Please submit this job from the cameo_cg/ directory"
     exit 1
 fi
 
 # ===== Prepare Output Directory =====
-# Create outputs directory for logs (relative to submit directory)
 OUTPUTS_DIR="${CLEAN_CODE_BASE_DIR}/outputs"
 mkdir -p "${OUTPUTS_DIR}"
 
+# ===== GPU Telemetry =====
 GPU_TELEMETRY_SRUN_PID=""
 if is_truthy "${CHEMTRAIN_PROFILE_GPU_TELEMETRY}"; then
     echo "Starting per-node GPU telemetry sampling (1 Hz)..."
@@ -237,22 +236,24 @@ cleanup_background_jobs() {
 trap cleanup_background_jobs EXIT
 
 # ===== Run Training =====
-# Launch 1 process per NODE - chemtrain's pmap handles local multi-GPU
 LOGFILE="${OUTPUTS_DIR}/train_allegro_${SLURM_JOB_ID}.log"
 
 echo "============================================================"
-echo "Starting training with $SLURM_NNODES node(s), 4 GPUs each..."
+echo "Starting profiling run with $SLURM_NNODES node(s), 4 GPUs each..."
 echo "Log file: ${LOGFILE}"
-if [[ -n "$RESUME_FLAG" ]]; then
-    echo "Resume mode: ${RESUME_FLAG}"
-fi
 echo "============================================================"
 
-# srun launches 1 task per node, each sees 4 local GPUs
-# shellcheck disable=SC2086  # Word splitting intended for RESUME_FLAG
 srun -l --ntasks-per-node=1 python3 -u "${TRAIN_SCRIPT}" \
-    "$CONFIG_FILE" "${SLURM_JOB_ID}" ${RESUME_FLAG} 2>&1 | tee "${LOGFILE}"
+    "$CONFIG_FILE" "${SLURM_JOB_ID}" 2>&1 | tee "${LOGFILE}"
 
 echo "============================================================"
-echo "Training complete. Log: ${LOGFILE}"
+echo "Profiling run complete."
+echo ""
+echo "Results:"
+echo "  Training log:   ${LOGFILE}"
+echo "  SLURM output:   ${OUTPUTS_DIR}/slurm-${SLURM_JOB_ID}.out"
+echo "  GPU telemetry:  ${OUTPUTS_DIR}/gpu_telemetry_${SLURM_JOB_ID}_*.csv"
+echo "  JAX XLA traces: ${CLEAN_CODE_BASE_DIR}/profiles_compare/"
+echo ""
+echo "To view JAX traces: open https://ui.perfetto.dev and load the .pb.gz files"
 echo "============================================================"
