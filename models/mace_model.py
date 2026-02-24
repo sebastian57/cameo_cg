@@ -17,6 +17,14 @@ from typing import Optional, Tuple, Any
 from utils.logging import model_logger
 
 
+def _resolve_compute_dtype(config) -> tuple[str, jnp.dtype]:
+    """Resolve model compute dtype from config."""
+    name = str(config.get_compute_dtype()).lower()
+    if name == "bfloat16":
+        return name, jnp.bfloat16
+    return "float32", jnp.float32
+
+
 class MACEModel:
     """
     Wrapper for MACE equivariant graph neural network.
@@ -50,6 +58,7 @@ class MACEModel:
         """
         self.config = config
         self.N_max = N_max
+        self.compute_dtype_name, self.compute_dtype = _resolve_compute_dtype(config)
 
         # Model parameters from config
         self.cutoff = config.get_cutoff()
@@ -60,6 +69,7 @@ class MACEModel:
         self.mace_config = config.get_mace_config(size=mace_size)
 
         model_logger.info(f"Using MACE size: {mace_size}")
+        model_logger.info(f"MACE compute dtype: {self.compute_dtype_name}")
 
         # Setup JAX-MD displacement and neighbor list (same as Allegro)
         self.displacement, self.shift = space.free()
@@ -153,11 +163,13 @@ class MACEModel:
             Total energy (scalar)
         """
         # Apply mask to coordinates (stop gradient for padded atoms)
+        # Keep neighbor-list ops in float32 for robustness.
+        R_base = jnp.asarray(R, dtype=jnp.float32)
         mask_3d = mask[:, None]
         R_masked = jnp.where(
             mask_3d > 0,
-            R,
-            jax.lax.stop_gradient(R)
+            R_base,
+            jax.lax.stop_gradient(R_base)
         )
 
         # Get or update neighbor list
@@ -169,11 +181,12 @@ class MACEModel:
 
         # Ensure species are valid (masked atoms -> species 0)
         species_masked = jnp.where(mask > 0, species, 0).astype(jnp.int32)
+        R_model = jnp.asarray(R_masked, dtype=self.compute_dtype)
 
         # Compute energy
-        E_mace = self.apply_fn(params, R_masked, nbrs, species_masked)
+        E_mace = self.apply_fn(params, R_model, nbrs, species_masked)
 
-        return E_mace
+        return jnp.asarray(E_mace, dtype=jnp.float32)
 
     def compute_energy_and_forces(
         self,
