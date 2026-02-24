@@ -26,6 +26,7 @@ scripts/__pycache__/
 *.pyc
 evaluation/__pycache__/
 export/__pycache__/
+checkpoints_profile_compare/
 checkpoints_allegro/__pycache__/
 checkpoints_scaling/__pycache__/
 checkpoints_mace/__pycache__/
