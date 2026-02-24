@@ -12,6 +12,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import os
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 import pickle
@@ -83,15 +84,75 @@ class Trainer:
         self._rank = jax.process_index()
         self._world_size = jax.process_count()
 
+        # Runtime precision + JIT buffer donation policy.
+        self._mixed_precision_enabled = config.mixed_precision_enabled()
+        self._compute_dtype = config.get_compute_dtype()
+        self._param_dtype = config.get_param_dtype()
+        self._reduce_dtype = config.get_reduce_dtype()
+        self._enable_buffer_donation = config.buffer_donation_enabled()
+        self._donate_mode = config.get_donate_mode()
+
+        # Conservative default when mixed precision is disabled.
+        if not self._mixed_precision_enabled:
+            self._compute_dtype = "float32"
+            self._reduce_dtype = "float32"
+
+        # Make policy visible to the vendored chemtrain update path.
+        os.environ["CHEMTRAIN_COMPUTE_DTYPE"] = self._compute_dtype
+        os.environ["CHEMTRAIN_PARAM_DTYPE"] = self._param_dtype
+        os.environ["CHEMTRAIN_REDUCE_DTYPE"] = self._reduce_dtype
+        os.environ["CHEMTRAIN_ENABLE_BUFFER_DONATION"] = (
+            "1" if self._enable_buffer_donation else "0"
+        )
+        os.environ["CHEMTRAIN_DONATE_MODE"] = self._donate_mode
+
+        training_logger.info(
+            "[RuntimePolicy] mixed_precision=%s compute_dtype=%s param_dtype=%s "
+            "reduce_dtype=%s buffer_donation=%s donate_mode=%s",
+            self._mixed_precision_enabled,
+            self._compute_dtype,
+            self._param_dtype,
+            self._reduce_dtype,
+            self._enable_buffer_donation,
+            self._donate_mode,
+        )
+
         # Optional JAX profiler configuration (controlled by YAML)
         profiling_cfg = config.get_profiling_config()
         self._profiling_enabled = bool(profiling_cfg.get("enabled", False))
+        self._profiling_jax_trace_enabled = bool(
+            profiling_cfg.get("jax_trace_enabled", True)
+        )
         self._profiling_trace_dir = Path(str(profiling_cfg.get("trace_dir", "./profiles")))
         self._profiling_trace_rank0_only = bool(profiling_cfg.get("trace_rank0_only", True))
         self._profiling_log_compiles = bool(profiling_cfg.get("log_compiles", False))
         self._batch_profiler_enabled = bool(profiling_cfg.get("batch_profiler_enabled", False))
         self._batch_profiler_warmup = int(profiling_cfg.get("batch_profiler_warmup", 5))
         self._batch_profiler_samples = int(profiling_cfg.get("batch_profiler_samples", 50))
+        env_true = ("1", "true", "yes", "on")
+        self._edge_profiler_enabled = (
+            self._batch_profiler_enabled
+            and str(os.getenv("CHEMTRAIN_PROFILE_EDGE_COUNTS", "1")).strip().lower() in env_true
+        )
+        self._edge_profiler_structures = max(
+            1, int(os.getenv("CHEMTRAIN_PROFILE_EDGE_COUNT_SAMPLES", "1"))
+        )
+        self._edge_profiler_stride = max(
+            1, int(os.getenv("CHEMTRAIN_PROFILE_EDGE_COUNT_STRIDE", "1"))
+        )
+        self._edge_profiler_rank0_only = (
+            str(os.getenv("CHEMTRAIN_PROFILE_EDGE_COUNT_RANK0_ONLY", "1")).strip().lower()
+            in env_true
+        )
+        self._edge_profiler_warned_missing_batch = False
+        self._edge_profiler_prev_mean = None
+        # Env override for emergency/no-code toggles in SLURM scripts.
+        # 1/true/on -> enable traces, 0/false/off -> disable traces.
+        env_trace_toggle = os.getenv("CHEMTRAIN_PROFILE_JAX_TRACE")
+        if env_trace_toggle is not None:
+            self._profiling_jax_trace_enabled = env_trace_toggle.strip().lower() in (
+                "1", "true", "yes", "on"
+            )
 
         if self._profiling_log_compiles:
             try:
@@ -102,7 +163,20 @@ class Trainer:
 
         if self._profiling_enabled:
             self._profiling_trace_dir.mkdir(parents=True, exist_ok=True)
-            if self._profiling_trace_rank0_only and self._rank != 0:
+            if self._edge_profiler_enabled:
+                training_logger.info(
+                    "[Profiling] EdgeProfiler enabled "
+                    "(sample_structures=%d, stride=%d, rank0_only=%s)",
+                    self._edge_profiler_structures,
+                    self._edge_profiler_stride,
+                    self._edge_profiler_rank0_only,
+                )
+            if not self._profiling_jax_trace_enabled:
+                training_logger.info(
+                    f"[Profiling] JAX trace export disabled on rank {self._rank} "
+                    "(jax_trace_enabled=false)"
+                )
+            elif self._profiling_trace_rank0_only and self._rank != 0:
                 training_logger.info(
                     f"[Profiling] Enabled in config, but rank {self._rank} tracing is disabled "
                     "(trace_rank0_only=true)"
@@ -187,6 +261,16 @@ class Trainer:
         """Return True if JAX tracing should run on this rank."""
         if not self._profiling_enabled:
             return False
+        if not self._profiling_jax_trace_enabled:
+            return False
+        if self._profiling_trace_rank0_only and self._rank != 0:
+            return False
+        return True
+
+    def _should_batch_profile_this_rank(self) -> bool:
+        """Return True if batch-profiler wrappers should run on this rank."""
+        if not self._batch_profiler_enabled:
+            return False
         if self._profiling_trace_rank0_only and self._rank != 0:
             return False
         return True
@@ -264,15 +348,17 @@ class Trainer:
             def _barrier():
                 jax.block_until_ready(jnp.zeros(()))
 
-        def _timed_update_fn(params, opt_state, batch, per_target=False):
+        # Keep wrapper fully pass-through so profiler remains compatible when
+        # _update_fn gains new keyword arguments (e.g., microbatch_count).
+        def _timed_update_fn(*args, **kwargs):
             idx = step[0]
             step[0] += 1
 
             if idx < n_warmup or idx >= n_warmup + n_samples:
-                return original_fn(params, opt_state, batch, per_target=per_target)
+                return original_fn(*args, **kwargs)
 
             t0 = time.perf_counter()
-            result = original_fn(params, opt_state, batch, per_target=per_target)
+            result = original_fn(*args, **kwargs)
             t1 = time.perf_counter()
             _barrier()
             t2 = time.perf_counter()
@@ -280,11 +366,180 @@ class Trainer:
             call_ts.append(t0)
             dispatch_ts.append(t1)
             barrier_ts.append(t2)
+            batch = kwargs.get("batch", args[2] if len(args) > 2 else None)
+            self._log_edge_count_stats_for_batch(batch, idx)
             return result
 
         trainer._update_fn = _timed_update_fn
         # Store on self so _report_batch_profiler can access after train() returns.
         self._batch_profiler_data = (call_ts, dispatch_ts, barrier_ts, n_warmup, n_samples)
+
+    @staticmethod
+    def _get_batch_field(batch: Any, key: str) -> Optional[Any]:
+        """Best-effort accessor for batch containers used by chemtrain."""
+        if batch is None:
+            return None
+        if isinstance(batch, dict):
+            return batch.get(key)
+        try:
+            return batch[key]
+        except Exception:
+            pass
+        return getattr(batch, key, None)
+
+    def _edge_count_for_structure(self, R_sample: Any, mask_sample: Optional[Any]) -> Optional[Tuple[int, int, int]]:
+        """
+        Compute valid edge count for one structure using the model neighborlist update.
+
+        Returns:
+            Tuple (edge_count, valid_atom_count, edge_slots)
+        """
+        ml_model = getattr(self.model, "ml_model", None)
+        if ml_model is None:
+            return None
+        if not hasattr(ml_model, "nneigh_fn") or not hasattr(ml_model, "nbrs_init"):
+            return None
+
+        compute_dtype = getattr(ml_model, "compute_dtype", jnp.float32)
+        R_base = jnp.asarray(R_sample, dtype=compute_dtype)
+        if mask_sample is None:
+            valid_mask = jnp.ones((R_base.shape[0],), dtype=jnp.bool_)
+        else:
+            valid_mask = jnp.asarray(mask_sample) > 0
+
+        if hasattr(ml_model, "_spread_padded_coordinates"):
+            padded_mask = jnp.logical_not(valid_mask)
+            R_safe = ml_model._spread_padded_coordinates(R_base, padded_mask)
+            R_eval = jnp.where(valid_mask[:, None], R_base, jax.lax.stop_gradient(R_safe))
+        else:
+            R_eval = R_base
+
+        nbrs = ml_model.nneigh_fn.update(R_eval, ml_model.nbrs_init)
+        idx = np.asarray(jax.device_get(nbrs.idx))
+        valid_mask_np = np.asarray(jax.device_get(valid_mask), dtype=bool)
+        n_atoms = int(valid_mask_np.shape[0])
+        if n_atoms <= 0:
+            return 0, 0, int(idx.size)
+
+        if idx.ndim == 2 and idx.shape[0] == 2:
+            senders, receivers = idx[0], idx[1]
+            in_range = (
+                (senders >= 0)
+                & (senders < n_atoms)
+                & (receivers >= 0)
+                & (receivers < n_atoms)
+            )
+            senders_safe = np.where(in_range, senders, 0)
+            receivers_safe = np.where(in_range, receivers, 0)
+            edge_valid = (
+                in_range
+                & valid_mask_np[senders_safe]
+                & valid_mask_np[receivers_safe]
+            )
+            edge_slots = int(idx.shape[1])
+        else:
+            in_range = (idx >= 0) & (idx < n_atoms)
+            idx_safe = np.where(in_range, idx, 0)
+            neighbor_valid = valid_mask_np[idx_safe]
+            center_valid = valid_mask_np[:, None]
+            edge_valid = in_range & neighbor_valid & center_valid
+            edge_slots = int(idx.size)
+
+        edge_count = int(np.sum(edge_valid, dtype=np.int64))
+        valid_atoms = int(np.sum(valid_mask_np, dtype=np.int64))
+        return edge_count, valid_atoms, edge_slots
+
+    def _log_edge_count_stats_for_batch(self, batch: Any, step_idx: int) -> None:
+        """Log sampled per-batch neighbor edge statistics."""
+        if not self._edge_profiler_enabled:
+            return
+        if self._edge_profiler_rank0_only and self._rank != 0:
+            return
+        if step_idx % self._edge_profiler_stride != 0:
+            return
+
+        R_batch = self._get_batch_field(batch, "R")
+        mask_batch = self._get_batch_field(batch, "mask")
+        if R_batch is None:
+            if not self._edge_profiler_warned_missing_batch:
+                training_logger.warning(
+                    "[EdgeProfiler] Could not access batch['R']; disabling edge logging."
+                )
+                self._edge_profiler_warned_missing_batch = True
+            return
+
+        try:
+            n_struct_total = int(R_batch.shape[0])
+        except Exception:
+            if not self._edge_profiler_warned_missing_batch:
+                training_logger.warning(
+                    "[EdgeProfiler] Unexpected batch shape for 'R'; disabling edge logging."
+                )
+                self._edge_profiler_warned_missing_batch = True
+            return
+
+        n_struct = min(self._edge_profiler_structures, n_struct_total)
+        edge_counts = []
+        valid_atoms = []
+        edge_slots = []
+        for i in range(n_struct):
+            mask_i = None if mask_batch is None else mask_batch[i]
+            try:
+                stats = self._edge_count_for_structure(R_batch[i], mask_i)
+            except Exception as e:
+                training_logger.warning(
+                    "[EdgeProfiler] Failed to compute edge stats (%s). Disabling edge logging.",
+                    e,
+                )
+                self._edge_profiler_enabled = False
+                return
+            if stats is None:
+                return
+            e_count, v_atoms, e_slots = stats
+            edge_counts.append(float(e_count))
+            valid_atoms.append(float(v_atoms))
+            edge_slots.append(float(e_slots))
+
+        if not edge_counts:
+            return
+
+        edges = np.asarray(edge_counts, dtype=np.float64)
+        atoms = np.asarray(valid_atoms, dtype=np.float64)
+        slots = np.asarray(edge_slots, dtype=np.float64)
+        occupancy = edges / np.maximum(slots, 1.0)
+        mean_edges = float(np.mean(edges))
+        delta = (
+            mean_edges - self._edge_profiler_prev_mean
+            if self._edge_profiler_prev_mean is not None
+            else None
+        )
+        self._edge_profiler_prev_mean = mean_edges
+
+        if delta is None:
+            training_logger.info(
+                "[EdgeProfiler] step=%d sample_n=%d edge_count mean=%.1f min=%.1f max=%.1f "
+                "valid_atoms mean=%.1f occ=%.4f",
+                step_idx,
+                n_struct,
+                mean_edges,
+                float(np.min(edges)),
+                float(np.max(edges)),
+                float(np.mean(atoms)),
+                float(np.mean(occupancy)),
+            )
+        else:
+            training_logger.info(
+                "[EdgeProfiler] step=%d sample_n=%d edge_count mean=%.1f min=%.1f max=%.1f "
+                "valid_atoms mean=%.1f occ=%.4f delta_mean=%+.1f",
+                step_idx,
+                n_struct,
+                mean_edges,
+                float(np.min(edges)),
+                float(np.max(edges)),
+                float(np.mean(atoms)),
+                float(np.mean(occupancy)),
+                float(delta),
+            )
 
     def _report_batch_profiler(self) -> None:
         """Log batch-profiler statistics collected by _attach_batch_profiler."""
@@ -309,7 +564,9 @@ class Trainer:
                 f"p50={np.median(arr):.2f}  p95={np.percentile(arr, 95):.2f}"
             )
 
-        ratio = float(np.mean(gap_ms) / max(float(np.mean(barrier_ms)), 1e-6))
+        mean_dispatch = float(np.mean(dispatch_ms))
+        mean_barrier = float(np.mean(barrier_ms))
+        ratio = float(np.mean(gap_ms) / max(mean_barrier, 1e-6))
 
         training_logger.info(
             "\n[BatchProfiler] Per-batch timing (%d samples, %d warmup skipped):",
@@ -324,7 +581,12 @@ class Trainer:
             ratio,
         )
 
-        if ratio > 0.8:
+        if mean_dispatch > max(5.0 * mean_barrier, 5.0):
+            training_logger.warning(
+                "  [!!] _update_fn appears synchronous (dispatch includes compute). "
+                "The large inter-batch gap is outside _update_fn (likely dataloader/Python loop overhead)."
+            )
+        elif ratio > 0.8:
             training_logger.warning(
                 "  [!!] CPU is BLOCKING on every batch step. "
                 "The onp.asarray() syncs in chemtrain._update are the dominant overhead. "
@@ -466,7 +728,7 @@ class Trainer:
 
         # Attach per-batch timing profiler if requested (non-invasive monkey-patch).
         # Must be done BEFORE trainer.train() so it intercepts from step 0.
-        if self._batch_profiler_enabled and self._should_trace_this_rank():
+        if self._should_batch_profile_this_rank():
             training_logger.info(
                 "[BatchProfiler] Attaching to _update_fn "
                 f"(warmup={self._batch_profiler_warmup}, "
@@ -497,11 +759,10 @@ class Trainer:
             self._block_until_ready(trainer.params)
         finally:
             self._stop_jax_trace(trace_dir)
+            # Report batch profiler results even if training is interrupted mid-stage.
+            if self._batch_profiler_enabled:
+                self._report_batch_profiler()
         stage_wall_seconds = time.perf_counter() - stage_start_time
-
-        # Report batch profiler results (clears internal state).
-        if self._batch_profiler_enabled:
-            self._report_batch_profiler()
 
         # Update parameters
         self.params = trainer.params
@@ -515,7 +776,8 @@ class Trainer:
             self._save_stage_checkpoint(optimizer_name, epochs)
 
         # Extract gradient norm history (per-step, logged by chemtrain internally)
-        grad_norms = list(getattr(trainer, 'gradient_norm_history', []))
+        grad_norms_raw = list(getattr(trainer, 'gradient_norm_history', []))
+        grad_norms = [float(np.asarray(v)) for v in grad_norms_raw]
         if grad_norms:
             training_logger.info(
                 f"Gradient norms — mean: {np.mean(grad_norms):.4e}, "
