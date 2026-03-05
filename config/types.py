@@ -77,6 +77,10 @@ class EnergyComponents(TypedDict, total=False):
     E_angle: Optional[float]
     E_rep: Optional[float]
     E_dih: Optional[float]
+    E_excluded_volume: Optional[float]
+    E_dh: Optional[float]
+    E_stickiness: Optional[float]
+    E_salt_bridge: Optional[float]
 
 
 class ForceComponents(TypedDict):
@@ -144,6 +148,16 @@ class PriorParams(TypedDict, total=False):
     b: jax.Array  # Angle Fourier coefficients
     k_dih: jax.Array  # Dihedral force constants
     gamma_dih: jax.Array  # Dihedral phase angles
+    # Typed-prior parameters
+    k_DH: float
+    lambda_D: float
+    dh_w_by_sep: jax.Array
+    stick_r0: float
+    stick_sigma: float
+    stick_s_free: jax.Array
+    salt_delta: float
+    salt_r0: float
+    salt_sigma: float
 
 
 class SplineArrays(TypedDict, total=False):

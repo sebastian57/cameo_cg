@@ -4,6 +4,8 @@ Configuration Manager for Chemtrain Pipeline
 Handles loading, validation, and access to YAML configuration files.
 """
 
+import os
+import warnings
 import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional, Union
@@ -124,6 +126,36 @@ class ConfigManager:
     def get_dr_threshold(self) -> float:
         """Get neighbor list rebuild threshold."""
         return self.get("model", "dr_threshold", default=0.5)
+
+    def get_neighbor_list_format(self) -> str:
+        """
+        Get neighbor list storage format.
+
+        Returns:
+            Format name: "dense" or "sparse"
+        """
+        env_override = os.environ.get("CHEMTRAIN_NEIGHBOR_LIST_FORMAT")
+        if env_override is not None and str(env_override).strip() != "":
+            raw = str(env_override)
+        else:
+            raw_from_cfg = self.get("model", "neighbor_list_format", default=None)
+            if raw_from_cfg is None:
+                warnings.warn(
+                    "model.neighbor_list_format is not set; defaulting to 'dense'. "
+                    "Set model.neighbor_list_format: sparse (or export "
+                    "CHEMTRAIN_NEIGHBOR_LIST_FORMAT=sparse) to enable sparse "
+                    "neighbor lists."
+                )
+                raw = "dense"
+            else:
+                raw = str(raw_from_cfg)
+        normalized = raw.strip().lower().replace("-", "_")
+        if normalized not in ("dense", "sparse"):
+            raise ValueError(
+                f"Unsupported model.neighbor_list_format='{raw}'. "
+                "Expected one of: dense, sparse."
+            )
+        return normalized
 
     def get_allegro_config(self, size: str = "default") -> Dict[str, Any]:
         """
