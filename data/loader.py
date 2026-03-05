@@ -47,13 +47,26 @@ def load_npz(path: PathLike) -> Dict[str, Any]:
         raise FileNotFoundError(f"NPZ file not found: {path}")
 
     if path.is_dir():
-        print("It's a directory")
-
         files = sorted(path.glob("*.npz"))
         if not files:
             raise FileNotFoundError(f"No .npz files found in directory: {path}")
 
         datasets = [np.load(f, allow_pickle=True) for f in files]
+        n_atoms_per_file = [int(d["R"].shape[1]) for d in datasets]
+        unique_n_atoms = sorted(set(n_atoms_per_file))
+        if len(unique_n_atoms) > 1:
+            is_bucketed = all(f.name.startswith("bucket_N") for f in files)
+            details = ", ".join(str(n) for n in unique_n_atoms)
+            if is_bucketed:
+                raise ValueError(
+                    f"Directory '{path}' contains bucketed NPZ files with mixed N_max "
+                    f"({details}). Use scripts/train.py with "
+                    f"--multi-protein-dir {path} instead of data.path."
+                )
+            raise ValueError(
+                f"Directory '{path}' contains NPZ files with mixed N_max ({details}), "
+                "which cannot be concatenated into a single DatasetLoader."
+            )
 
         def cat(key):
             return np.concatenate([d[key] for d in datasets], axis=0)
@@ -70,11 +83,7 @@ def load_npz(path: PathLike) -> Dict[str, Any]:
             "aa_to_id": datasets[0]["aa_to_id"].item() if "aa_to_id" in datasets[0] else None,
         }
 
-        print(f"Loaded {len(files)} NPZ files, total frames: {result['R'].shape[0]}")
         return result
-
-    elif path.is_file():
-        print("It's a file")
 
     data = np.load(path, allow_pickle=True)
 
