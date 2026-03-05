@@ -18,19 +18,7 @@ Modules:
 __version__ = "1.0.0"
 __author__ = "Schmidt36 & Claude"
 
-# Import key classes for convenience
-from .config.manager import ConfigManager
-from .data.loader import DatasetLoader
-from .data.preprocessor import CoordinatePreprocessor
-from .models.topology import TopologyBuilder
-from .models.prior_energy import PriorEnergy
-from .models.allegro_model import AllegroModel
-from .models.combined_model import CombinedModel
-from .training.trainer import Trainer
-from .training.optimizers import create_optimizer
-from .evaluation.evaluator import Evaluator
-from .evaluation.visualizer import LossPlotter, ForceAnalyzer
-from .export.exporter import AllegroExporter
+from importlib import import_module
 
 __all__ = [
     # Config
@@ -53,3 +41,29 @@ __all__ = [
     # Export
     "AllegroExporter",
 ]
+
+_LAZY_SYMBOLS = {
+    "ConfigManager": ("cameo_cg.config.manager", "ConfigManager"),
+    "DatasetLoader": ("cameo_cg.data.loader", "DatasetLoader"),
+    "CoordinatePreprocessor": ("cameo_cg.data.preprocessor", "CoordinatePreprocessor"),
+    "TopologyBuilder": ("cameo_cg.models.topology", "TopologyBuilder"),
+    "PriorEnergy": ("cameo_cg.models.prior_energy", "PriorEnergy"),
+    "AllegroModel": ("cameo_cg.models.allegro_model", "AllegroModel"),
+    "CombinedModel": ("cameo_cg.models.combined_model", "CombinedModel"),
+    "Trainer": ("cameo_cg.training.trainer", "Trainer"),
+    "create_optimizer": ("cameo_cg.training.optimizers", "create_optimizer"),
+    "Evaluator": ("cameo_cg.evaluation.evaluator", "Evaluator"),
+    "LossPlotter": ("cameo_cg.evaluation.visualizer", "LossPlotter"),
+    "ForceAnalyzer": ("cameo_cg.evaluation.visualizer", "ForceAnalyzer"),
+    "AllegroExporter": ("cameo_cg.export.exporter", "AllegroExporter"),
+}
+
+
+def __getattr__(name):
+    if name in _LAZY_SYMBOLS:
+        module_name, symbol_name = _LAZY_SYMBOLS[name]
+        module = import_module(module_name)
+        value = getattr(module, symbol_name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module 'cameo_cg' has no attribute '{name}'")
