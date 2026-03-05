@@ -108,12 +108,59 @@ def dihedral_angles_single_frame(R, dihedrals, displacement):
     return jnp.arctan2(y, x)
 
 
-def fit_bond_harmonic(d_np, T=320.0, kB=0.0019872041):
-    d_np = np.asarray(d_np, dtype=np.float64)
-    r0 = float(np.mean(d_np))
-    var = float(np.mean((d_np - r0) ** 2))
-    kBT = kB * T
-    kr = float(kBT / max(var, 1e-12))
+def fit_bond_harmonic(
+    d_np,
+    T=320.0,
+    kB=0.0019872041,
+    nbins=200,
+    pseudocount=1.0,
+    ridge=1e-10,
+):
+    """
+    Fit harmonic bond parameters using Jacobian-corrected Boltzmann inversion.
+
+    Steps:
+      1) estimate observed radial density P(r) from histogram
+      2) convert to intrinsic density P_int(r) ~ P(r) / r^2
+      3) BI: U(r) = -kBT ln P_int(r) + const
+      4) weighted quadratic fit U(r) ~ 0.5*kr*(r-r0)^2 + const
+    """
+    x = np.asarray(d_np, dtype=np.float64)
+    if x.size < 10:
+        # Conservative fallback for tiny datasets
+        r0 = float(np.mean(x)) if x.size else 3.8
+        var = float(np.mean((x - r0) ** 2)) if x.size else 1e-3
+        kBT = kB * T
+        kr = float(kBT / max(var, 1e-12))
+        return r0, kr
+
+    counts, edges = np.histogram(x, bins=int(nbins), density=False)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    bin_width = edges[1] - edges[0]
+
+    counts_smooth = counts.astype(np.float64) + float(pseudocount)
+    p_obs = counts_smooth / counts_smooth.sum() / bin_width
+    p_int = _apply_radial_jacobian_correction(p_obs, centers, power=2)
+    U = _safe_probability_to_pmf(p_int, T=T, kB=kB)
+
+    # Weighted quadratic fit: U ~= a*r^2 + b*r + c
+    # with 0.5*kr*(r-r0)^2 => a = 0.5*kr, r0 = -b/(2a)
+    w = np.clip(p_obs, 1e-12, None)
+    X = np.stack([centers**2, centers, np.ones_like(centers)], axis=1)
+    A = X.T @ (w[:, None] * X) + float(ridge) * np.eye(3)
+    y = X.T @ (w * U)
+    a, b, _ = np.linalg.solve(A, y)
+
+    if not np.isfinite(a) or a <= 1e-12:
+        # Fallback to moment estimate if quadratic fit is degenerate
+        r0 = float(np.mean(x))
+        var = float(np.mean((x - r0) ** 2))
+        kBT = kB * T
+        kr = float(kBT / max(var, 1e-12))
+        return r0, kr
+
+    r0 = float(-b / (2.0 * a))
+    kr = float(2.0 * a)
     return r0, kr
 
 def fit_fourier_angles_stable(
@@ -282,6 +329,14 @@ def _safe_probability_to_pmf(prob, T, kB, floor_rel=1e-8):
     return U
 
 
+def _apply_radial_jacobian_correction(prob, r, power=2):
+    """Convert observed radial density P(r) to intrinsic density by dividing by r^power."""
+    p = np.asarray(prob, dtype=np.float64)
+    rr = np.asarray(r, dtype=np.float64)
+    jac = np.clip(rr, 1e-8, None) ** int(power)
+    return p / jac
+
+
 def _periodic_extend(values, period=2.0 * np.pi):
     """Duplicate angular samples by +/- one period for periodic KDE."""
     v = np.asarray(values, dtype=np.float64)
@@ -299,7 +354,12 @@ def _kde_on_grid(samples, grid, bw_factor=1.0, weights=None):
 
 
 def fit_bond_spline(all_bonds, T, kB, n_grid, bw_factor):
-    """Fit bond PMF using KDE -> BI -> natural cubic spline."""
+    """Fit bond PMF using KDE -> BI -> natural cubic spline.
+
+    Applies radial Jacobian correction for distances:
+      P_intrinsic(r) ~ P_observed(r) / r^2
+    before Boltzmann inversion.
+    """
     CubicSpline, _ = _require_scipy_for_splines()
 
     x = np.asarray(all_bonds, dtype=np.float64)
@@ -310,7 +370,8 @@ def fit_bond_spline(all_bonds, T, kB, n_grid, bw_factor):
     grid = np.linspace(xmin, xmax, int(n_grid), dtype=np.float64)
 
     dens = _kde_on_grid(x, grid, bw_factor=bw_factor)
-    U = _safe_probability_to_pmf(dens, T=T, kB=kB)
+    dens_corr = _apply_radial_jacobian_correction(dens, grid, power=2)
+    U = _safe_probability_to_pmf(dens_corr, T=T, kB=kB)
     cs = CubicSpline(grid, U, bc_type="natural")
     knots, coeffs = _extract_spline_coeffs(cs)
     return knots, coeffs, grid, dens, U, cs
@@ -634,7 +695,8 @@ def main():
         U_bond = 0.5 * kr * (r_grid - r0) ** 2
         U_bond -= U_bond.min()
         beta = 1.0 / (args.kB * args.T)
-        pdf_bond = np.exp(-beta * U_bond)
+        # Observed radial density includes r^2 Jacobian.
+        pdf_bond = (r_grid ** 2) * np.exp(-beta * U_bond)
         pdf_bond /= np.trapz(pdf_bond, r_grid)
 
         hist_r, edges_r = np.histogram(all_bonds, bins=120, density=True)
@@ -841,7 +903,11 @@ def main():
             U_bond_spline = eval_piecewise_spline_numpy(grid_eval_bond, bond_knots, bond_coeffs)
             hist_bond, edges_bond = np.histogram(all_bonds, bins=120, range=(grid_bond[0], grid_bond[-1]), density=True)
             cent_bond = 0.5 * (edges_bond[:-1] + edges_bond[1:])
-            U_bond_hist = _safe_probability_to_pmf(hist_bond, T=args.T, kB=args.kB)
+            U_bond_hist = _safe_probability_to_pmf(
+                _apply_radial_jacobian_correction(hist_bond, cent_bond, power=2),
+                T=args.T,
+                kB=args.kB,
+            )
             plt.figure()
             plt.plot(cent_bond, U_bond_hist, color="0.6", linewidth=1.2, label="Histogram PMF")
             plt.plot(grid_bond, U_bond_kde, color="C0", linewidth=2.0, label="KDE PMF")
@@ -883,7 +949,8 @@ def main():
             savefig(Path(args.plots_dir) / "spline_dihedral_pmf_overlay.png")
 
             # Implied distributions
-            p_bond = np.exp(-beta * (U_bond_spline - np.min(U_bond_spline)))
+            # Convert intrinsic potential back to observed radial density with r^2 factor.
+            p_bond = (grid_eval_bond ** 2) * np.exp(-beta * (U_bond_spline - np.min(U_bond_spline)))
             p_bond /= np.trapz(p_bond, grid_eval_bond)
             plt.figure()
             plt.plot(cent_bond, hist_bond, color="0.6", linewidth=1.2, label="Empirical P(r)")
@@ -1037,6 +1104,7 @@ def main():
             "angle_min_samples": int(args.angle_min_samples),
             "kde_bandwidth_factor": float(args.kde_bandwidth_factor),
             "spline_grid_points": int(args.spline_grid_points),
+            "bond_radial_jacobian_correction": True,
         }
     }
 
