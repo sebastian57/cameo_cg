@@ -567,14 +567,14 @@ class ForceAnalyzer:
                 norm = sigma * np.sqrt(2.0 * np.pi)
                 return np.exp(-0.5 * ((xv - mu) / sigma) ** 2) / norm
 
-            ax.plot(
-                x, _gauss_pdf(x, ref_mu, ref_sigma), color=colors["ref"], linewidth=2.0,
-                label=f"Ref N({ref_mu:.2f}, {ref_sigma:.2f})"
-            )
-            ax.plot(
-                x, _gauss_pdf(x, pred_mu, pred_sigma), color=colors["pred"], linewidth=2.0,
-                label=f"Pred N({pred_mu:.2f}, {pred_sigma:.2f})"
-            )
+            # ax.plot(
+            #     x, _gauss_pdf(x, ref_mu, ref_sigma), color=colors["ref"], linewidth=2.0,
+            #     label=f"Ref N({ref_mu:.2f}, {ref_sigma:.2f})"
+            # )
+            # ax.plot(
+            #     x, _gauss_pdf(x, pred_mu, pred_sigma), color=colors["pred"], linewidth=2.0,
+            #     label=f"Pred N({pred_mu:.2f}, {pred_sigma:.2f})"
+            # )
 
             ax.set_xlabel(f"Force {name} (kcal/mol/A)", fontsize=11)
             if i == 0:
@@ -588,6 +588,50 @@ class ForceAnalyzer:
         plt.close()
 
         eval_logger.info(f"Saved Gaussian force distribution plot to: {output_path}")
+
+    @staticmethod
+    def save_force_gaussian_data_csv(
+        F_pred: np.ndarray,
+        F_ref: np.ndarray,
+        output_path: PathLike,
+        mask: Optional[np.ndarray] = None
+    ):
+        """
+        Save the exact per-component force samples used by Gaussian distribution plots.
+
+        Args:
+            F_pred: Predicted/prior forces, shape (n_atoms, 3)
+            F_ref: Reference forces, shape (n_atoms, 3)
+            output_path: Path to save CSV file
+            mask: Optional mask for real atoms, shape (n_atoms,)
+        """
+        output_path = as_path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if mask is not None:
+            real_mask = mask > 0
+            F_pred = F_pred[real_mask]
+            F_ref = F_ref[real_mask]
+
+        if F_pred.shape != F_ref.shape or F_pred.ndim != 2 or F_pred.shape[1] != 3:
+            raise ValueError(
+                f"Expected F_pred/F_ref shape (n_atoms, 3), got {F_pred.shape} and {F_ref.shape}"
+            )
+
+        values = np.column_stack((
+            F_ref[:, 0], F_pred[:, 0],
+            F_ref[:, 1], F_pred[:, 1],
+            F_ref[:, 2], F_pred[:, 2],
+        ))
+
+        np.savetxt(
+            output_path,
+            values,
+            delimiter=",",
+            header="ref_x,est_x,ref_y,est_y,ref_z,est_z",
+            comments=""
+        )
+        eval_logger.info(f"Saved Gaussian force distribution CSV to: {output_path}")
 
 
 # =============================================================================

@@ -203,6 +203,7 @@ def main():
             box=box,
             species=dataset["species"][0],
             N_max=loader.N_max,
+            id_to_aa=loader.id_to_aa,
         )
 
     evaluator = Evaluator(model, params, config)
