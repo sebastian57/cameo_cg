@@ -25,6 +25,7 @@ model:
 
   cutoff: 10.0  # Neighbor list cutoff distance
   dr_threshold: 1.0  # Neighbor list rebuild threshold
+  neighbor_list_format: "dense"  # Options: "dense", "sparse"
 
   # Allegro model configurations
   # The one selected by 'allegro_size' will be used
@@ -94,6 +95,37 @@ model:
       dihedral: 0.25   # Fitted from histograms
       repulsive: 1.0   # NOT fitted → full strength
       excluded_volume: 1.0  # Soft repulsion for seq sep 2-5; NOT fitted → full strength
+      dh: 0.0
+      stickiness: 0.0
+      salt_bridge: 0.0
+
+    aa_typing:
+      source: "dataset_map"
+      his_charge: 0.0
+      group_order: ["POSITIVE", "NEGATIVE", "POLAR_UNCHARGED", "NONPOLAR"]
+      stickiness_reference_group: "POLAR_UNCHARGED"
+
+    dh:
+      enabled: false
+      mode: "local_k"
+      K: 2
+      k_DH: 1.0
+      lambda_D: 8.0
+      w_by_sep: [0.0, 1.0, 0.1]
+
+    stickiness:
+      enabled: false
+      min_seq_sep: 3
+      r0: 3.8
+      sigma: 0.4
+      s_free_init: [0.0, 0.0, 0.0]
+
+    salt_bridge:
+      enabled: false
+      min_seq_sep: 3
+      delta: -0.5
+      r0: 3.8
+      sigma: 0.3
 
     # Bond parameters
     r0: 3.8375435  # Equilibrium bond length
