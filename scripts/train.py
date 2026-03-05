@@ -74,29 +74,40 @@ def _initialize_jax_distributed():
         num_processes = int(slurm_ntasks)
         process_id = int(slurm_procid) if slurm_procid else 0
 
-        # Get coordinator address from SLURM nodelist
-        # Use subprocess to parse nodelist since scontrol may not be available
-        import subprocess
-        try:
-            result = subprocess.run(
-                ["scontrol", "show", "hostname", slurm_nodelist],
-                capture_output=True, text=True, check=True
-            )
-            coordinator_host = result.stdout.strip().split('\n')[0]
-            # Use FQDN for cross-node resolution on JUWELS Booster
-            coordinator_address = f"{coordinator_host}.juwels"
-        except Exception as e:
-            print(f"[SLURM] Warning: Could not parse nodelist, using first node from {slurm_nodelist}: {e}")
-            # Fallback: extract first node manually (handles simple cases like "node[001-002]")
-            import re
-            match = re.match(r'([a-zA-Z]+)(\d+)', slurm_nodelist.replace('[', '').replace(']', ''))
-            if match:
-                coordinator_address = f"{match.group(1)}{match.group(2)}.juwels"
-            else:
-                coordinator_address = f"{slurm_nodelist.split(',')[0].split('[')[0]}.juwels"
+        # Coordinator host/port selection:
+        # 1) honor explicit launcher-provided env vars
+        # 2) fallback to SLURM nodelist parsing (legacy behavior)
+        coordinator_host_env = os.environ.get("CHEMTRAIN_COORDINATOR_HOST")
+        coordinator_port_env = os.environ.get("CHEMTRAIN_COORDINATOR_PORT")
 
-        # Use job-specific port to avoid conflicts
-        coordinator_port = 29400 + (int(slurm_job_id) % 1000)
+        coordinator_source = "env"
+        coordinator_host = coordinator_host_env
+        if not coordinator_host:
+            coordinator_source = "slurm_nodelist"
+            # Get coordinator host from SLURM nodelist
+            # Use subprocess to parse nodelist since scontrol may not be available
+            import subprocess
+            try:
+                result = subprocess.run(
+                    ["scontrol", "show", "hostname", slurm_nodelist],
+                    capture_output=True, text=True, check=True
+                )
+                coordinator_host = result.stdout.strip().split('\n')[0] + ".juwels"
+            except Exception as e:
+                print(f"[SLURM] Warning: Could not parse nodelist, using first node from {slurm_nodelist}: {e}")
+                # Fallback: extract first node manually (handles simple cases like "node[001-002]")
+                import re
+                match = re.match(r'([a-zA-Z]+)(\d+)', slurm_nodelist.replace('[', '').replace(']', ''))
+                if match:
+                    coordinator_host = f"{match.group(1)}{match.group(2)}.juwels"
+                else:
+                    coordinator_host = f"{slurm_nodelist.split(',')[0].split('[')[0]}.juwels"
+
+        # Use launcher-provided port if available, else job-specific default.
+        if coordinator_port_env:
+            coordinator_port = int(coordinator_port_env)
+        else:
+            coordinator_port = 29400 + (int(slurm_job_id) % 1000)
 
         # Derive local device count from CUDA_VISIBLE_DEVICES
         # Strip whitespace: SLURM may set CUDA_VISIBLE_DEVICES with trailing spaces
@@ -106,7 +117,7 @@ def _initialize_jax_distributed():
 
         print(f"[SLURM] Detected multi-node job: {num_processes} tasks")
         print(f"[SLURM] Process {process_id}/{num_processes}")
-        print(f"[SLURM] Coordinator: {coordinator_address}:{coordinator_port}")
+        print(f"[SLURM] Coordinator ({coordinator_source}): {coordinator_host}:{coordinator_port}")
         print(f"[SLURM] CUDA_VISIBLE_DEVICES={cuda_vis} -> {n_local_gpus} local GPUs")
         print(f"[Rank {process_id}] SLURM_NODELIST: {slurm_nodelist}", flush=True)
         print(f"[Rank {process_id}] Hostname: {os.uname().nodename}", flush=True)
@@ -115,7 +126,7 @@ def _initialize_jax_distributed():
         try:
             print(f"[Rank {process_id}] Attempting jax.distributed.initialize()...", flush=True)
             jax.distributed.initialize(
-                coordinator_address=f"{coordinator_address}:{coordinator_port}",
+                coordinator_address=f"{coordinator_host}:{coordinator_port}",
                 num_processes=num_processes,
                 process_id=process_id,
                 local_device_ids=local_ids,
@@ -265,6 +276,19 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     apply_numpy_dataloader_patch()
 
     config = ConfigManager(config_file)
+    env_neighbor_fmt = os.environ.get("CHEMTRAIN_NEIGHBOR_LIST_FORMAT")
+    effective_neighbor_fmt = config.get_neighbor_list_format()
+    if env_neighbor_fmt is not None and str(env_neighbor_fmt).strip() != "":
+        training_logger.info(
+            "[Config] Effective neighbor_list_format=%s (from CHEMTRAIN_NEIGHBOR_LIST_FORMAT=%s)",
+            effective_neighbor_fmt,
+            env_neighbor_fmt,
+        )
+    else:
+        training_logger.info(
+            "[Config] Effective neighbor_list_format=%s (from YAML)",
+            effective_neighbor_fmt,
+        )
 
     if job_id is None:
         job_id = os.environ.get("SLURM_JOB_ID", "local")
@@ -290,7 +314,7 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     # Save config copy
     config_path = export_dir / f"{model_name}_config.yaml"
     config.save(config_path)
-    logging.info(f"[Config] Saved to: {config_path}")
+    training_logger.info(f"[Config] Saved to: {config_path}")
 
     # ===== Load and preprocess data =====
     logging.info("\n" + "=" * 60)
@@ -308,6 +332,16 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         data_path_obj = clean_code_base_dir / data_path
         data_logger.info(f"Resolved relative path: {data_path} -> {data_path_obj}")
 
+    # Guard against accidentally using bucketed data with the single-dataset path.
+    if data_path_obj.is_dir():
+        bucket_files = sorted(data_path_obj.glob("bucket_N*.npz"))
+        if bucket_files:
+            raise ValueError(
+                f"data.path points to bucketed directory '{data_path_obj}'. "
+                "Use: python scripts/train.py <config.yaml> --multi-protein-dir "
+                f"{data_path_obj} [job_id]"
+            )
+
     # Load dataset (shuffling and limiting frames happens in constructor)
     max_frames = config.get_max_frames()
     seed = config.get_seed()
@@ -316,8 +350,10 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     # Get dataset info
     N_max = loader.N_max
     species0 = loader.species[0]
+    n_species_global = int(np.max(loader.species)) + 1
 
     data_logger.info(f"N_max: {N_max}")
+    data_logger.info(f"n_species_global: {n_species_global}")
     data_logger.info(f"Species: {species0}")
     data_logger.info(f"Total frames: {len(loader)}")
 
@@ -366,6 +402,8 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         box=box,
         species=species0,
         N_max=N_max,
+        n_species_override=n_species_global,
+        id_to_aa=loader.id_to_aa,
         prior_only=config.prior_only_enabled()
     )
 
@@ -570,6 +608,19 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
     apply_numpy_dataloader_patch()
 
     config = ConfigManager(config_file)
+    env_neighbor_fmt = os.environ.get("CHEMTRAIN_NEIGHBOR_LIST_FORMAT")
+    effective_neighbor_fmt = config.get_neighbor_list_format()
+    if env_neighbor_fmt is not None and str(env_neighbor_fmt).strip() != "":
+        training_logger.info(
+            "[Config] Effective neighbor_list_format=%s (from CHEMTRAIN_NEIGHBOR_LIST_FORMAT=%s)",
+            effective_neighbor_fmt,
+            env_neighbor_fmt,
+        )
+    else:
+        training_logger.info(
+            "[Config] Effective neighbor_list_format=%s (from YAML)",
+            effective_neighbor_fmt,
+        )
 
     if job_id is None:
         job_id = os.environ.get("SLURM_JOB_ID", "local")
@@ -583,11 +634,14 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
 
     config_path = export_dir / f"{model_name}_config.yaml"
     config.save(config_path)
+    training_logger.info(f"[Config] Saved to: {config_path}")
 
     # Load all buckets
     bucketed = BucketedDatasetLoader(bucket_dir, max_frames=config.get_max_frames(),
                                      seed=config.get_seed())
     training_logger.info(bucketed.summary())
+    global_n_species = max(int(np.max(dl.species)) + 1 for _, dl in bucketed.buckets)
+    training_logger.info(f"Global species cardinality across buckets: {global_n_species}")
 
     cutoff = config.get_cutoff()
     buffer_mult = config.get_buffer_multiplier()
@@ -619,6 +673,8 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
 
         model = CombinedModel(
             config=config, R0=R0, box=box, species=species0, N_max=n_max,
+            n_species_override=global_n_species,
+            id_to_aa=loader.id_to_aa,
             prior_only=config.prior_only_enabled()
         )
         model_logger.info(f"Bucket {bucket_idx}: {model}")

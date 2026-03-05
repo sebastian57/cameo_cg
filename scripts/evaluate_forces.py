@@ -343,6 +343,7 @@ def main():
             box=box,
             species=species0,
             N_max=loader.N_max,
+            id_to_aa=loader.id_to_aa,
             prior_only=(args.mode == 'prior-only')  # Skip ML computation for prior-only mode
         )
     print(f"  Model: {model}")
@@ -496,6 +497,9 @@ def main():
     gaussian_plot = output_dir / f"{filename_base}_force_gaussian_distribution.png"
     ForceAnalyzer.plot_force_gaussian_distribution(F_pred_real, F_ref_real, gaussian_plot)
     print(f"  Saved: {gaussian_plot}")
+    gaussian_csv = output_dir / f"{filename_base}_force_gaussian_distribution_values.csv"
+    ForceAnalyzer.save_force_gaussian_data_csv(F_pred_real, F_ref_real, gaussian_csv)
+    print(f"  Saved: {gaussian_csv}")
 
     # Save numerical results
     results_file = output_dir / f"{filename_base}_force_metrics.txt"

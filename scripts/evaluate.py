@@ -292,7 +292,8 @@ def main():
         R0=R0,
         box=box,
         species=species0,
-        N_max=N_max
+        N_max=N_max,
+        id_to_aa=loader.id_to_aa,
     )
 
     model_logger.info(f"{model}")

@@ -136,6 +136,7 @@ def train_single_model(
     dataset,
     loaders,
     species0,
+    id_to_aa,
     box,
     N_max,
     seed: int,
@@ -177,6 +178,7 @@ def train_single_model(
         box=box,
         species=species0,
         N_max=N_max,
+        id_to_aa=id_to_aa,
     )
 
     model_logger.info(f"[Model {model_index}] Created model, will initialize with seed={seed}")
@@ -415,6 +417,7 @@ def main(config_file: str, job_id: str = None):
             dataset=dataset,
             loaders=loaders,
             species0=species0,
+            id_to_aa=loader.id_to_aa,
             box=box,
             N_max=N_max,
             seed=seed,
