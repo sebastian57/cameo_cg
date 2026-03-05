@@ -8,12 +8,16 @@ Extracted from:
 - allegro_energyfn_multiple_proteins.py
 """
 
+import os
+import numpy as np
+
 import jax
 import jax.numpy as jnp
 from jax_md import space, partition
 from chemutils.models.allegro.model import allegro_neighborlist_pp
 from typing import Optional, Tuple, Any
 
+from .neighborlist_utils import resolve_neighbor_list_format, compute_avg_num_neighbors
 from utils.logging import model_logger
 
 
@@ -79,7 +83,15 @@ class AllegroModel:
         >>> energy = model.compute_energy(params, R, mask, species)
     """
 
-    def __init__(self, config, R0: jax.Array, box: jax.Array, species: jax.Array, N_max: int):
+    def __init__(
+        self,
+        config,
+        R0: jax.Array,
+        box: jax.Array,
+        species: jax.Array,
+        N_max: int,
+        n_species_override: Optional[int] = None,
+    ):
         """
         Initialize Allegro model.
 
@@ -89,16 +101,30 @@ class AllegroModel:
             box: Simulation box dimensions, shape (3,)
             species: Species IDs for atoms, shape (n_atoms,)
             N_max: Maximum number of atoms
+            n_species_override: Optional global species cardinality override.
         """
         self.config = config
         self.N_max = N_max
         self.compute_dtype_name, self.compute_dtype = _resolve_compute_dtype(config)
         self.remat_level = int(config.get_remat_level())
         self.remat_policy = str(config.get_remat_policy())
+        self._neighbor_debug_enabled = str(
+            os.environ.get("CHEMTRAIN_DEBUG_NEIGHBOR", "1")
+        ).strip().lower() in ("1", "true", "yes", "on")
+        self._neighbor_debug_rank0_only = str(
+            os.environ.get("CHEMTRAIN_DEBUG_NEIGHBOR_RANK0_ONLY", "1")
+        ).strip().lower() in ("1", "true", "yes", "on")
+        self._debug_shape_trace = str(
+            os.environ.get("CHEMTRAIN_DEBUG_SHAPE_TRACE", "0")
+        ).strip().lower() in ("1", "true", "yes", "on")
+        self._shape_trace_budget = [1]
 
         # Model parameters from config
         self.cutoff = config.get_cutoff()
         self.dr_threshold = config.get_dr_threshold()
+        self.neighbor_list_format_name, self.neighbor_list_format = resolve_neighbor_list_format(
+            config.get_neighbor_list_format()
+        )
 
         # Get Allegro hyperparameters
         # Support different model sizes: default, large, med
@@ -128,8 +154,10 @@ class AllegroModel:
             box=safe_box,
             r_cutoff=self.cutoff,
             dr_threshold=self.dr_threshold,
-            fractional_coordinates=False
+            fractional_coordinates=False,
+            format=self.neighbor_list_format,
         )
+        model_logger.info(f"Neighbor list format: {self.neighbor_list_format_name}")
 
         # Sanitize padded entries for Allegro initialization.
         species_arr = jnp.asarray(species)
@@ -139,7 +167,11 @@ class AllegroModel:
         )
 
         # Allocate initial neighbor list
-        self.nbrs_init = self.nneigh_fn.allocate(R0_safe, extra_capacity=64)
+        self._neighbor_extra_capacity = 10
+        self.nbrs_init = self.nneigh_fn.allocate(
+            R0_safe, extra_capacity=self._neighbor_extra_capacity
+        )
+        self._log_initial_neighbor_debug(self.nbrs_init, R0_safe)
 
         # Compute actual average number of neighbors from the initial neighbor list
         # and use it instead of the hardcoded config value. The config value is often
@@ -163,12 +195,11 @@ class AllegroModel:
         # Optional graph-cap controls from YAML:
         #   model.allegro.max_edge_multiplier: float (default 1.25)
         #   model.allegro.max_edges: int (default None -> inferred)
-        self.max_edge_multiplier = float(self.allegro_config.pop("max_edge_multiplier", 1.25))
+        self.max_edge_multiplier = float(self.allegro_config.pop("max_edge_multiplier", 1.1))
         max_edges_cfg = self.allegro_config.pop("max_edges", None)
         self.max_edges = None if max_edges_cfg is None else int(max_edges_cfg)
         n_atoms = int(R0_safe.shape[0])
-        valid_neighbor_slots = (self.nbrs_init.idx >= 0) & (self.nbrs_init.idx < n_atoms)
-        actual_avg_neighbors = float(jnp.mean(jnp.sum(valid_neighbor_slots, axis=-1).astype(jnp.float32)))
+        actual_avg_neighbors = compute_avg_num_neighbors(self.nbrs_init, n_atoms)
         config_avg = self.allegro_config.get("avg_num_neighbors", 12)
         if abs(actual_avg_neighbors - config_avg) > 2.0:
             model_logger.warning(
@@ -190,7 +221,11 @@ class AllegroModel:
 
         # Determine number of species
         species_safe = jnp.where(species_arr >= 0, species_arr, 0).astype(jnp.int32)
-        self.n_species = int(jnp.max(species_safe)) + 1
+        n_species_data = int(jnp.max(species_safe)) + 1
+        if n_species_override is not None:
+            self.n_species = max(n_species_data, int(n_species_override))
+        else:
+            self.n_species = n_species_data
 
         model_logger.info(f"Detected {self.n_species} unique species")
         model_logger.info(f"Using Allegro config size: {allegro_size}")
@@ -326,6 +361,37 @@ class AllegroModel:
         species_masked = jnp.where(valid_mask, species, 0).astype(jnp.int32)
         # Keep model input in compute precision while leaving neighbor indices untouched.
         R_model = jnp.asarray(R_masked, dtype=self.compute_dtype)
+        if self._debug_shape_trace and self._shape_trace_budget[0] > 0:
+            self._shape_trace_budget[0] -= 1
+            idx = nbrs.idx
+            n_atoms = R_model.shape[0]
+            if idx.ndim == 2 and idx.shape[0] == 2:
+                senders, receivers = idx[0], idx[1]
+                valid_edges = (
+                    (senders >= 0)
+                    & (senders < n_atoms)
+                    & (receivers >= 0)
+                    & (receivers < n_atoms)
+                )
+                edge_slots = int(idx.shape[1])
+                valid_edges_count = jnp.sum(valid_edges.astype(jnp.int32))
+                fmt = "sparse"
+            else:
+                valid_edges = (idx >= 0) & (idx < n_atoms)
+                edge_slots = int(idx.size)
+                valid_edges_count = jnp.sum(valid_edges.astype(jnp.int32))
+                fmt = "dense"
+
+            jax.debug.print(
+                "[ShapeTrace][allegro] nbr_fmt={} idx_shape={} valid_atoms={} edge_slots={} valid_edges={} R_shape={} mask_shape={}",
+                fmt,
+                idx.shape,
+                jnp.sum(valid_mask.astype(jnp.int32)),
+                edge_slots,
+                valid_edges_count,
+                R_model.shape,
+                valid_mask.shape,
+            )
 
         # Compute energy
         E_allegro = self._apply_allegro_for_training(
@@ -373,6 +439,138 @@ class AllegroModel:
     def initial_neighbors(self) -> Any:
         """Get initial neighbor list for training setup."""
         return self.nbrs_init
+
+    def summarize_neighborlist(self, nbrs: Any, valid_mask: jax.Array) -> dict[str, Any]:
+        """
+        Return host-side capacity/occupancy statistics for dense or sparse lists.
+
+        Args:
+            nbrs: NeighborList object.
+            valid_mask: Boolean/0-1 mask for real particles, shape (N,).
+        """
+        idx = np.asarray(jax.device_get(nbrs.idx))
+        valid = np.asarray(jax.device_get(valid_mask), dtype=bool)
+        n_atoms = int(valid.shape[0])
+
+        meta = {
+            "error": self._meta_to_string(getattr(nbrs, "error", None)),
+            "did_buffer_overflow": self._meta_to_string(
+                getattr(nbrs, "did_buffer_overflow", None)
+            ),
+            "overflow": self._meta_to_string(getattr(nbrs, "overflow", None)),
+        }
+
+        is_sparse = bool(idx.ndim == 2 and idx.shape[0] == 2)
+        if is_sparse:
+            senders, receivers = idx[0], idx[1]
+            in_range = (
+                (senders >= 0) & (senders < n_atoms) &
+                (receivers >= 0) & (receivers < n_atoms)
+            )
+            senders_safe = np.where(in_range, senders, 0)
+            receivers_safe = np.where(in_range, receivers, 0)
+            valid_edges = (
+                in_range &
+                valid[senders_safe] &
+                valid[receivers_safe]
+            )
+            e_valid = int(np.sum(valid_edges, dtype=np.int64))
+            e_capacity = int(idx.shape[1])
+            util = float(e_valid / max(e_capacity, 1))
+            return {
+                "format": "sparse",
+                "idx_shape": tuple(int(x) for x in idx.shape),
+                "n_atoms": n_atoms,
+                "capacity": e_capacity,
+                "e_valid": e_valid,
+                "utilization": util,
+                **meta,
+            }
+
+        in_range = (idx >= 0) & (idx < n_atoms)
+        idx_safe = np.where(in_range, idx, 0)
+        center_valid = valid[:, None]
+        neighbor_valid = valid[idx_safe]
+        valid_entries = in_range & center_valid & neighbor_valid
+        per_node = np.sum(valid_entries, axis=-1, dtype=np.int64)
+        m_slots = int(idx.shape[1]) if idx.ndim >= 2 else int(idx.size)
+        max_neighbors = int(np.max(per_node, initial=0))
+        mean_neighbors = float(np.mean(per_node)) if per_node.size > 0 else 0.0
+        util = float(max_neighbors / max(m_slots, 1))
+        return {
+            "format": "dense",
+            "idx_shape": tuple(int(x) for x in idx.shape),
+            "n_atoms": n_atoms,
+            "capacity": m_slots,
+            "max_neighbors": max_neighbors,
+            "mean_neighbors": mean_neighbors,
+            "utilization": util,
+            **meta,
+        }
+
+    @staticmethod
+    def _meta_to_string(value: Any) -> str:
+        """Convert neighbor-list metadata values (possibly device arrays) to text."""
+        if value is None:
+            return "None"
+        try:
+            value_host = jax.device_get(value)
+            arr = np.asarray(value_host)
+            if arr.shape == ():
+                return str(arr.item())
+            return str(arr)
+        except Exception:
+            return str(value)
+
+    def _log_initial_neighbor_debug(self, nbrs: Any, R0_safe: jax.Array) -> None:
+        """One-time init log: capacity, occupancy and overflow metadata."""
+        if not self._neighbor_debug_enabled:
+            return
+        if self._neighbor_debug_rank0_only and jax.process_index() != 0:
+            return
+        n_atoms = int(R0_safe.shape[0])
+        init_valid_mask = jnp.ones((n_atoms,), dtype=jnp.bool_)
+        stats = self.summarize_neighborlist(nbrs, init_valid_mask)
+        cap_mult = getattr(self.nneigh_fn, "capacity_multiplier", "jax_md_default")
+
+        if stats["format"] == "dense":
+            model_logger.info(
+                "[NeighborDebug][init][dense] N_max=%d idx_shape=%s M_slots=%d "
+                "max_neighbors=%d mean_neighbors=%.2f util_max=%.3f "
+                "error=%s did_buffer_overflow=%s overflow=%s",
+                stats["n_atoms"],
+                stats["idx_shape"],
+                stats["capacity"],
+                stats["max_neighbors"],
+                stats["mean_neighbors"],
+                stats["utilization"],
+                stats["error"],
+                stats["did_buffer_overflow"],
+                stats["overflow"],
+            )
+        else:
+            model_logger.info(
+                "[NeighborDebug][init][sparse] N_max=%d idx_shape=%s E_capacity=%d "
+                "E_valid=%d util=%.3f error=%s did_buffer_overflow=%s overflow=%s",
+                stats["n_atoms"],
+                stats["idx_shape"],
+                stats["capacity"],
+                stats["e_valid"],
+                stats["utilization"],
+                stats["error"],
+                stats["did_buffer_overflow"],
+                stats["overflow"],
+            )
+
+        model_logger.info(
+            "[NeighborDebug][init][params] format=%s extra_capacity=%d "
+            "capacity_multiplier=%s cutoff=%.3f dr_threshold=%.3f",
+            self.neighbor_list_format_name,
+            self._neighbor_extra_capacity,
+            cap_mult,
+            float(self.cutoff),
+            float(self.dr_threshold),
+        )
 
     def __repr__(self) -> str:
         return (

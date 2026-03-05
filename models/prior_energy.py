@@ -20,7 +20,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from pathlib import Path
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, Any
 from .topology import TopologyBuilder
 from .spline_eval import (
     evaluate_cubic_spline,
@@ -100,6 +100,257 @@ def _safe_norm_bwd(res, g):
 
 
 _safe_norm.defvjp(_safe_norm_fwd, _safe_norm_bwd)
+
+
+_GROUP_INDEX = {
+    "POSITIVE": 0,
+    "NEGATIVE": 1,
+    "POLAR_UNCHARGED": 2,
+    "NONPOLAR": 3,
+}
+_DEFAULT_GROUP_ORDER = ["POSITIVE", "NEGATIVE", "POLAR_UNCHARGED", "NONPOLAR"]
+
+_AA_POSITIVE = {"LYS", "ARG", "HSP"}
+_AA_NEGATIVE = {"ASP", "GLU"}
+_AA_POLAR_UNCHARGED = {"SER", "THR", "ASN", "GLN", "TYR", "CYS", "HIS", "HSD", "HSE"}
+_AA_NONPOLAR = {"ALA", "VAL", "LEU", "ILE", "MET", "PHE", "TRP", "PRO", "GLY"}
+_AA_KNOWN = _AA_POSITIVE | _AA_NEGATIVE | _AA_POLAR_UNCHARGED | _AA_NONPOLAR
+
+
+def _normalize_resname(value: Any) -> str:
+    """Normalize residue name values from NPZ metadata."""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="ignore")
+    return str(value).strip().upper()
+
+
+def _empty_pairs() -> jax.Array:
+    """Return an empty pair array with stable shape/dtype."""
+    return jnp.zeros((0, 2), dtype=jnp.int32)
+
+
+def _build_local_sequence_pairs(n_atoms: int, max_sep: int, min_sep: int = 1) -> jax.Array:
+    """Build explicit local sequence pairs (i, i+s) for min_sep <= s <= max_sep."""
+    if n_atoms <= 1 or max_sep < min_sep:
+        return _empty_pairs()
+
+    pairs = []
+    for sep in range(min_sep, max_sep + 1):
+        for i in range(0, n_atoms - sep):
+            pairs.append((i, i + sep))
+
+    if not pairs:
+        return _empty_pairs()
+    return jnp.asarray(np.asarray(pairs, dtype=np.int32))
+
+
+def _pair_sequence_separations(pairs: jax.Array) -> jax.Array:
+    """Compute |i-j| for each pair index."""
+    if pairs.shape[0] == 0:
+        return jnp.zeros((0,), dtype=jnp.int32)
+    return jnp.abs(pairs[:, 1] - pairs[:, 0]).astype(jnp.int32)
+
+
+def _filter_pairs_by_min_sep(pairs: jax.Array, min_sep: int) -> jax.Array:
+    """Filter pair array by minimum sequence separation."""
+    if pairs.shape[0] == 0:
+        return pairs
+    arr = np.asarray(pairs, dtype=np.int32)
+    sep = np.abs(arr[:, 1] - arr[:, 0])
+    keep = sep >= int(min_sep)
+    if not np.any(keep):
+        return _empty_pairs()
+    return jnp.asarray(arr[keep], dtype=jnp.int32)
+
+
+def _concat_pairs(a: jax.Array, b: jax.Array) -> jax.Array:
+    """Concatenate two pair arrays while preserving empty-array behavior."""
+    if a.shape[0] == 0:
+        return b
+    if b.shape[0] == 0:
+        return a
+    return jnp.concatenate([a, b], axis=0)
+
+
+def _build_charge_and_group_by_species(
+    id_to_aa: Dict[int, str], his_charge: float
+) -> Tuple[jax.Array, jax.Array]:
+    """
+    Build species-indexed charge and group lookup arrays from dataset AA mapping.
+    """
+    if not id_to_aa:
+        raise ValueError("id_to_aa mapping is required for typed prior terms.")
+
+    species_ids = sorted(int(k) for k in id_to_aa.keys())
+    max_sid = int(max(species_ids))
+
+    charge = np.zeros((max_sid + 1,), dtype=np.float32)
+    group = np.full((max_sid + 1,), _GROUP_INDEX["NONPOLAR"], dtype=np.int32)
+
+    for sid in species_ids:
+        aa = _normalize_resname(id_to_aa[sid])
+
+        # Group assignment
+        if aa in _AA_POSITIVE:
+            group[sid] = _GROUP_INDEX["POSITIVE"]
+        elif aa in _AA_NEGATIVE:
+            group[sid] = _GROUP_INDEX["NEGATIVE"]
+        elif aa in _AA_POLAR_UNCHARGED:
+            group[sid] = _GROUP_INDEX["POLAR_UNCHARGED"]
+        elif aa in _AA_NONPOLAR:
+            group[sid] = _GROUP_INDEX["NONPOLAR"]
+        else:
+            group[sid] = _GROUP_INDEX["NONPOLAR"]
+            model_logger.warning(
+                f"Unknown residue '{aa}' for species {sid}; defaulting group to NONPOLAR and charge to 0."
+            )
+
+        # Charge assignment
+        if aa in {"LYS", "ARG", "HSP"}:
+            charge[sid] = 1.0
+        elif aa in {"ASP", "GLU"}:
+            charge[sid] = -1.0
+        elif aa in {"HSD", "HSE"}:
+            charge[sid] = 0.0
+        elif aa == "HIS":
+            charge[sid] = float(his_charge)
+        else:
+            charge[sid] = 0.0
+
+    return jnp.asarray(charge, dtype=jnp.float32), jnp.asarray(group, dtype=jnp.int32)
+
+
+def _lookup_by_species(species: jax.Array, table: jax.Array) -> jax.Array:
+    """Safe species lookup with clipping to valid table indices."""
+    idx = jnp.clip(species.astype(jnp.int32), 0, table.shape[0] - 1)
+    return table[idx]
+
+
+def _stickiness_alpha_from_free(
+    stick_s_free: jax.Array,
+    nonref_group_indices: jax.Array,
+    reference_group_idx: int,
+    n_groups: int = 4,
+) -> jax.Array:
+    """
+    Build full alpha vector from unconstrained free parameters using softplus.
+    """
+    free = jnp.ravel(stick_s_free)
+    alpha = jnp.ones((n_groups,), dtype=free.dtype)
+    alpha = alpha.at[nonref_group_indices].set(jax.nn.softplus(free))
+    alpha = alpha.at[reference_group_idx].set(jnp.array(1.0, dtype=free.dtype))
+    return alpha
+
+
+def compute_dh_energy(
+    R: jax.Array,
+    mask: jax.Array,
+    species: jax.Array,
+    pairs: jax.Array,
+    seq_sep: jax.Array,
+    charge_by_species: jax.Array,
+    k_dh: jax.Array,
+    lambda_d: jax.Array,
+    w_by_sep: jax.Array,
+) -> jax.Array:
+    """Debye-Huckel energy over a pair set."""
+    if pairs.shape[0] == 0:
+        return jnp.array(0.0, dtype=R.dtype)
+
+    pi, pj = pairs[:, 0], pairs[:, 1]
+    valid = (mask[pi] * mask[pj]) > 0
+
+    dR = R[pi] - R[pj]
+    r = _safe_norm(dR)
+    r = jnp.where(valid, r, jax.lax.stop_gradient(r))
+    r_safe = jnp.maximum(jnp.where(valid, r, 1e6), jnp.array(1e-3, dtype=R.dtype))
+
+    q_i = _lookup_by_species(species[pi], charge_by_species).astype(R.dtype)
+    q_j = _lookup_by_species(species[pj], charge_by_species).astype(R.dtype)
+
+    w = jnp.ravel(jnp.asarray(w_by_sep, dtype=R.dtype))
+    if w.size == 0:
+        w = jnp.asarray([0.0], dtype=R.dtype)
+    sep_idx = jnp.clip(seq_sep.astype(jnp.int32), 0, w.shape[0] - 1)
+    w_sep = w[sep_idx]
+
+    k_dh = jnp.asarray(k_dh, dtype=R.dtype)
+    lambda_safe = jnp.maximum(jnp.asarray(lambda_d, dtype=R.dtype), jnp.array(1e-6, dtype=R.dtype))
+    term = k_dh * q_i * q_j * jnp.exp(-r_safe / lambda_safe) / r_safe
+    return jnp.sum(jnp.where(valid, term * w_sep, 0.0))
+
+
+def compute_stickiness_energy(
+    R: jax.Array,
+    mask: jax.Array,
+    species: jax.Array,
+    pairs: jax.Array,
+    group_by_species: jax.Array,
+    alpha: jax.Array,
+    r0: jax.Array,
+    sigma: jax.Array,
+) -> jax.Array:
+    """Typed nonbonded stickiness energy over a pair set."""
+    if pairs.shape[0] == 0:
+        return jnp.array(0.0, dtype=R.dtype)
+
+    pi, pj = pairs[:, 0], pairs[:, 1]
+    valid = (mask[pi] * mask[pj]) > 0
+
+    dR = R[pi] - R[pj]
+    r = _safe_norm(dR)
+    r = jnp.where(valid, r, jax.lax.stop_gradient(r))
+    r_eval = jnp.where(valid, r, 1e6)
+
+    t_i = _lookup_by_species(species[pi], group_by_species).astype(jnp.int32)
+    t_j = _lookup_by_species(species[pj], group_by_species).astype(jnp.int32)
+
+    alpha_i = alpha[jnp.clip(t_i, 0, alpha.shape[0] - 1)].astype(R.dtype)
+    alpha_j = alpha[jnp.clip(t_j, 0, alpha.shape[0] - 1)].astype(R.dtype)
+
+    r0 = jnp.asarray(r0, dtype=R.dtype)
+    sigma = jnp.maximum(jnp.asarray(sigma, dtype=R.dtype), jnp.array(1e-6, dtype=R.dtype))
+    phi = -jnp.exp(-0.5 * ((r_eval - r0) / sigma) ** 2)
+
+    term = alpha_i * alpha_j * phi
+    return jnp.sum(jnp.where(valid, term, 0.0))
+
+
+def compute_salt_bridge_energy(
+    R: jax.Array,
+    mask: jax.Array,
+    species: jax.Array,
+    pairs: jax.Array,
+    charge_by_species: jax.Array,
+    delta_sb: jax.Array,
+    r0_sb: jax.Array,
+    sigma_sb: jax.Array,
+) -> jax.Array:
+    """Short-range salt-bridge correction for opposite-charge pairs."""
+    if pairs.shape[0] == 0:
+        return jnp.array(0.0, dtype=R.dtype)
+
+    pi, pj = pairs[:, 0], pairs[:, 1]
+    valid = (mask[pi] * mask[pj]) > 0
+
+    dR = R[pi] - R[pj]
+    r = _safe_norm(dR)
+    r = jnp.where(valid, r, jax.lax.stop_gradient(r))
+    r_eval = jnp.where(valid, r, 1e6)
+
+    q_i = _lookup_by_species(species[pi], charge_by_species).astype(R.dtype)
+    q_j = _lookup_by_species(species[pj], charge_by_species).astype(R.dtype)
+    opposite = (q_i * q_j) == jnp.array(-1.0, dtype=R.dtype)
+
+    r0_sb = jnp.asarray(r0_sb, dtype=R.dtype)
+    sigma_sb = jnp.maximum(jnp.asarray(sigma_sb, dtype=R.dtype), jnp.array(1e-6, dtype=R.dtype))
+    # Positive short-range shape; attraction/repulsion controlled by delta_sb sign.
+    psi = jnp.exp(-0.5 * ((r_eval - r0_sb) / sigma_sb) ** 2)
+    delta_sb = jnp.asarray(delta_sb, dtype=R.dtype)
+
+    term = delta_sb * psi
+    keep = valid & opposite
+    return jnp.sum(jnp.where(keep, term, 0.0))
 
 
 def _angular_fourier_energy(theta: jax.Array, a: jax.Array, b: jax.Array) -> jax.Array:
@@ -246,7 +497,13 @@ class PriorEnergy:
         >>> total = prior.compute_total_energy(R, mask)
     """
 
-    def __init__(self, config, topology: TopologyBuilder, displacement):
+    def __init__(
+        self,
+        config,
+        topology: TopologyBuilder,
+        displacement,
+        id_to_aa: Optional[Dict[int, str]] = None,
+    ):
         """
         Initialize prior energy model.
 
@@ -266,6 +523,9 @@ class PriorEnergy:
             "repulsive": 0.25,
             "dihedral": 0.15,
             "excluded_volume": 1.0,
+            "dh": 0.0,
+            "stickiness": 0.0,
+            "salt_bridge": 0.0,
         })
 
         # Get topology
@@ -275,6 +535,7 @@ class PriorEnergy:
         # Excluded volume pairs: residues at sequence separation 2-5
         # (not covered by bonds/angles/dihedrals or the long-range repulsion)
         self.excluded_vol_pairs = topology.get_excluded_volume_pairs(min_sep=2, max_sep=5)
+        self._init_typed_interaction_metadata(config, id_to_aa)
 
         # Check for spline-based priors.
         # New path: explicit boolean gate in config.
@@ -292,6 +553,152 @@ class PriorEnergy:
             self._init_spline_priors(spline_path, config)
         else:
             self._init_parametric_priors(config)
+
+    def _init_typed_interaction_metadata(
+        self, config, id_to_aa: Optional[Dict[int, str]]
+    ) -> None:
+        """Initialize metadata and pair sets for typed prior terms."""
+        prior_cfg = config.get("model", "priors", default={}) or {}
+        if not isinstance(prior_cfg, dict):
+            prior_cfg = {}
+
+        aa_typing_cfg = prior_cfg.get("aa_typing", {})
+        if not isinstance(aa_typing_cfg, dict):
+            aa_typing_cfg = {}
+
+        self.aa_typing_source = str(aa_typing_cfg.get("source", "dataset_map")).strip().lower()
+        self.his_charge = float(aa_typing_cfg.get("his_charge", 0.0))
+
+        group_order = aa_typing_cfg.get("group_order", _DEFAULT_GROUP_ORDER)
+        if not isinstance(group_order, (list, tuple)) or len(group_order) != 4:
+            model_logger.warning(
+                "model.priors.aa_typing.group_order is invalid; falling back to default order."
+            )
+            group_order = list(_DEFAULT_GROUP_ORDER)
+        group_order = [str(x).strip().upper() for x in group_order]
+        if set(group_order) != set(_DEFAULT_GROUP_ORDER):
+            model_logger.warning(
+                "model.priors.aa_typing.group_order does not contain the required 4 groups; "
+                "falling back to default order."
+            )
+            group_order = list(_DEFAULT_GROUP_ORDER)
+        self.group_order = group_order
+
+        ref_group_name = str(
+            aa_typing_cfg.get("stickiness_reference_group", "POLAR_UNCHARGED")
+        ).strip().upper()
+        if ref_group_name not in self.group_order:
+            model_logger.warning(
+                f"stickiness_reference_group='{ref_group_name}' not in group_order; "
+                "falling back to POLAR_UNCHARGED."
+            )
+            ref_group_name = "POLAR_UNCHARGED"
+        self.stick_reference_group_name = ref_group_name
+        self.stick_reference_group_idx = int(self.group_order.index(ref_group_name))
+        self.stick_nonref_group_indices = jnp.asarray(
+            [i for i in range(4) if i != self.stick_reference_group_idx],
+            dtype=jnp.int32,
+        )
+
+        dh_cfg = prior_cfg.get("dh", {})
+        if not isinstance(dh_cfg, dict):
+            dh_cfg = {}
+        stick_cfg = prior_cfg.get("stickiness", {})
+        if not isinstance(stick_cfg, dict):
+            stick_cfg = {}
+        sb_cfg = prior_cfg.get("salt_bridge", {})
+        if not isinstance(sb_cfg, dict):
+            sb_cfg = {}
+
+        self.dh_enabled = bool(dh_cfg.get("enabled", False))
+        self.dh_mode = str(dh_cfg.get("mode", "local_k")).strip().lower()
+        self.dh_K = max(0, int(dh_cfg.get("K", 2)))
+
+        self.stickiness_enabled = bool(stick_cfg.get("enabled", False))
+        self.stickiness_min_seq_sep = max(1, int(stick_cfg.get("min_seq_sep", 3)))
+
+        self.salt_bridge_enabled = bool(sb_cfg.get("enabled", False))
+        self.salt_bridge_min_seq_sep = max(1, int(sb_cfg.get("min_seq_sep", 3)))
+
+        self.dh_local_pairs = _build_local_sequence_pairs(
+            self.topology.N_max, max_sep=self.dh_K, min_sep=1
+        )
+        self.dh_local_seq_sep = _pair_sequence_separations(self.dh_local_pairs)
+
+        nb_ex = _filter_pairs_by_min_sep(self.excluded_vol_pairs, min_sep=3)
+        self.nb_pairs_for_stick_sb = _concat_pairs(nb_ex, self.rep_pairs)
+        self.nb_pairs_seq_sep = _pair_sequence_separations(self.nb_pairs_for_stick_sb)
+
+        self.stickiness_pairs = _filter_pairs_by_min_sep(
+            self.nb_pairs_for_stick_sb, self.stickiness_min_seq_sep
+        )
+        self.stickiness_pair_seq_sep = _pair_sequence_separations(self.stickiness_pairs)
+
+        self.salt_bridge_pairs = _filter_pairs_by_min_sep(
+            self.nb_pairs_for_stick_sb, self.salt_bridge_min_seq_sep
+        )
+        self.salt_bridge_pair_seq_sep = _pair_sequence_separations(self.salt_bridge_pairs)
+
+        self.typed_terms_enabled = (
+            self.dh_enabled or self.stickiness_enabled or self.salt_bridge_enabled
+        )
+
+        if self.typed_terms_enabled:
+            if self.aa_typing_source != "dataset_map":
+                raise ValueError(
+                    "Only model.priors.aa_typing.source='dataset_map' is supported for typed priors."
+                )
+            if not id_to_aa:
+                raise ValueError(
+                    "Typed prior terms are enabled but dataset AA mapping (id_to_aa) is missing. "
+                    "Disable typed terms or provide id_to_aa via DatasetLoader metadata."
+                )
+            self.charge_by_species, self.group_by_species = _build_charge_and_group_by_species(
+                id_to_aa, his_charge=self.his_charge
+            )
+        else:
+            self.charge_by_species = jnp.zeros((1,), dtype=jnp.float32)
+            self.group_by_species = jnp.full((1,), _GROUP_INDEX["NONPOLAR"], dtype=jnp.int32)
+
+    def _init_new_term_params(self, prior_params: Dict[str, Any]) -> Dict[str, jax.Array]:
+        """Initialize DH/stickiness/salt-bridge parameter block."""
+        dh_cfg = prior_params.get("dh", {})
+        if not isinstance(dh_cfg, dict):
+            dh_cfg = {}
+        stick_cfg = prior_params.get("stickiness", {})
+        if not isinstance(stick_cfg, dict):
+            stick_cfg = {}
+        sb_cfg = prior_params.get("salt_bridge", {})
+        if not isinstance(sb_cfg, dict):
+            sb_cfg = {}
+
+        w_by_sep = jnp.ravel(
+            jnp.asarray(dh_cfg.get("w_by_sep", [0.0, 1.0, 0.1]), dtype=jnp.float32)
+        )
+        if w_by_sep.size == 0:
+            w_by_sep = jnp.asarray([0.0], dtype=jnp.float32)
+
+        s_free = jnp.ravel(
+            jnp.asarray(stick_cfg.get("s_free_init", [0.0, 0.0, 0.0]), dtype=jnp.float32)
+        )
+        expected = int(self.stick_nonref_group_indices.shape[0])
+        if s_free.shape[0] != expected:
+            raise ValueError(
+                f"model.priors.stickiness.s_free_init must have length {expected} "
+                f"(one free parameter per non-reference group), got {s_free.shape[0]}."
+            )
+
+        return {
+            "k_DH": jnp.asarray(dh_cfg.get("k_DH", 1.0), dtype=jnp.float32),
+            "lambda_D": jnp.asarray(dh_cfg.get("lambda_D", 8.0), dtype=jnp.float32),
+            "dh_w_by_sep": w_by_sep,
+            "stick_r0": jnp.asarray(stick_cfg.get("r0", 3.8), dtype=jnp.float32),
+            "stick_sigma": jnp.asarray(stick_cfg.get("sigma", 0.4), dtype=jnp.float32),
+            "stick_s_free": s_free,
+            "salt_delta": jnp.asarray(sb_cfg.get("delta", -0.5), dtype=jnp.float32),
+            "salt_r0": jnp.asarray(sb_cfg.get("r0", 3.8), dtype=jnp.float32),
+            "salt_sigma": jnp.asarray(sb_cfg.get("sigma", 0.3), dtype=jnp.float32),
+        }
 
     def _init_spline_priors(self, spline_path: str, config):
         """Initialize spline-based priors from NPZ file."""
@@ -364,6 +771,7 @@ class PriorEnergy:
             "epsilon_ex": jnp.asarray(prior_params.get("epsilon_ex", 1.0), dtype=jnp.float32),
             "sigma_ex": jnp.asarray(prior_params.get("sigma_ex", 3.5), dtype=jnp.float32),
         }
+        self.params.update(self._init_new_term_params(prior_params))
 
         model_logger.info("Spline priors loaded: bond, angle, dihedral (repulsive stays parametric)")
 
@@ -386,6 +794,7 @@ class PriorEnergy:
             "epsilon_ex": jnp.asarray(prior_params.get("epsilon_ex", 1.0), dtype=jnp.float32),
             "sigma_ex": jnp.asarray(prior_params.get("sigma_ex", 3.5), dtype=jnp.float32),
         }
+        self.params.update(self._init_new_term_params(prior_params))
 
     def compute_bond_energy(
         self,
@@ -587,6 +996,93 @@ class PriorEnergy:
 
         return E_ex
 
+    def compute_dh_energy(
+        self,
+        R: jax.Array,
+        mask: jax.Array,
+        species: Optional[jax.Array] = None,
+        params: Optional[Dict[str, jax.Array]] = None,
+    ) -> jax.Array:
+        """Compute Debye-Huckel energy for configured local sequence pairs."""
+        if not self.dh_enabled:
+            return jnp.array(0.0, dtype=R.dtype)
+        if species is None:
+            raise ValueError("DH prior term is enabled but species was not provided.")
+        if self.dh_mode != "local_k":
+            raise ValueError(
+                f"Unsupported model.priors.dh.mode='{self.dh_mode}'. "
+                "Only 'local_k' is currently implemented."
+            )
+
+        p = params if params is not None else self.params
+        return compute_dh_energy(
+            R=R,
+            mask=mask,
+            species=species,
+            pairs=self.dh_local_pairs,
+            seq_sep=self.dh_local_seq_sep,
+            charge_by_species=self.charge_by_species,
+            k_dh=p["k_DH"],
+            lambda_d=p["lambda_D"],
+            w_by_sep=p["dh_w_by_sep"],
+        )
+
+    def compute_stickiness_energy(
+        self,
+        R: jax.Array,
+        mask: jax.Array,
+        species: Optional[jax.Array] = None,
+        params: Optional[Dict[str, jax.Array]] = None,
+    ) -> jax.Array:
+        """Compute typed nonbonded stickiness energy."""
+        if not self.stickiness_enabled:
+            return jnp.array(0.0, dtype=R.dtype)
+        if species is None:
+            raise ValueError("Stickiness prior term is enabled but species was not provided.")
+
+        p = params if params is not None else self.params
+        alpha = _stickiness_alpha_from_free(
+            p["stick_s_free"],
+            nonref_group_indices=self.stick_nonref_group_indices,
+            reference_group_idx=self.stick_reference_group_idx,
+            n_groups=4,
+        )
+        return compute_stickiness_energy(
+            R=R,
+            mask=mask,
+            species=species,
+            pairs=self.stickiness_pairs,
+            group_by_species=self.group_by_species,
+            alpha=alpha,
+            r0=p["stick_r0"],
+            sigma=p["stick_sigma"],
+        )
+
+    def compute_salt_bridge_energy(
+        self,
+        R: jax.Array,
+        mask: jax.Array,
+        species: Optional[jax.Array] = None,
+        params: Optional[Dict[str, jax.Array]] = None,
+    ) -> jax.Array:
+        """Compute short-range salt-bridge correction energy."""
+        if not self.salt_bridge_enabled:
+            return jnp.array(0.0, dtype=R.dtype)
+        if species is None:
+            raise ValueError("Salt-bridge prior term is enabled but species was not provided.")
+
+        p = params if params is not None else self.params
+        return compute_salt_bridge_energy(
+            R=R,
+            mask=mask,
+            species=species,
+            pairs=self.salt_bridge_pairs,
+            charge_by_species=self.charge_by_species,
+            delta_sb=p["salt_delta"],
+            r0_sb=p["salt_r0"],
+            sigma_sb=p["salt_sigma"],
+        )
+
     def compute_dihedral_energy(
         self,
         R: jax.Array,
@@ -657,6 +1153,10 @@ class PriorEnergy:
                 - E_angle: Angle bending energy (WEIGHTED)
                 - E_repulsive: Repulsive interaction energy (WEIGHTED)
                 - E_dihedral: Dihedral torsion energy (WEIGHTED)
+                - E_excluded_volume: Nearby-separation excluded volume (WEIGHTED)
+                - E_dh: Debye-Huckel term (WEIGHTED)
+                - E_stickiness: Typed stickiness term (WEIGHTED)
+                - E_salt_bridge: Salt-bridge correction term (WEIGHTED)
                 - E_total: Sum of all weighted components
         """
         # Compute raw energies
@@ -666,6 +1166,9 @@ class PriorEnergy:
         E_rep_raw = self.compute_repulsive_energy(R, mask, params=p)
         E_dih_raw = self.compute_dihedral_energy(R, mask, params=p)
         E_ex_raw = self.compute_excluded_volume_energy(R, mask, params=p)
+        E_dh_raw = self.compute_dh_energy(R, mask, species=species, params=p)
+        E_stick_raw = self.compute_stickiness_energy(R, mask, species=species, params=p)
+        E_sb_raw = self.compute_salt_bridge_energy(R, mask, species=species, params=p)
 
         # Apply weights
         E_bond = self.weights["bond"] * E_bond_raw
@@ -673,8 +1176,11 @@ class PriorEnergy:
         E_rep = self.weights["repulsive"] * E_rep_raw
         E_dih = self.weights["dihedral"] * E_dih_raw
         E_ex = self.weights.get("excluded_volume", 1.0) * E_ex_raw
+        E_dh = self.weights.get("dh", 0.0) * E_dh_raw
+        E_stick = self.weights.get("stickiness", 0.0) * E_stick_raw
+        E_sb = self.weights.get("salt_bridge", 0.0) * E_sb_raw
 
-        E_total = E_bond + E_angle + E_rep + E_dih + E_ex
+        E_total = E_bond + E_angle + E_rep + E_dih + E_ex + E_dh + E_stick + E_sb
 
         return {
             "E_bond": E_bond,
@@ -682,6 +1188,9 @@ class PriorEnergy:
             "E_repulsive": E_rep,
             "E_dihedral": E_dih,
             "E_excluded_volume": E_ex,
+            "E_dh": E_dh,
+            "E_stickiness": E_stick,
+            "E_salt_bridge": E_sb,
             "E_total": E_total,
         }
 

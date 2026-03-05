@@ -14,6 +14,7 @@ from jax_md import space, partition
 from chemutils.models.painn.model import painn_neighborlist_pp
 from typing import Optional, Tuple, Any
 
+from .neighborlist_utils import resolve_neighbor_list_format
 from utils.logging import model_logger
 
 
@@ -45,7 +46,15 @@ class PaiNNModel:
         >>> energy = model.compute_energy(params, R, mask, species)
     """
 
-    def __init__(self, config, R0: jax.Array, box: jax.Array, species: jax.Array, N_max: int):
+    def __init__(
+        self,
+        config,
+        R0: jax.Array,
+        box: jax.Array,
+        species: jax.Array,
+        N_max: int,
+        n_species_override: Optional[int] = None,
+    ):
         """
         Initialize PaiNN model.
 
@@ -55,6 +64,7 @@ class PaiNNModel:
             box: Simulation box dimensions, shape (3,)
             species: Species IDs for atoms, shape (n_atoms,)
             N_max: Maximum number of atoms
+            n_species_override: Optional global species cardinality override.
         """
         self.config = config
         self.N_max = N_max
@@ -63,6 +73,9 @@ class PaiNNModel:
         # Model parameters from config
         self.cutoff = config.get_cutoff()
         self.dr_threshold = config.get_dr_threshold()
+        self.neighbor_list_format_name, self.neighbor_list_format = resolve_neighbor_list_format(
+            config.get_neighbor_list_format()
+        )
 
         # Get PaiNN hyperparameters
         painn_size = config.get_painn_size()
@@ -82,15 +95,21 @@ class PaiNNModel:
             box=safe_box,
             r_cutoff=self.cutoff,
             dr_threshold=self.dr_threshold,
-            fractional_coordinates=False
+            fractional_coordinates=False,
+            format=self.neighbor_list_format,
         )
+        model_logger.info(f"Neighbor list format: {self.neighbor_list_format_name}")
 
         # Allocate initial neighbor list
         self.nbrs_init = self.nneigh_fn.allocate(R0, extra_capacity=64)
 
         # Determine number of species
-        self.n_species = int(jnp.max(species)) + 1
-        species_safe = jnp.asarray(species, dtype=jnp.int32)
+        species_safe = jnp.where(jnp.asarray(species) >= 0, species, 0).astype(jnp.int32)
+        n_species_data = int(jnp.max(species_safe)) + 1
+        if n_species_override is not None:
+            self.n_species = max(n_species_data, int(n_species_override))
+        else:
+            self.n_species = n_species_data
 
         model_logger.info(f"Detected {self.n_species} unique species")
         model_logger.info(f"Using PaiNN config size: {painn_size}")

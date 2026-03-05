@@ -31,6 +31,7 @@ class CombinedModel:
 
     The ML backbone is selected via config `model.ml_model`:
     - "allegro" (default): Allegro equivariant neural network
+    - "allegro_cueq": Allegro with cuEquivariance backend (faster SH + TP)
     - "mace": MACE equivariant neural network
     - "painn": PaiNN polarizable interaction neural network
 
@@ -43,7 +44,8 @@ class CombinedModel:
     """
 
     def __init__(self, config, R0: jax.Array, box: jax.Array, species: jax.Array, N_max: int,
-                 prior_only: bool = False):
+                 prior_only: bool = False, n_species_override: Optional[int] = None,
+                 id_to_aa: Optional[Dict[int, str]] = None):
         """
         Initialize combined model.
 
@@ -54,6 +56,10 @@ class CombinedModel:
             species: Species IDs, shape (n_atoms,)
             N_max: Maximum number of atoms
             prior_only: If True, skip ML computation entirely (only compute priors)
+            n_species_override: Optional global species cardinality used to
+                force a consistent embedding size across datasets/buckets.
+            id_to_aa: Optional species->resname mapping from dataset metadata,
+                used by typed prior terms (DH/stickiness/salt_bridge).
         """
         self.config = config
         self.N_max = N_max
@@ -70,13 +76,29 @@ class CombinedModel:
         self.ml_model_type = config.get_ml_model_type()
 
         if self.ml_model_type == "mace":
-            self.ml_model = MACEModel(config, R0, box, species, N_max)
+            self.ml_model = MACEModel(
+                config, R0, box, species, N_max,
+                n_species_override=n_species_override
+            )
             model_logger.info("ML backbone: MACE")
         elif self.ml_model_type == "painn":
-            self.ml_model = PaiNNModel(config, R0, box, species, N_max)
+            self.ml_model = PaiNNModel(
+                config, R0, box, species, N_max,
+                n_species_override=n_species_override
+            )
             model_logger.info("ML backbone: PaiNN")
+        elif self.ml_model_type == "allegro_cueq":
+            from .allegro_cueq_model import AllegroModelCuEq  # lazy: requires cuequivariance
+            self.ml_model = AllegroModelCuEq(
+                config, R0, box, species, N_max,
+                n_species_override=n_species_override
+            )
+            model_logger.info("ML backbone: Allegro (cuEquivariance)")
         else:
-            self.ml_model = AllegroModel(config, R0, box, species, N_max)
+            self.ml_model = AllegroModel(
+                config, R0, box, species, N_max,
+                n_species_override=n_species_override
+            )
             model_logger.info("ML backbone: Allegro")
 
         # Backward-compatible alias: existing code references self.allegro
@@ -84,7 +106,9 @@ class CombinedModel:
 
         # Create prior model (if enabled)
         if self.use_priors:
-            self.prior = PriorEnergy(config, self.topology, self.ml_model.displacement)
+            self.prior = PriorEnergy(
+                config, self.topology, self.ml_model.displacement, id_to_aa=id_to_aa
+            )
             model_logger.info(f"Mode: Prior + {self.ml_model_type.upper()}")
             model_logger.info(f"Prior weights: {self.prior.weights}")
         else:
@@ -254,6 +278,9 @@ class CombinedModel:
                 "E_repulsive": prior_components["E_repulsive"],
                 "E_dihedral": prior_components["E_dihedral"],
                 "E_excluded_volume": prior_components["E_excluded_volume"],
+                "E_dh": prior_components.get("E_dh", 0.0),
+                "E_stickiness": prior_components.get("E_stickiness", 0.0),
+                "E_salt_bridge": prior_components.get("E_salt_bridge", 0.0),
                 "E_prior_total": prior_components["E_total"],
             })
             components["E_total"] = E_ml + prior_components["E_total"]

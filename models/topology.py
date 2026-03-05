@@ -11,8 +11,12 @@ Consolidated from:
 
 import jax
 import jax.numpy as jnp
-from typing import Tuple
-from jax_md import partition
+from typing import Tuple, Any
+
+try:
+    from jax_md import partition
+except Exception:  # pragma: no cover - optional dependency in lightweight test envs
+    partition = None
 
 
 def precompute_chain_topology(N_max: int) -> Tuple[jax.Array, jax.Array]:
@@ -102,7 +106,7 @@ def precompute_repulsive_pairs(N_max: int, min_sep: int = 6) -> jax.Array:
     return rep_pairs
 
 
-def filter_neighbors_by_mask(nbrs: partition.NeighborList, mask: jax.Array) -> partition.NeighborList:
+def filter_neighbors_by_mask(nbrs: Any, mask: jax.Array) -> Any:
     """
     Filter neighbor list to exclude padded (masked) atoms.
 

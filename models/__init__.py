@@ -1,17 +1,6 @@
 """Energy models and topology utilities for CG protein simulations."""
 
-from .topology import (
-    TopologyBuilder,
-    precompute_chain_topology,
-    precompute_dihedrals,
-    precompute_repulsive_pairs,
-    filter_neighbors_by_mask,
-)
-from .prior_energy import PriorEnergy
-from .allegro_model import AllegroModel
-from .mace_model import MACEModel
-from .painn_model import PaiNNModel
-from .combined_model import CombinedModel
+from importlib import import_module
 
 __all__ = [
     # Topology
@@ -27,3 +16,28 @@ __all__ = [
     "PaiNNModel",
     "CombinedModel",
 ]
+
+_LAZY_SYMBOLS = {
+    # Topology
+    "TopologyBuilder": ("models.topology", "TopologyBuilder"),
+    "precompute_chain_topology": ("models.topology", "precompute_chain_topology"),
+    "precompute_dihedrals": ("models.topology", "precompute_dihedrals"),
+    "precompute_repulsive_pairs": ("models.topology", "precompute_repulsive_pairs"),
+    "filter_neighbors_by_mask": ("models.topology", "filter_neighbors_by_mask"),
+    # Models
+    "PriorEnergy": ("models.prior_energy", "PriorEnergy"),
+    "AllegroModel": ("models.allegro_model", "AllegroModel"),
+    "MACEModel": ("models.mace_model", "MACEModel"),
+    "PaiNNModel": ("models.painn_model", "PaiNNModel"),
+    "CombinedModel": ("models.combined_model", "CombinedModel"),
+}
+
+
+def __getattr__(name):
+    if name in _LAZY_SYMBOLS:
+        module_name, symbol_name = _LAZY_SYMBOLS[name]
+        module = import_module(module_name)
+        value = getattr(module, symbol_name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module 'models' has no attribute '{name}'")
