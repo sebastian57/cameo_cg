@@ -3,10 +3,6 @@ Dataset Loading for Coarse-Grained Protein Simulations
 
 Loads NPZ datasets with coordinates, forces, species, and masks.
 Handles amino acid to species ID mapping.
-
-Consolidated from:
-- train_fm_multiple_proteins.py
-- compute_single_multi.py
 """
 
 import numpy as np
@@ -14,8 +10,6 @@ import jax
 import jax.numpy as jnp
 from pathlib import Path
 from typing import Dict, Any, Tuple, Optional, Sequence
-from glob import glob
-
 from config.types import PathLike, as_path
 
 

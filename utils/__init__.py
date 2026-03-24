@@ -1,6 +1,4 @@
-"""
-Utility modules for chemtrain clean code base.
-"""
+"""Utility modules for cameo_cg."""
 
 from .logging import (
     setup_logger,
@@ -8,7 +6,13 @@ from .logging import (
     model_logger,
     training_logger,
     export_logger,
-    eval_logger
+    eval_logger,
+    pipeline_logger,
+)
+
+from .jax_setup import (
+    apply_jax_compat_shims,
+    apply_numpy_dataloader_patch,
 )
 
 __all__ = [
@@ -17,5 +21,8 @@ __all__ = [
     "model_logger",
     "training_logger",
     "export_logger",
-    "eval_logger"
+    "eval_logger",
+    "pipeline_logger",
+    "apply_jax_compat_shims",
+    "apply_numpy_dataloader_patch",
 ]

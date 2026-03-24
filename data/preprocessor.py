@@ -4,16 +4,12 @@ Coordinate Preprocessing for CG Protein Simulations
 Handles:
 - Box extent computation based on coordinate range
 - Centering coordinates in simulation box
-- "Parking" padded atoms far from real atoms
-
-Consolidated from:
-- train_fm_multiple_proteins.py
-- compute_single_multi.py
+- Parking padded atoms far from real atoms
 """
 
 import jax
 import jax.numpy as jnp
-from typing import Tuple, Union
+from typing import Tuple
 
 
 class CoordinatePreprocessor:

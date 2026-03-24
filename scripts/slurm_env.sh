@@ -1,0 +1,101 @@
+#!/bin/bash
+# =============================================================================
+# Shared SLURM environment setup — sourced by run_training.sh and other scripts.
+#
+# Expects:
+#   CONFIG_FILE  — path to a YAML config (must be set before sourcing)
+#
+# Exports:
+#   MODEL_TYPE_CANON  — canonical ml_model name (e.g. allegro_cueq_fast)
+#   SELECTED_VENV     — path to the activated virtual environment
+#   PYTHON_BIN        — full path to the python interpreter
+#   CUDA_HOME, LD_LIBRARY_PATH, XLA_FLAGS, NCCL_*, XLA_PYTHON_CLIENT_*
+# =============================================================================
+
+if [[ -z "${CONFIG_FILE:-}" ]]; then
+    echo "ERROR: CONFIG_FILE must be set before sourcing slurm_env.sh" >&2
+    return 1 2>/dev/null || exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Parse ml_model from YAML without Python (awk-based, fast)
+# ---------------------------------------------------------------------------
+MODEL_TYPE="$(
+    awk '
+        /^[[:space:]]*#/ { next }
+        /^[[:space:]]*ml_model:[[:space:]]*/ {
+            line = $0
+            sub(/^[[:space:]]*ml_model:[[:space:]]*/, "", line)
+            sub(/[[:space:]]*#.*/, "", line)
+            gsub(/[[:space:]"]/, "", line)
+            print line
+            exit
+        }
+    ' "${CONFIG_FILE}"
+)"
+
+if [[ -z "${MODEL_TYPE}" ]]; then
+    echo "ERROR: Could not determine model.ml_model from config: ${CONFIG_FILE}" >&2
+    return 1 2>/dev/null || exit 1
+fi
+
+MODEL_TYPE_LOWER="${MODEL_TYPE,,}"
+MODEL_TYPE_CANON="${MODEL_TYPE_LOWER//-/_}"
+export MODEL_TYPE_CANON
+
+# ---------------------------------------------------------------------------
+# Select virtual environment based on model type
+# ---------------------------------------------------------------------------
+if [[ "${MODEL_TYPE_CANON}" == "allegro_cueq"* ]]; then
+    SELECTED_VENV="/p/project1/cameo/schmidt36/env_cueq_allegro_opt"
+    SELECTED_VENV_NAME="env_cueq_allegro_opt"
+else
+    SELECTED_VENV="/p/project1/cameo/schmidt36/clean_booster_env"
+    SELECTED_VENV_NAME="clean_booster_env"
+fi
+export SELECTED_VENV
+
+# ---------------------------------------------------------------------------
+# Load modules and activate environment
+# ---------------------------------------------------------------------------
+source /p/project1/cameo/schmidt36/load_modules.sh
+source "${SELECTED_VENV}/bin/activate"
+source /p/project1/cameo/schmidt36/set_lammps_paths.sh
+
+PYTHON_BIN="$(command -v python)"
+if [[ -z "${PYTHON_BIN}" ]]; then
+    echo "ERROR: No python found after activating ${SELECTED_VENV_NAME}" >&2
+    return 1 2>/dev/null || exit 1
+fi
+export PYTHON_BIN
+
+echo "Selected ml_model: ${MODEL_TYPE_CANON} -> activated ${SELECTED_VENV_NAME}"
+
+# ---------------------------------------------------------------------------
+# Compiler and CUDA setup
+# ---------------------------------------------------------------------------
+export CC="$(which gcc)"
+export CXX="$(which g++)"
+export CLANG_CUDA_COMPILER_PATH="$(which gcc)"
+
+CUDA_ROOT="$("${PYTHON_BIN}" -c 'import os; from jax_plugins import xla_cuda12; print(os.path.dirname(xla_cuda12.__file__))')"
+SITE_PACKAGES="$("${PYTHON_BIN}" -c 'import site; print(site.getsitepackages()[0])')"
+export LD_LIBRARY_PATH="${CUDA_ROOT}:${SITE_PACKAGES}/nvidia/cudnn/lib:${SITE_PACKAGES}/nvidia/cuda_runtime/lib:${SITE_PACKAGES}/nvidia/cublas/lib:${SITE_PACKAGES}/nvidia/cusolver/lib:${LD_LIBRARY_PATH:-}"
+
+export CUDA_HOME=/p/software/juwelsbooster/stages/2025/software/CUDA/12
+export XLA_FLAGS="--xla_gpu_cuda_data_dir=${CUDA_HOME} --xla_gpu_autotune_level=0"
+export ALLEGRO_TP_METHOD_FALLBACK="${ALLEGRO_TP_METHOD_FALLBACK:-naive}"
+
+# ---------------------------------------------------------------------------
+# JAX / XLA / NCCL runtime settings
+# ---------------------------------------------------------------------------
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
+
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES//[[:space:]]/}"
+
+export NCCL_SOCKET_IFNAME=ib0
+export NCCL_DEBUG=WARN
+
+unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy

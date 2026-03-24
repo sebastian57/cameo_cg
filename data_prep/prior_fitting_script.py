@@ -14,14 +14,16 @@ from pathlib import Path
 import argparse
 from typing import Optional, Tuple
 
-# JAX/jax_md compatibility patch (must be before any jax_md imports)
-# jax_md uses jax.random.KeyArray which was removed in newer JAX versions
-import jax
-jax.random.KeyArray = jax.Array
-_to_uncache = [mod for mod in sys.modules if mod.startswith('jax.random')]
-for mod in _to_uncache:
-    del sys.modules[mod]
+# JAX/jax_md compatibility (shared shims)
+_script_dir = Path(__file__).resolve().parent
+_project_root = _script_dir.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
 
+from utils.jax_setup import apply_jax_compat_shims
+apply_jax_compat_shims()
+
+import jax
 from jax_md import space
 
 jax.config.update("jax_enable_x64", False)

@@ -14,6 +14,7 @@ import haiku as hk
 import jax
 import jax.numpy as jnp
 from jax_md import space, partition, util as md_util
+from utils.logging import model_logger
 
 # Resolve helper module paths used by the fast backend implementation.
 # The helper files live in the sibling repository directory:
@@ -735,7 +736,7 @@ class AllegroLayer(hk.Module):
                 
             except Exception as e:
                 if hk.running_init():
-                    print(f"[{self.name}] Failed TP for ({l},{p}): {e}", flush=True)
+                    model_logger.warning(f"[{self.name}] Failed TP for ({l},{p}): {e}")
                 continue
         
         if not results:
@@ -783,10 +784,9 @@ class AllegroLayer(hk.Module):
                 except ValueError as exc:
                     if self.tp_method_fallback == "naive":
                         if hk.running_init():
-                            print(
+                            model_logger.warning(
                                 f"[{self.name}] failed to flatten_modes={requested_modes!r} "
-                                f"({exc}); continuing without flattening.",
-                                flush=True,
+                                f"({exc}); continuing without flattening."
                             )
                         requested_modes = []
                     else:
@@ -804,25 +804,22 @@ class AllegroLayer(hk.Module):
                 applied_flatten_modes = requested_modes
 
         if hk.running_init() and self.print_sp_summary:
-            print(
+            model_logger.info(
                 f"[{self.name}] fused_sp canonicalization: "
-                f"num_operations={len(poly.operations)} method={self.tp_method!r}",
-                flush=True,
+                f"num_operations={len(poly.operations)} method={self.tp_method!r}"
             )
             if applied_flatten_modes is not None:
-                print(
-                    f"[{self.name}] fused_sp flatten_modes={applied_flatten_modes!r}",
-                    flush=True,
+                model_logger.info(
+                    f"[{self.name}] fused_sp flatten_modes={applied_flatten_modes!r}"
                 )
             for entry in op_summary:
-                print(
+                model_logger.info(
                     f"[{self.name}] op={entry['op_idx']} subscripts={entry['subscripts']} "
                     f"num_modes={entry['num_modes']} modes={entry['modes']} "
                     f"num_segments={entry['num_segments']} sizes={entry['sizes']} "
                     f"num_paths={entry['num_paths']} "
                     f"uniform_1d_eligible={entry['uniform_1d_eligible']} "
-                    f"indexed_linear_candidate={entry['indexed_linear_candidate']}",
-                    flush=True,
+                    f"indexed_linear_candidate={entry['indexed_linear_candidate']}"
                 )
 
         requested_method = self.tp_method
@@ -832,10 +829,9 @@ class AllegroLayer(hk.Module):
             if self.tp_method_fallback == "naive":
                 effective_method = "naive"
                 if hk.running_init():
-                    print(
+                    model_logger.warning(
                         f"[{self.name}] method={requested_method!r} is unsupported in this fused_sp "
-                        "path (indices=None); using fallback method='naive'.",
-                        flush=True,
+                        "path (indices=None); using fallback method='naive'."
                     )
             else:
                 raise ValueError(
@@ -849,10 +845,9 @@ class AllegroLayer(hk.Module):
                 if self.tp_method_fallback == "naive":
                     effective_method = "naive"
                     if hk.running_init():
-                        print(
+                        model_logger.warning(
                             f"[{self.name}] method='uniform_1d' requires one-mode canonicalization; "
-                            "descriptor is not eligible, falling back to method='naive'.",
-                            flush=True,
+                            "descriptor is not eligible, falling back to method='naive'."
                         )
                 else:
                     raise ValueError(
@@ -871,11 +866,10 @@ class AllegroLayer(hk.Module):
         except ValueError as exc:
             if self.tp_method_fallback == "naive" and effective_method != "naive":
                 if hk.running_init():
-                    print(
+                    model_logger.warning(
                         f"[{self.name}] tp_method={effective_method!r} unsupported for fused_sp "
                         "descriptor on this platform; falling back to method='naive' "
-                        "(ALLEGRO_TP_METHOD_FALLBACK=naive).",
-                        flush=True,
+                        "(ALLEGRO_TP_METHOD_FALLBACK=naive)."
                     )
                 [out_flat] = cuex.segmented_polynomial(
                     poly,
@@ -968,15 +962,14 @@ class AllegroLayer(hk.Module):
             tp_desc = self._build_tp_descriptor(Y_irreps, V_red_irreps)
 
             if hk.running_init():
-                print(
+                model_logger.info(
                     f"[{self.name}] tp_backend={self.tp_backend!r} "
                     f"tp_mode={self.tp_mode!r} "
                     f"tp_method={self.tp_method!r} "
                     f"tp_fused_flatten_modes={self.tp_fused_flatten_modes!r} "
                     f"tp_batch_strategy={self.tp_batch_strategy!r} "
                     f"tp_left_mode={self.tp_left_mode!r} "
-                    f"tp_left_norm={self.tp_left_norm!r}",
-                    flush=True,
+                    f"tp_left_norm={self.tp_left_norm!r}"
                 )
 
             if self.tp_method == "uniform_1d":

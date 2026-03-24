@@ -1,6 +1,10 @@
+# --- local agent / assistant notes (not for repo) ---
+LOCAL_AGENT_CONTEXT.md
+CLEANUP_PLAN.md
+
 # --- logs ---
 outputs/
-train_allegro_*.log
+train_*.log
 slurm-*.out
 force_matching.log
 configs_testing/

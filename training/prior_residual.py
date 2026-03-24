@@ -175,8 +175,7 @@ def _compute_prior_forces(
     computing forces (used after LBFGS pretraining).
     """
     n_atoms = int(R.shape[1])
-    topology = TopologyBuilder(N_max=n_atoms, min_repulsive_sep=6)
-    # Prior energy code path currently assumes free-space displacement.
+    topology = TopologyBuilder(N_max=n_atoms, min_repulsive_sep=config.get_min_repulsive_sep())
     displacement = lambda Ra, Rb: Ra - Rb
     prior = PriorEnergy(config, topology, displacement, id_to_aa=id_to_aa)
     if param_overrides is not None:
@@ -346,7 +345,7 @@ def pretrain_prior_for_residual(
     species = np.asarray(dataset["species"], dtype=np.int32)
 
     n_atoms = int(R.shape[1])
-    topology = TopologyBuilder(N_max=n_atoms, min_repulsive_sep=6)
+    topology = TopologyBuilder(N_max=n_atoms, min_repulsive_sep=config.get_min_repulsive_sep())
     displacement = lambda Ra, Rb: Ra - Rb
     prior = PriorEnergy(config, topology, displacement, id_to_aa=id_to_aa)
 

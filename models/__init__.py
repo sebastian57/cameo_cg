@@ -2,7 +2,19 @@
 
 from importlib import import_module
 
+from .base_model import (
+    BaseMLModel,
+    register_ml_model,
+    get_ml_model_class,
+    get_available_ml_models,
+)
+
 __all__ = [
+    # Base
+    "BaseMLModel",
+    "register_ml_model",
+    "get_ml_model_class",
+    "get_available_ml_models",
     # Topology
     "TopologyBuilder",
     "precompute_chain_topology",

@@ -3,20 +3,11 @@ Topology Generation for Coarse-Grained Protein Models
 
 Generates bond, angle, dihedral, and repulsive pair indices for
 linear chain topology (1-bead-per-residue proteins).
-
-Consolidated from:
-- allegro_energyfn_multiple_proteins.py
-- prior_energyfn.py
 """
 
 import jax
 import jax.numpy as jnp
 from typing import Tuple, Any
-
-try:
-    from jax_md import partition
-except Exception:  # pragma: no cover - optional dependency in lightweight test envs
-    partition = None
 
 
 def precompute_chain_topology(N_max: int) -> Tuple[jax.Array, jax.Array]:

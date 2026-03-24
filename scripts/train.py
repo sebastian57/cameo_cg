@@ -44,33 +44,10 @@ import sys
 import jax
 from typing import Optional, Dict
 
-def _apply_jax_compat_shims():
-    """
-    Runtime compatibility shims for jax_md/chemtrain with newer JAX releases.
+sys.path.insert(0, str(os.path.join(os.path.dirname(__file__), "..")))
+from utils.jax_setup import apply_jax_compat_shims, apply_numpy_dataloader_patch
 
-    These shims are no-ops on older JAX versions where symbols still exist.
-    """
-    # jax_md<=0.2.8 expects KeyArray on jax.random.
-    if not hasattr(jax.random, "KeyArray"):
-        jax.random.KeyArray = jax.Array
-
-    # Older jax_md imports tree_* helpers from top-level jax namespace.
-    if not hasattr(jax, "tree_map"):
-        jax.tree_map = jax.tree_util.tree_map
-    if not hasattr(jax, "tree_leaves"):
-        jax.tree_leaves = jax.tree_util.tree_leaves
-    if not hasattr(jax, "tree_flatten"):
-        jax.tree_flatten = jax.tree_util.tree_flatten
-    if not hasattr(jax, "tree_unflatten"):
-        jax.tree_unflatten = jax.tree_util.tree_unflatten
-
-    # Older jax_md imports xla_bridge from jax.lib.
-    if not hasattr(jax.lib, "xla_bridge"):
-        from jax._src import xla_bridge as _xla_bridge
-        jax.lib.xla_bridge = _xla_bridge
-
-
-_apply_jax_compat_shims()
+apply_jax_compat_shims()
 
 def _initialize_jax_distributed():
     """
@@ -159,7 +136,7 @@ def _initialize_jax_distributed():
                 num_processes=num_processes,
                 process_id=process_id,
                 local_device_ids=local_ids,
-                initialization_timeout=1800,  # 30 min: allow for slow node startup / network delays
+                initialization_timeout=int(os.environ.get("JAX_INIT_TIMEOUT", "1800")),
             )
             print(f"[Rank {process_id}] Successfully initialized!", flush=True)
         except Exception as e:
@@ -203,8 +180,8 @@ def _initialize_jax_distributed():
     if is_distributed:
         print(f"[Rank {rank}] All devices: {jax.devices()}")
 
-    # Disable 64-bit precision for performance
-    jax.config.update("jax_enable_x64", False)
+    enable_x64 = os.environ.get("JAX_ENABLE_X64", "0").strip().lower() in ("1", "true")
+    jax.config.update("jax_enable_x64", enable_x64)
 
     return is_distributed, rank, world_size
 
@@ -227,17 +204,14 @@ from jax.experimental import multihost_utils
 from jax_sgmc.data.numpy_loader import NumpyDataLoader
 from chemtrain.data.data_loaders import DataLoaders
 
-# Add parent directory to path for clean_code_base imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from config.manager import ConfigManager
 from data.loader import DatasetLoader, BucketedDatasetLoader, build_tiled_dataset
 from data.preprocessor import CoordinatePreprocessor
 from models.combined_model import CombinedModel
 from training.prior_residual import apply_prior_force_residual_targets, pretrain_prior_for_residual
 from training.trainer import Trainer
-from export.exporter import AllegroExporter
-from evaluation.visualizer import LossPlotter
+from export.exporter import ModelExporter
+from analysis_tests.visualizer import LossPlotter
 from utils.logging import data_logger, model_logger, training_logger, export_logger
 import logging
 
@@ -277,8 +251,8 @@ def _make_export_model(
 
     export_config = ConfigManager(config.config_path)
     export_config._config = copy.deepcopy(config._config)
-    export_config._config.setdefault("model", {})["use_priors"] = True
-    export_config._config["model"]["train_priors"] = False
+    export_config.set("model", "use_priors", True)
+    export_config.set("model", "train_priors", False)
 
     export_logger.info(
         "Export mode: ML+priors (training.export_combined_ml_priors=true; priors re-enabled for export)"
@@ -316,26 +290,6 @@ def _apply_grad_accum_overrides(config: ConfigManager) -> None:
             "[Config] Override CHEMTRAIN_GRAD_ACCUM_MODE=%s from YAML",
             os.environ["CHEMTRAIN_GRAD_ACCUM_MODE"],
         )
-
-
-def apply_numpy_dataloader_patch():
-    """
-    Apply necessary patch to NumpyDataLoader for cache_size.
-
-    This ensures cache_size is never 0, which causes errors in chemtrain.
-    """
-    from jax_sgmc.data.numpy_loader import NumpyDataLoader as _NDL
-
-    _orig_get_indices = _NDL._get_indices
-
-    def _patched_get_indices(self, chain_id: int):
-        chain = self._chains[chain_id]
-        if chain.get("cache_size", 0) <= 0:
-            chain["cache_size"] = 1
-        return _orig_get_indices(self, chain_id)
-
-    _NDL._get_indices = _patched_get_indices
-    logging.info("[Patch] Applied NumpyDataLoader cache_size fix")
 
 
 def find_latest_checkpoint(checkpoint_dir: Path):
@@ -1046,7 +1000,7 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         id_to_aa=loader.id_to_aa,
         n_max=model.N_max,
     )
-    exporter = AllegroExporter.from_combined_model(
+    exporter = ModelExporter.from_combined_model(
         model=export_model,
         params=best_params,
         box=box,
@@ -1067,8 +1021,8 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     logging.info("=" * 60)
 
     # Look for log file in outputs/ directory (created by run_training.sh)
-    log_file_outputs = Path("outputs") / f"train_allegro_{job_id}.log"
-    log_file_legacy = Path(f"train_allegro_{job_id}.log")  # Fallback for old runs
+    log_file_outputs = Path("outputs") / f"train_{job_id}.log"
+    log_file_legacy = Path(f"train_{job_id}.log")
 
     # Try outputs/ first, then fall back to legacy location
     if log_file_outputs.exists():
@@ -1331,7 +1285,7 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
             id_to_aa=loader.id_to_aa,
             n_max=final_n_max,
         )
-        exporter = AllegroExporter.from_combined_model(
+        exporter = ModelExporter.from_combined_model(
             model=export_model, params=prev_params,
             box=box, species=final_species0
         )

@@ -56,6 +56,18 @@ class ConfigManager:
         if missing:
             raise ValueError(f"Missing required config sections: {missing}")
 
+    def set(self, *keys_and_value) -> None:
+        """Set a nested config value.  Last argument is the value.
+
+        Example::
+            config.set("model", "use_priors", False)
+        """
+        *keys, value = keys_and_value
+        d = self._config
+        for k in keys[:-1]:
+            d = d.setdefault(k, {})
+        d[keys[-1]] = value
+
     def get(self, *keys: str, default: Any = None) -> Any:
         """
         Get nested config value by keys.
@@ -79,32 +91,56 @@ class ConfigManager:
                 return default
         return value
 
-    # ===== Convenience Methods =====
+    # ===== Convenience Accessors =====
+
+    # ----- Debug Section -----
+
+    @staticmethod
+    def _env_bool(var: str) -> Optional[bool]:
+        """Read an env var as bool; return None if unset."""
+        val = os.environ.get(var)
+        if val is None:
+            return None
+        return val.strip().lower() in ("1", "true", "yes", "on")
+
+    def debug_neighbor_logging(self) -> bool:
+        env = self._env_bool("CHEMTRAIN_DEBUG_NEIGHBOR")
+        if env is not None:
+            return env
+        return bool(self.get("debug", "neighbor_logging", default=False))
+
+    def debug_neighbor_rank0_only(self) -> bool:
+        env = self._env_bool("CHEMTRAIN_DEBUG_NEIGHBOR_RANK0_ONLY")
+        if env is not None:
+            return env
+        return bool(self.get("debug", "neighbor_rank0_only", default=True))
+
+    def debug_shape_trace(self) -> bool:
+        env = self._env_bool("CHEMTRAIN_DEBUG_SHAPE_TRACE")
+        if env is not None:
+            return env
+        return bool(self.get("debug", "shape_trace", default=False))
+
+    def debug_model_logging(self) -> bool:
+        return bool(self.get("debug", "model_logging", default=False))
+
+    # ----- General -----
 
     def get_seed(self) -> int:
-        """Get random seed for reproducibility."""
         return self.get("seed", default=42)
 
     def get_model_context(self) -> str:
-        """Get model context identifier."""
         return self.get("model_context", default="allegro_cg_protein")
 
     def get_model_id(self) -> str:
-        """Get model ID."""
         return self.get("model_id", default="default")
-
-    def get_protein_name(self) -> str:
-        """Get protein name."""
-        return self.get("protein_name", default="unknown")
 
     # ----- Data Section -----
 
     def get_data_path(self) -> str:
-        """Get path to NPZ dataset."""
         return self.get("data", "path", default=None)
 
     def get_max_frames(self) -> Optional[int]:
-        """Get maximum number of frames to use from dataset."""
         return self.get("data", "max_frames", default=None)
 
     def get_batch_mode(self) -> str:
@@ -124,7 +160,6 @@ class ConfigManager:
         return raw
 
     def get_tile_target_beads(self) -> int:
-        """Target number of valid beads per tile in tiled batch mode."""
         value = int(self.get("data", "tile_target_beads", default=1000))
         if value <= 0:
             raise ValueError(
@@ -154,43 +189,34 @@ class ConfigManager:
         return parsed
 
     def tile_shuffle_structures_enabled(self) -> bool:
-        """Whether to shuffle structures before greedy tile packing."""
         return bool(self.get("data", "tile_shuffle_structures", default=False))
 
     def tile_sort_by_size_enabled(self) -> bool:
-        """Whether tiled packing should sort structures by valid bead count."""
         return bool(self.get("data", "tile_sort_by_size", default=True))
 
     def tile_rebuild_each_epoch_enabled(self) -> bool:
-        """Whether tiled training should rebuild tile composition at each epoch."""
         return bool(self.get("data", "tile_rebuild_each_epoch", default=False))
 
     def tile_drop_incomplete_enabled(self) -> bool:
-        """Whether to drop the final under-filled tile."""
         return bool(self.get("data", "tile_drop_incomplete", default=False))
 
     def tile_train_only_enabled(self) -> bool:
-        """Whether tiled mode should only be applied to training batches."""
         return bool(self.get("data", "tile_train_only", default=True))
 
     # ----- Preprocessing Section -----
 
     def get_buffer_multiplier(self) -> float:
-        """Get buffer multiplier for box extent computation (default: 2.0)."""
         return self.get("preprocessing", "buffer_multiplier", default=2.0)
 
     def get_park_multiplier(self) -> float:
-        """Get parking location multiplier for padded atoms (default: 0.95)."""
         return self.get("preprocessing", "park_multiplier", default=0.95)
 
     # ----- Model Section -----
 
     def get_cutoff(self) -> float:
-        """Get neighbor list cutoff distance."""
         return self.get("model", "cutoff", default=10.0)
 
     def get_dr_threshold(self) -> float:
-        """Get neighbor list rebuild threshold."""
         return self.get("model", "dr_threshold", default=0.5)
 
     def get_neighbor_list_format(self) -> str:
@@ -224,128 +250,88 @@ class ConfigManager:
         return normalized
 
     def get_allegro_config(self, size: str = "default") -> Dict[str, Any]:
-        """
-        Get Allegro model configuration.
-
-        Args:
-            size: Model size variant ("default", "large", "med")
-
-        Returns:
-            Dictionary of Allegro hyperparameters
-        """
+        """Get Allegro model hyperparameters from model.allegro,
+        with cuEq-specific overrides layered on top when applicable."""
         use_cueq_cfg = self.get_ml_model_type() in ("allegro_cueq", "allegro_cueq_fast")
-        cfg: Dict[str, Any] = {}
-
-        def _merge_if_dict(key: str):
-            value = self.get("model", key, default=None)
-            if isinstance(value, dict):
-                cfg.update(value)
-
-        # Start from the generic Allegro settings, then layer backend-specific
-        # overrides on top. This keeps cuEq and e3nn runs aligned by default.
-        _merge_if_dict("allegro")
-        if size != "default":
-            _merge_if_dict(f"allegro_{size}")
+        cfg: Dict[str, Any] = dict(self.get("model", "allegro", default={}))
 
         if use_cueq_cfg:
-            _merge_if_dict("allegro_cuEq")
-            _merge_if_dict("allegro_cueq")
-            if size != "default":
-                _merge_if_dict(f"allegro_cuEq_{size}")
-                _merge_if_dict(f"allegro_cueq_{size}")
+            for key in ("allegro_cuEq", "allegro_cueq"):
+                overlay = self.get("model", key, default=None)
+                if isinstance(overlay, dict):
+                    cfg.update(overlay)
 
-        # Keep activation explicit/configurable while preserving current behavior.
-        cfg = dict(cfg)
         cfg.setdefault("mlp_activation", "mish")
         cfg.setdefault("mlp_hidden_activation", cfg.get("mlp_activation", "mish"))
         cfg.setdefault("mlp_output_activation", "linear")
         return cfg
 
     def get_prior_params(self) -> Dict[str, Any]:
-        """Get prior energy parameters (r0, kr, a, b, etc.)."""
         return self.get("model", "priors", default={})
 
-    def use_spline_priors_enabled(self) -> bool:
-        """
-        Check if spline priors are enabled.
+    _DEFAULT_PRIOR_WEIGHTS: Dict[str, float] = {
+        "bond": 0.5,
+        "angle": 0.1,
+        "repulsive": 0.25,
+        "dihedral": 0.15,
+        "excluded_volume": 1.0,
+        "dh": 0.0,
+        "stickiness": 0.0,
+        "salt_bridge": 0.0,
+    }
 
-        Backward compatibility:
-        - If explicit boolean `model.priors.use_spline_priors` is set, use it.
-        - Otherwise, enable spline priors if `model.priors.spline_file` exists.
-        """
+    def get_prior_weights(self) -> Dict[str, float]:
+        user = self.get("model", "priors", "weights", default={})
+        merged = dict(self._DEFAULT_PRIOR_WEIGHTS)
+        merged.update(user)
+        return merged
+
+    def get_min_repulsive_sep(self) -> int:
+        return int(self.get("model", "priors", "min_repulsive_sep", default=6))
+
+    def use_spline_priors_enabled(self) -> bool:
+        """True if spline priors are on (explicit flag or spline_file present)."""
         explicit = self.get("model", "priors", "use_spline_priors", default=None)
         if explicit is not None:
             return bool(explicit)
         return self.get("model", "priors", "spline_file", default=None) is not None
 
     def get_spline_file_path(self) -> Optional[str]:
-        """Get spline prior file path (if configured)."""
         return self.get("model", "priors", "spline_file", default=None)
 
     def get_residue_specific_angles(self) -> bool:
-        """Check if residue-specific angle splines are requested."""
         return self.get("model", "priors", "residue_specific_angles", default=False)
 
     # ----- Optimizer Section -----
 
     def get_optimizer_config(self, name: str) -> Dict[str, Any]:
-        """
-        Get optimizer configuration by name.
-
-        Args:
-            name: Optimizer name (e.g., "adabelief", "yogi", "adam")
-
-        Returns:
-            Dictionary of optimizer hyperparameters
-        """
         return self.get("optimizer", name, default={})
 
     def get_grad_clip(self) -> float:
-        """Get global gradient clipping value."""
         return self.get("optimizer", "grad_clip", default=1.0)
 
     # ----- Training Section -----
 
     def get_epochs(self, optimizer: str) -> int:
-        """
-        Get number of epochs for a specific optimizer stage.
-
-        Args:
-            optimizer: Optimizer name (e.g., "adabelief", "yogi")
-
-        Returns:
-            Number of epochs
-        """
-        key = f"epochs_{optimizer}"
-        return self.get("training", key, default=100)
+        return self.get("training", f"epochs_{optimizer}", default=100)
 
     def get_val_fraction(self) -> float:
-        """Get validation set fraction."""
         return self.get("training", "val_fraction", default=0.1)
 
     def get_batch_per_device(self) -> int:
-        """Get batch size per GPU device."""
         return self.get("training", "batch_per_device", default=4)
 
     def get_batch_cache(self) -> int:
-        """Get number of batches to cache."""
         return self.get("training", "batch_cache", default=10)
 
     def mixed_precision_enabled(self) -> bool:
-        """
-        Check if mixed precision should be enabled.
-
-        Backward compatibility:
-        - If explicit boolean `training.enable_mixed_precision` is set, use it.
-        - Otherwise infer from `training.compute_dtype != "float32"`.
-        """
+        """Explicit flag or inferred from compute_dtype != float32."""
         explicit = self.get("training", "enable_mixed_precision", default=None)
         if explicit is not None:
             return bool(explicit)
         return self.get_compute_dtype() != "float32"
 
     def get_compute_dtype(self) -> str:
-        """Get compute dtype for model forward/backward."""
         raw = str(self.get("training", "compute_dtype", default="float32")).lower()
         if raw not in ("float32", "bfloat16"):
             raise ValueError(
@@ -355,7 +341,6 @@ class ConfigManager:
         return raw
 
     def get_param_dtype(self) -> str:
-        """Get master parameter dtype."""
         raw = str(self.get("training", "param_dtype", default="float32")).lower()
         if raw not in ("float32",):
             raise ValueError(
@@ -365,7 +350,6 @@ class ConfigManager:
         return raw
 
     def get_reduce_dtype(self) -> str:
-        """Get collective reduction / optimizer math dtype."""
         raw = str(self.get("training", "reduce_dtype", default="float32")).lower()
         if raw not in ("float32", "bfloat16"):
             raise ValueError(
@@ -375,11 +359,9 @@ class ConfigManager:
         return raw
 
     def buffer_donation_enabled(self) -> bool:
-        """Check if update-step buffer donation is enabled."""
         return bool(self.get("training", "enable_buffer_donation", default=False))
 
     def get_donate_mode(self) -> str:
-        """Get donation mode for JIT update functions."""
         raw = str(self.get("training", "donate_mode", default="state_only")).lower()
         if raw not in ("state_only", "state_and_batch"):
             raise ValueError(
@@ -389,7 +371,6 @@ class ConfigManager:
         return raw
 
     def get_remat_level(self) -> int:
-        """Get activation rematerialization level (0=off, 1=coarse, 2=deeper)."""
         raw = int(self.get("training", "remat_level", default=0))
         if raw not in (0, 1, 2):
             raise ValueError(
@@ -399,7 +380,6 @@ class ConfigManager:
         return raw
 
     def get_remat_policy(self) -> str:
-        """Get remat policy name for model wrappers."""
         raw = str(self.get("training", "remat_policy", default="none")).lower()
         if raw not in ("none", "allegro_blocks_coarse", "allegro_blocks_deep"):
             raise ValueError(
@@ -409,16 +389,9 @@ class ConfigManager:
         return raw
 
     def get_gammas(self) -> Dict[str, float]:
-        """
-        Get force matching weights (gammas).
-
-        Returns:
-            Dictionary with 'F' (force) and 'U' (energy) weights
-        """
         return self.get("training", "gammas", default={"F": 1.0, "U": 0.0})
 
     def get_force_loss_normalization(self) -> str:
-        """Get force-loss normalization mode for force matching."""
         raw = str(
             self.get("training", "force_loss_normalization", default="legacy_mean")
         ).strip().lower()
@@ -430,27 +403,15 @@ class ConfigManager:
         return raw
 
     def prior_residual_enabled(self) -> bool:
-        """
-        Check if prior-force residual training mode is enabled.
-
-        In this mode, prior forces are precomputed on untiled data and force
-        targets are transformed to residual targets:
-            F_residual = F_ref - F_prior.
-        """
+        """Residual mode: F_target = F_ref - F_prior (precomputed)."""
         return bool(self.get("training", "prior_residual", "enabled", default=False))
 
     def prior_residual_cache_enabled(self) -> bool:
-        """Check if residual-prior precompute cache is enabled."""
         return bool(
             self.get("training", "prior_residual", "cache_enabled", default=True)
         )
 
     def get_prior_residual_cache_path(self) -> Optional[str]:
-        """
-        Get optional cache path for residual-prior precompute data.
-
-        If None, callers should use a default path under checkpoint_path.
-        """
         path = self.get("training", "prior_residual", "cache_path", default=None)
         if path is None:
             return None
@@ -460,13 +421,11 @@ class ConfigManager:
         return path
 
     def prior_residual_force_recompute(self) -> bool:
-        """Whether to bypass cache and recompute prior forces."""
         return bool(
             self.get("training", "prior_residual", "force_recompute", default=False)
         )
 
     def get_prior_residual_compute_batch_size(self) -> int:
-        """Batch size used for chunked prior-force precompute."""
         value = int(
             self.get("training", "prior_residual", "compute_batch_size", default=128)
         )
@@ -477,20 +436,56 @@ class ConfigManager:
             )
         return value
 
-    def get_checkpoint_path(self) -> str:
-        """Get checkpoint directory path."""
-        return self.get("training", "checkpoint_path", default="./checkpoints_allegro")
+    # ----- Paths Section -----
 
-    def get_checkpoint_freq(self) -> int:
-        """Get checkpoint frequency in epochs (0 = only at end)."""
-        return self.get("training", "checkpoint_freq", default=0)
+    def get_output_dir(self) -> str:
+        return self.get("paths", "output_dir", default="./outputs/default")
 
-    def get_export_path(self) -> str:
-        """Get model export directory path."""
+    def get_checkpoint_dir(self) -> str:
+        """Read from paths.checkpoint_dir, fall back to paths.output_dir/checkpoints,
+        then legacy training.checkpoint_path."""
+        explicit = self.get("paths", "checkpoint_dir", default=None)
+        if explicit is not None:
+            return str(explicit)
+        if self.get("paths", default=None) is not None:
+            return str(Path(self.get_output_dir()) / "checkpoints")
+        return self.get("training", "checkpoint_path", default="./checkpoints")
+
+    def get_export_dir(self) -> str:
+        """Read from paths.export_dir, fall back to paths.output_dir/exports,
+        then legacy training.export_path."""
+        explicit = self.get("paths", "export_dir", default=None)
+        if explicit is not None:
+            return str(explicit)
+        if self.get("paths", default=None) is not None:
+            return str(Path(self.get_output_dir()) / "exports")
         return self.get("training", "export_path", default="./exported_models")
 
+    def get_profile_dir(self) -> str:
+        explicit = self.get("paths", "profile_dir", default=None)
+        if explicit is not None:
+            return str(explicit)
+        if self.get("paths", default=None) is not None:
+            return str(Path(self.get_output_dir()) / "profiles")
+        return self.get("training", "profiling", "trace_dir", default="./profiles")
+
+    def get_slurm_dir(self) -> str:
+        explicit = self.get("paths", "slurm_dir", default=None)
+        if explicit is not None:
+            return str(explicit)
+        return str(Path(self.get_output_dir()) / "slurm")
+
+    # Backward-compat aliases
+    def get_checkpoint_path(self) -> str:
+        return self.get_checkpoint_dir()
+
+    def get_export_path(self) -> str:
+        return self.get_export_dir()
+
+    def get_checkpoint_freq(self) -> int:
+        return self.get("training", "checkpoint_freq", default=0)
+
     def export_combined_ml_priors_enabled(self) -> bool:
-        """Whether eval/export should reconstruct full forces as ML + priors."""
         return bool(self.get("training", "export_combined_ml_priors", default=True))
 
     def get_profiling_config(self) -> Dict[str, Any]:
@@ -519,7 +514,7 @@ class ConfigManager:
             "jax_trace_enabled": self.get(
                 "training", "profiling", "jax_trace_enabled", default=True
             ),
-            "trace_dir": self.get("training", "profiling", "trace_dir", default="./profiles"),
+            "trace_dir": self.get_profile_dir(),
             "trace_rank0_only": self.get(
                 "training", "profiling", "trace_rank0_only", default=True
             ),
@@ -556,15 +551,12 @@ class ConfigManager:
     # ----- Model Configuration (New) -----
 
     def use_priors(self) -> bool:
-        """Check if prior energy terms should be used."""
         return self.get("model", "use_priors", default=True)
 
     def train_priors_enabled(self) -> bool:
-        """Check if prior parameters should be trained during force matching."""
         return self.get("model", "train_priors", default=False)
 
     def prior_only_enabled(self) -> bool:
-        """Check if model should run in prior-only mode (no ML computation)."""
         return self.get("model", "prior_only", default=False)
 
     def get_ml_model_type(self) -> str:
@@ -601,113 +593,87 @@ class ConfigManager:
             )
         return canonical
 
-    def get_allegro_size(self) -> str:
-        """
-        Get Allegro model size variant.
+    def get_mace_config(self) -> Dict[str, Any]:
+        return self.get("model", "mace", default={})
 
-        Returns:
-            Size name: "default", "large", or "med"
-        """
-        return self.get("model", "allegro_size", default="default")
-
-    def get_mace_size(self) -> str:
-        """
-        Get MACE model size variant.
-
-        Returns:
-            Size name: "default", "large", or "small"
-        """
-        return self.get("model", "mace_size", default="default")
-
-    def get_mace_config(self, size: str = "default") -> Dict[str, Any]:
-        """
-        Get MACE model configuration.
-
-        Args:
-            size: Model size variant ("default", "large", "small")
-
-        Returns:
-            Dictionary of MACE hyperparameters passed to mace_neighborlist_pp
-        """
-        if size == "default":
-            return self.get("model", "mace", default={})
-        else:
-            key = f"mace_{size}"
-            return self.get("model", key, default=self.get("model", "mace", default={}))
-
-    def get_painn_size(self) -> str:
-        """
-        Get PaiNN model size variant.
-
-        Returns:
-            Size name: "default", "large", or "small"
-        """
-        return self.get("model", "painn_size", default="default")
-
-    def get_painn_config(self, size: str = "default") -> Dict[str, Any]:
-        """
-        Get PaiNN model configuration.
-
-        Args:
-            size: Model size variant ("default", "large", "small")
-
-        Returns:
-            Dictionary of PaiNN hyperparameters passed to painn_neighborlist_pp
-        """
-        if size == "default":
-            return self.get("model", "painn", default={})
-        else:
-            key = f"painn_{size}"
-            return self.get("model", key, default=self.get("model", "painn", default={}))
+    def get_painn_config(self) -> Dict[str, Any]:
+        return self.get("model", "painn", default={})
 
     # ----- Training Configuration (New) -----
 
     def pretrain_prior_enabled(self) -> bool:
-        """Check if prior pre-training is enabled."""
         return self.get("training", "pretrain_prior", default=False)
 
     def set_pretrain_prior_enabled(self, enabled: bool) -> None:
-        """Set prior pre-training flag at runtime."""
         self._config.setdefault("training", {})
         self._config["training"]["pretrain_prior"] = bool(enabled)
 
     def get_pretrain_prior_max_steps(self) -> int:
-        """Get maximum LBFGS steps for prior pre-training."""
         return self.get("training", "pretrain_prior_max_steps", default=200)
 
     def get_pretrain_prior_tol_grad(self) -> float:
-        """Get gradient tolerance for prior pre-training convergence."""
         return self.get("training", "pretrain_prior_tol_grad", default=1e-6)
 
     def get_pretrain_prior_min_steps(self) -> int:
-        """Get minimum LBFGS steps before convergence check."""
         return self.get("training", "pretrain_prior_min_steps", default=10)
 
+    def get_training_stages(self) -> list:
+        """Return ordered list of training stages.
+
+        New format (preferred):
+            training:
+              stages:
+                - optimizer: adabelief
+                  epochs: 80
+                - optimizer: lamb
+                  epochs: 0
+
+        Legacy format (auto-converted):
+            training:
+              stage1_optimizer: adabelief
+              stage2_optimizer: yogi
+              epochs_adabelief: 80
+              epochs_yogi: 0
+        """
+        from training.optimizers import get_available_optimizers
+
+        stages = self.get("training", "stages", default=None)
+        if stages is not None:
+            result = [
+                {"optimizer": s["optimizer"], "epochs": int(s.get("epochs", 0))}
+                for s in stages
+            ]
+        else:
+            s1 = self.get("training", "stage1_optimizer", default="adabelief")
+            s2 = self.get("training", "stage2_optimizer", default=None)
+            result = [{"optimizer": s1, "epochs": self.get_epochs(s1)}]
+            if s2 and s2 != s1:
+                result.append({"optimizer": s2, "epochs": self.get_epochs(s2)})
+
+        available = get_available_optimizers()
+        for stage in result:
+            name = stage["optimizer"]
+            if name not in available:
+                raise ValueError(
+                    f"Unknown optimizer '{name}' in training stages. "
+                    f"Available: {available}"
+                )
+        return result
+
     def get_stage1_optimizer(self) -> str:
-        """Get stage 1 optimizer name."""
-        return self.get("training", "stage1_optimizer", default="adabelief")
+        stages = self.get_training_stages()
+        return stages[0]["optimizer"] if stages else "adabelief"
 
     def get_stage2_optimizer(self) -> str:
-        """Get stage 2 optimizer name."""
-        return self.get("training", "stage2_optimizer", default="yogi")
+        stages = self.get_training_stages()
+        return stages[1]["optimizer"] if len(stages) > 1 else stages[0]["optimizer"]
 
     # ----- Ensemble Training Configuration -----
 
     def is_ensemble_enabled(self) -> bool:
-        """Check if ensemble training is enabled."""
         return self.get("ensemble", "enabled", default=False)
 
     def get_ensemble_config(self) -> Dict[str, Any]:
-        """
-        Get ensemble training configuration.
-
-        Returns:
-            Dictionary with ensemble settings:
-                - enabled: Whether ensemble training is enabled
-                - n_models: Number of models to train
-                - base_seed: Base seed for generating model seeds
-                - save_all_models: Whether to save all models or just the best
-        """
         return {
             "enabled": self.get("ensemble", "enabled", default=False),
             "n_models": self.get("ensemble", "n_models", default=5),
@@ -715,31 +681,12 @@ class ConfigManager:
             "save_all_models": self.get("ensemble", "save_all_models", default=False),
         }
 
-    def get_ensemble_n_models(self) -> int:
-        """Get number of models in ensemble."""
-        return self.get("ensemble", "n_models", default=5)
-
-    def get_ensemble_base_seed(self) -> int:
-        """Get base seed for ensemble (models use base_seed, base_seed+1, ...)."""
-        return self.get("ensemble", "base_seed", default=42)
-
-    def get_ensemble_save_all(self) -> bool:
-        """Check if all ensemble models should be saved (vs just the best)."""
-        return self.get("ensemble", "save_all_models", default=False)
-
     # ----- Utility Methods -----
 
     def to_dict(self) -> Dict[str, Any]:
-        """Return full configuration as dictionary."""
         return self._config.copy()
 
     def save(self, output_path: Union[str, Path]):
-        """
-        Save configuration to a new YAML file.
-
-        Args:
-            output_path: Path to save the configuration
-        """
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 

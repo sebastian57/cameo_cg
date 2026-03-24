@@ -1,0 +1,177 @@
+seed: 193749
+model_context: training_exp_configs
+model_id: training_testing_large_model_largertiles
+
+debug:
+  neighbor_logging: false
+  neighbor_rank0_only: true
+  shape_trace: false
+  model_logging: false
+
+paths:
+  output_dir: ./outputs/training_testing_large_model
+
+data:
+  path: data_prep/datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz
+  max_frames: 10000
+  batch_mode: tiled
+  tile_target_beads: 2000
+  tile_bucket_beads: [2048]
+  tile_shuffle_structures: true
+  tile_sort_by_size: true
+  tile_rebuild_each_epoch: false
+  tile_drop_incomplete: false
+  tile_train_only: true
+
+preprocessing:
+  buffer_multiplier: 2.0
+  park_multiplier: 0.95
+
+model:
+  ml_model: allegro_cueq_fast
+  use_priors: false
+  train_priors: false
+  cutoff: 12.0
+  dr_threshold: 0.2
+  neighbor_list_format: dense
+
+  allegro:
+    num_types: 22
+    max_ell: 3
+    hidden_irreps: 64x0o + 64x1o + 64x1e + 64x2e
+    num_layers: 3
+    n_radial_basis: 18
+    envelope_p: 6
+    embed_n_hidden: [64, 128]
+    species_embed: 32
+    mlp_n_hidden: 64
+    mlp_n_layers: 3
+    mlp_hidden_activation: silu
+    mlp_output_activation: tanh
+    tp_backend: fused_sp
+    tp_mode: mixed_naive
+    tp_method: uniform_1d
+    tp_method_by_layer: [uniform_1d, uniform_1d, uniform_1d]
+    tp_fused_option_b1_layer0: true
+    tp_fused_option_b1_modes: auto
+    tp_left_mode: node_agg
+    tp_batch_strategy: nested_vmap
+    avg_num_neighbors: 15
+    mlp_dtype: float32
+    logging: false
+
+  allegro_cueq:
+    logging: false
+
+  priors:
+    use_spline_priors: true
+    spline_file: data_prep/datasets/fitted_priors_spline.npz
+    residue_specific_angles: false
+    weights:
+      bond: 0.4
+      angle: 0.4
+      dihedral: 0.2
+      repulsive: 1.0
+      excluded_volume: 0.0
+      dh: 0.0
+      stickiness: 0.0
+      salt_bridge: 0.0
+    aa_typing:
+      source: dataset_map
+      his_charge: 0.0
+      group_order: [POSITIVE, NEGATIVE, POLAR_UNCHARGED, NONPOLAR]
+      stickiness_reference_group: POLAR_UNCHARGED
+    dh:
+      enabled: false
+      mode: local_k
+      K: 2
+      k_DH: 1.0
+      lambda_D: 8.0
+      w_by_sep: [0.0, 1.0, 0.1]
+    stickiness:
+      enabled: false
+      min_seq_sep: 3
+      r0: 3.8
+      sigma: 0.4
+      s_free_init: [0.0, 0.0, 0.0]
+    salt_bridge:
+      enabled: false
+      min_seq_sep: 3
+      delta: -0.5
+      r0: 3.8
+      sigma: 0.3
+    r0: 3.8375435
+    kr: 154.50629422490843
+    a: [-0.02086511, -0.36341857, -0.50767196, 0.09906029, 0.8319552, -0.00770968, -0.13320648, -1.14116021, 0.18145372, -0.55828783]
+    b: [0.67521775, 0.14797897, -0.12157499, -0.8289584, 0.17162394, 0.48646108, 0.56000923, -0.13905056, -0.896762, -1.20144583]
+    theta0: 1.8335507
+    k_theta: 8.271271714604836
+    epsilon: 5.0
+    sigma: 3.0
+    epsilon_ex: 6.0
+    sigma_ex: 3.5
+    k_dih: [0.47037187851535034, 0.9495107825945361]
+    gamma_dih: [1.3759673785180062, 1.6211158177819938]
+
+optimizer:
+  grad_clip: 10.0
+  sgd_nesterov:
+    lr: 0.01
+    peak_lr: 0.01
+    end_lr: 0.01
+    warmup_steps: 100
+    decay_steps: 6960
+    momentum: 0.99
+    grad_clip: 5.0
+    weight_decay: 0.0
+
+training:
+  stages:
+    - optimizer: sgd_nesterov
+      epochs: 120
+
+  val_fraction: 0.1
+  batch_per_device: 3
+  batch_cache: 10
+  checkpoint_freq: 40
+
+  enable_mixed_precision: false
+  compute_dtype: float32
+  param_dtype: float32
+  reduce_dtype: float32
+
+  gammas:
+    F: 1.0
+    U: 0.0
+
+  force_loss_normalization: legacy_mean
+  export_combined_ml_priors: false
+  grad_accum_steps: 1
+  grad_accum_mode: stack_scan
+
+  pretrain_prior: false
+  pretrain_prior_min_steps: 10
+  pretrain_prior_max_steps: 200
+  pretrain_prior_tol_grad: 1.0e-6
+
+  prior_residual:
+    enabled: false
+    cache_enabled: false
+    cache_path: null
+    force_recompute: false
+    compute_batch_size: 128
+
+  profiling:
+    enabled: false
+    jax_trace_enabled: false
+    trace_rank0_only: true
+    log_compiles: false
+    batch_profiler_enabled: false
+    batch_profiler_warmup: 5
+    batch_profiler_samples: 50
+    batch_stats_enabled: false
+    batch_stats_rank0_only: true
+    batch_stats_log_every: 10
+    loss_profile_enabled: false
+    loss_profile_steps: 4
+    epoch_summary_enabled: false

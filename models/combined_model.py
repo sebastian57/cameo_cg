@@ -3,22 +3,23 @@ Combined Prior + ML Model
 
 Composes physics-based prior energy with an ML model (Allegro, MACE, or PaiNN).
 Supports pure ML, pure prior, or combined training via config.
-
-Extracted from:
-- allegro_energyfn_multiple_proteins.py
 """
 
 import jax
 import jax.numpy as jnp
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional
 
 from config.types import EnergyComponents, ForceComponents
+from .base_model import get_ml_model_class
 from .prior_energy import PriorEnergy
-from .allegro_model import AllegroModel
-from .mace_model import MACEModel
-from .painn_model import PaiNNModel
 from .topology import TopologyBuilder
 from utils.logging import model_logger
+
+# Eagerly import standard backends so their @register_ml_model fires.
+# cuEq variants are registered on import of allegro_cueq_model (lazy).
+from . import allegro_model as _am  # noqa: F401
+from . import mace_model as _mm  # noqa: F401
+from . import painn_model as _pm  # noqa: F401
 
 
 class CombinedModel:
@@ -65,52 +66,25 @@ class CombinedModel:
         self.config = config
         self.N_max = N_max
         self.prior_only = prior_only
-
-        # Check if priors are enabled
         self.use_priors = config.use_priors()
         self.train_priors = config.train_priors_enabled()
-
-        # Create topology builder (always needed for proper initialization)
-        self.topology = TopologyBuilder(N_max=N_max, min_repulsive_sep=6)
-
-        # Determine which ML backbone to use
+        self.topology = TopologyBuilder(
+            N_max=N_max,
+            min_repulsive_sep=config.get_min_repulsive_sep(),
+        )
         self.ml_model_type = config.get_ml_model_type()
 
-        if self.ml_model_type == "allegro":
-            self.ml_model = AllegroModel(
-                config, R0, box, species, N_max,
-                n_species_override=n_species_override
-            )
-            model_logger.info("ML backbone: Allegro")
-        elif self.ml_model_type == "mace":
-            self.ml_model = MACEModel(
-                config, R0, box, species, N_max,
-                n_species_override=n_species_override
-            )
-            model_logger.info("ML backbone: MACE")
-        elif self.ml_model_type == "painn":
-            self.ml_model = PaiNNModel(
-                config, R0, box, species, N_max,
-                n_species_override=n_species_override
-            )
-            model_logger.info("ML backbone: PaiNN")
-        elif self.ml_model_type in ("allegro_cueq", "allegro_cueq_fast"):
-            from .allegro_cueq_model import AllegroModelCuEq  # lazy: requires cuequivariance
-            self.ml_model = AllegroModelCuEq(
-                config, R0, box, species, N_max,
-                n_species_override=n_species_override
-            )
-            model_logger.info("ML backbone: Allegro (cuEquivariance)")
-        else:
-            raise ValueError(
-                f"Unsupported model.ml_model='{self.ml_model_type}'. "
-                "Expected one of: allegro, allegro_cueq, allegro_cueq_fast, mace, painn."
-            )
+        # cuEq variants need lazy import to trigger registration
+        if self.ml_model_type in ("allegro_cueq", "allegro_cueq_fast"):
+            from . import allegro_cueq_model as _cueq  # noqa: F401
 
-        # Backward-compatible alias: existing code references self.allegro
-        self.allegro = self.ml_model
+        ModelClass = get_ml_model_class(self.ml_model_type)
+        self.ml_model = ModelClass(
+            config, R0, box, species, N_max,
+            n_species_override=n_species_override,
+        )
+        model_logger.info(f"ML backbone: {self.ml_model_type}")
 
-        # Create prior model (if enabled)
         if self.use_priors:
             self.prior = PriorEnergy(
                 config, self.topology, self.ml_model.displacement, id_to_aa=id_to_aa
@@ -126,12 +100,10 @@ class CombinedModel:
         Initialize model parameters.
 
         Returns:
-            Dictionary with:
-                - 'allegro': Allegro model parameters
-                - 'prior': Prior parameters (if use_priors=True)
+            Dictionary with 'ml' (ML backbone params) and optionally 'prior'.
         """
         params = {
-            'allegro': self.allegro.initialize_params(rng_key),
+            'ml': self.ml_model.initialize_params(rng_key),
         }
 
         if self.use_priors:
@@ -149,10 +121,10 @@ class CombinedModel:
         segment_id: Optional[jax.Array] = None,
     ) -> jax.Array:
         """
-        Compute total energy (Allegro + Prior if enabled, or prior-only).
+        Compute total energy (ML + Prior if enabled, or prior-only).
 
         Args:
-            params: Model parameters dict with 'allegro' and optionally 'prior'
+            params: Model parameters dict
             R: Coordinates, shape (n_atoms, 3)
             mask: Validity mask, shape (n_atoms,)
             species: Species IDs, shape (n_atoms,)
@@ -163,7 +135,6 @@ class CombinedModel:
         Returns:
             Total energy (scalar)
         """
-        # Prior-only mode: skip ML computation entirely
         if self.prior_only:
             if not self.use_priors:
                 raise ValueError("prior_only=True requires use_priors=True in config")
@@ -180,17 +151,13 @@ class CombinedModel:
             else:
                 return self.prior.compute_total_energy(R_masked, mask, species=species)
 
-        # Normal mode: compute ML (and optionally add priors)
-        # ML energy (has internal R_masked handling)
         E_ml = self.ml_model.compute_energy(
-            params['allegro'], R, mask, species, neighbor, segment_id=segment_id
+            params['ml'], R, mask, species, neighbor, segment_id=segment_id
         )
 
-        # Add prior energy if enabled
         if self.use_priors:
-            # Block gradient flow through padded atom coordinates.
-            # Start from a fully detached copy, then re-attach gradients only for
-            # valid atoms.  This avoids allocating a second full-size array.
+            # Stop gradient flow through padded atoms, re-attach only for valid ones
+
             R_detached = jax.lax.stop_gradient(R)
             mask_3d = mask[:, None]
             R_masked = jnp.where(mask_3d > 0, R, R_detached)
@@ -220,15 +187,6 @@ class CombinedModel:
         which expects compute_total_energy() method.
 
         Args:
-            params: Model parameters dict with 'allegro' and optionally 'prior'
-            R: Coordinates, shape (n_atoms, 3)
-            mask: Validity mask, shape (n_atoms,)
-            species: Species IDs, shape (n_atoms,)
-            neighbor: Neighbor list (optional)
-            segment_id: Optional segment IDs used in tiled mode.
-
-        Returns:
-            Total energy (scalar)
         """
         return self.compute_energy(
             params, R, mask, species, neighbor, segment_id=segment_id
@@ -255,26 +213,24 @@ class CombinedModel:
         Returns:
             Dictionary with energy components:
                 - E_total: Total energy
-                - E_allegro: Allegro ML energy (0.0 if prior_only)
+                - E_ml: ML energy (0.0 if prior_only)
                 - E_bond: Bond energy (if use_priors)
                 - E_angle: Angle energy (if use_priors)
                 - E_repulsive: Repulsive energy (if use_priors)
                 - E_dihedral: Dihedral energy (if use_priors)
                 - E_prior_total: Total prior energy (if use_priors)
         """
-        # ML energy (skip if prior_only mode)
         if self.prior_only:
             E_ml = 0.0
         else:
             E_ml = self.ml_model.compute_energy(
-                params['allegro'], R, mask, species, neighbor
+                params['ml'], R, mask, species, neighbor
             )
 
         components = {
-            "E_allegro": E_ml,  # Key kept as "E_allegro" for backward compat
+            "E_ml": E_ml,
         }
 
-        # Add prior components if enabled
         if self.use_priors:
             R_detached = jax.lax.stop_gradient(R)
             mask_3d = mask[:, None]
@@ -326,16 +282,15 @@ class CombinedModel:
         Returns:
             Dictionary with force components:
                 - F_total: Total forces
-                - F_allegro: Allegro forces
+                - F_ml: ML forces
                 - F_bond, F_angle, F_repulsive, F_dihedral, F_excluded_volume (if use_priors)
         """
         if self.use_priors:
-            # Returns a 7-tuple of scalars: one per energy component.
             def all_energies(R_):
                 comps = self.compute_components(params, R_, mask, species)
                 return (
                     comps["E_total"],
-                    comps["E_allegro"],
+                    comps["E_ml"],
                     comps["E_bond"],
                     comps["E_angle"],
                     comps["E_repulsive"],
@@ -353,7 +308,7 @@ class CombinedModel:
 
             return {
                 "F_total":           _force(0),
-                "F_allegro":         _force(1),
+                "F_ml":              _force(1),
                 "F_bond":            _force(2),
                 "F_angle":           _force(3),
                 "F_repulsive":       _force(4),
@@ -363,13 +318,13 @@ class CombinedModel:
         else:
             def all_energies(R_):
                 comps = self.compute_components(params, R_, mask, species)
-                return comps["E_total"], comps["E_allegro"]
+                return comps["E_total"], comps["E_ml"]
 
             _, vjp_fn = jax.vjp(all_energies, R)
 
             return {
-                "F_total":   -vjp_fn((1.0, 0.0))[0],
-                "F_allegro": -vjp_fn((0.0, 1.0))[0],
+                "F_total": -vjp_fn((1.0, 0.0))[0],
+                "F_ml":    -vjp_fn((0.0, 1.0))[0],
             }
 
     def energy_fn_template(self, params: Dict[str, Any]):
@@ -389,7 +344,6 @@ class CombinedModel:
             species = kwargs["species"]
             segment_id = kwargs.get("segment_id")
 
-            # Ensure species are valid for masked atoms
             species = jnp.where(mask > 0, species, 0).astype(jnp.int32)
 
             E = self.compute_energy(

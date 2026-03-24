@@ -1,11 +1,8 @@
 """
 Trainer for Force Matching
 
-Orchestrates training of combined Prior + Allegro models using chemtrain.
+Orchestrates training of combined Prior + ML models using chemtrain.
 Supports multi-stage training, prior pre-training, and checkpointing.
-
-Extracted from:
-- train_fm_multiple_proteins.py
 """
 
 import jax
@@ -52,7 +49,7 @@ def valid_component_mse(predictions, targets, weights=None):
 
 class Trainer:
     """
-    Trainer for force matching with Prior + Allegro models.
+    Trainer for force matching with Prior + ML models.
 
     Supports:
     - Multi-stage training with different optimizers
@@ -219,13 +216,8 @@ class Trainer:
         )
         self._edge_profiler_warned_missing_batch = False
         self._edge_profiler_prev_mean = None
-        self._neighbor_debug_enabled = (
-            str(os.getenv("CHEMTRAIN_DEBUG_NEIGHBOR", "1")).strip().lower() in env_true
-        )
-        self._neighbor_debug_rank0_only = (
-            str(os.getenv("CHEMTRAIN_DEBUG_NEIGHBOR_RANK0_ONLY", "1")).strip().lower()
-            in env_true
-        )
+        self._neighbor_debug_enabled = config.debug_neighbor_logging()
+        self._neighbor_debug_rank0_only = config.debug_neighbor_rank0_only()
         self._neighbor_debug_logged = False
         # Env override for emergency/no-code toggles in SLURM scripts.
         # 1/true/on -> enable traces, 0/false/off -> disable traces.
@@ -2181,15 +2173,12 @@ class Trainer:
             resume_epoch = metadata.get("completed_epochs", 0)
             training_logger.info(f"Resuming from stage '{resume_stage}' at epoch {resume_epoch}")
 
-        # Get optimizer names for stage comparison
-        stage1_opt = self.config.get_stage1_optimizer()
-        stage2_opt = self.config.get_stage2_optimizer()
-        stage1_epochs = self.config.get_epochs(stage1_opt)
-        stage2_epochs = self.config.get_epochs(stage2_opt)
+        stages = self.config.get_training_stages()
+        stage_names = [s["optimizer"] for s in stages]
 
-        # Check if prior pre-training is enabled (skip if resuming from later stage)
+        # Check if prior pre-training is enabled (skip if resuming from a training stage)
         pretrain_prior = self.config.pretrain_prior_enabled()
-        skip_pretrain = resume_stage in [stage1_opt, stage2_opt, "stage1", "stage2"]
+        skip_pretrain = resume_stage in stage_names or resume_stage in ["stage1", "stage2"]
 
         if pretrain_prior and self.model.use_priors and not skip_pretrain:
             max_steps = self.config.get_pretrain_prior_max_steps()
@@ -2199,28 +2188,32 @@ class Trainer:
                 tol_grad=tol_grad
             )
 
-        # Stage 1: AdaBelief (or configured optimizer)
-        skip_stage1 = resume_stage in [stage2_opt, "stage2"]
-        stage1_start_epoch = resume_epoch if resume_stage == stage1_opt else 0
+        # Iterate over configured training stages
+        found_resume_stage = resume_stage is None
+        for idx, stage in enumerate(stages):
+            opt_name = stage["optimizer"]
+            n_epochs = stage["epochs"]
 
-        if stage1_epochs > 0 and not skip_stage1:
-            results["stage1"] = self.train_stage(
-                stage1_opt,
-                stage1_epochs,
-                start_epoch=stage1_start_epoch,
+            if n_epochs <= 0:
+                continue
+
+            # Skip stages that precede the resume point
+            if not found_resume_stage:
+                if resume_stage == opt_name or resume_stage == f"stage{idx+1}":
+                    found_resume_stage = True
+                else:
+                    continue
+
+            start_epoch = resume_epoch if resume_stage == opt_name else 0
+            results[f"stage{idx+1}"] = self.train_stage(
+                opt_name,
+                n_epochs,
+                start_epoch=start_epoch,
                 checkpoint_freq=checkpoint_freq
             )
-
-        # Stage 2: Yogi (or configured optimizer)
-        stage2_start_epoch = resume_epoch if resume_stage == stage2_opt else 0
-
-        if stage2_epochs > 0:
-            results["stage2"] = self.train_stage(
-                stage2_opt,
-                stage2_epochs,
-                start_epoch=stage2_start_epoch,
-                checkpoint_freq=checkpoint_freq
-            )
+            # Only use resume_epoch for the stage we're resuming into
+            resume_stage = None
+            resume_epoch = 0
 
         return results
 

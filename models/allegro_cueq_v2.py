@@ -30,12 +30,9 @@ from typing import Callable, Any, Tuple, List, Union, Iterable
 
 import haiku as hk
 import jax
-import jaxopt
-from jax import random, lax, numpy as jnp, nn as jax_nn, tree_util
-from jax_md import space, partition, nn, util, energy, smap
+from jax import numpy as jnp, nn as jax_nn
+from jax_md import space, partition, nn
 import e3nn_jax as e3nn
-import cuequivariance as cue
-import cuequivariance_jax as cuex
 
 
 import numpy as onp
@@ -333,88 +330,6 @@ def _compute_sh_cue(ls, vectors, normalize=True):
     
     return e3nn.IrrepsArray(e3nn.Irreps(irreps_str), Y_np)
 
-
-def cue_block_ir_mul_to_e3nn_mul_ir(x_flat, irreps):
-    """Convert cuEq output to e3nn format.
-    
-    cuEq uses ir_mul: (d, mul) flattened per block
-    e3nn uses mul_ir: (mul, d) flattened per block
-    """
-    B = x_flat.shape[0]
-    out_chunks = []
-    i = 0
-    for mir in irreps:
-        mul = mir.mul
-        d = mir.ir.dim
-        n = mul * d
-        if n == 0:
-            continue
-        block = x_flat[:, i:i+n]
-        block = block.reshape(B, d, mul)
-        block = block.transpose(0, 2, 1)
-        out_chunks.append(block.reshape(B, n))
-        i += n
-    return jnp.concatenate(out_chunks, axis=-1)
-
-
-def _tensor_product_cue(wY, V, output_irreps):
-    """Compute tensor product using cuEquivariance.
-
-    Replaces e3nn.tensor_product with cuEquivariance implementation.
-    Returns a 2D IrrepsArray matching e3nn.tensor_product(...).axis_to_mul().
-
-    Handles 3D inputs (B, M, dim) where M is the mul_gcd batch axis used by
-    AllegroLayer.  The M dimension is folded into the leading batch for the
-    per-slot CG computation and then unfolded; irrep multiplicities in the
-    result are scaled by M so the downstream Linear / filter ops see a 2D
-    IrrepsArray of shape (B, M * out_per_slot_dim).
-    """
-    out_irreps = e3nn.Irreps(output_irreps) if isinstance(output_irreps, str) else output_irreps
-
-    is_3d = wY.array.ndim == 3
-    if is_3d:
-        # wY: (B, M, sh_dim)  V: (B, M, v_dim_per_mul)
-        B, M, _ = wY.array.shape
-        wY_data = wY.array.reshape(B * M, wY.array.shape[-1])
-        V_data  = V.array.reshape(B * M, V.array.shape[-1])
-        # Strip large multiplicities from the output filter: each slot has
-        # mul=1 inputs, so the CG TP produces CG-path multiplicities only.
-        # The M factor becomes part of the returned irrep multiplicities.
-        out_filter = e3nn.Irreps([(1, ir) for _, ir in out_irreps])
-    else:
-        B, M = wY.array.shape[0], None
-        wY_data = wY.array
-        V_data  = V.array
-        out_filter = e3nn.Irreps([(1, ir) for _, ir in out_irreps])
-
-    wY_cue_irreps  = cue.Irreps('O3', str(wY.irreps))
-    V_cue_irreps   = cue.Irreps('O3', str(V.irreps))
-    out_cue_irreps = cue.Irreps('O3', str(out_filter))
-
-    with cue.assume(cue.O3, cue.mul_ir):
-        wY_cue = cuex.RepArray(wY_cue_irreps, wY_data)
-        V_cue  = cuex.RepArray(V_cue_irreps,  V_data)
-
-        tp_desc    = cue.descriptors.full_tensor_product(wY_cue_irreps, V_cue_irreps, out_cue_irreps)
-        result_cue = cuex.equivariant_polynomial(tp_desc, [wY_cue, V_cue], method="naive")
-        if isinstance(result_cue, list):
-            result_cue = result_cue[0]
-
-    # Recover actual output irreps from the cuEq result (CG-path multiplicities,
-    # not the large "128x" from out_irreps).
-    raw_irr = result_cue.irreps
-    actual_irreps = e3nn.Irreps(str(raw_irr.irreps if hasattr(raw_irr, 'irreps') else raw_irr))
-
-    # Convert from cuEquivariance layout to e3nn mul_ir layout.
-    result_flat = cue_block_ir_mul_to_e3nn_mul_ir(result_cue.array, actual_irreps)
-
-    if is_3d:
-        # Unflatten (B*M, out_per_slot) -> (B, M*out_per_slot) and scale muls.
-        out_per_slot = result_flat.shape[1]
-        result_flat  = result_flat.reshape(B, M * out_per_slot)
-        actual_irreps = e3nn.Irreps([(M * mul, ir) for mul, ir in actual_irreps])
-
-    return e3nn.IrrepsArray(actual_irreps, result_flat)
 
 class AllegroEmbedding(hk.Module):
 
@@ -950,9 +865,6 @@ def allegro_neighborlist_pp(displacement: space.DisplacementFn,
             if logging:
                 jax.debug.print("[Allegro] Use default species")
             species = jnp.zeros(position.shape[0], dtype=jnp.int32)
-        if species is not None:
-            if logging:
-                jax.debug.print("[Allegro] Use two atom species for oxygen and hydroge.")
         elif positive_species:
             species -= 1
         if mask is None:

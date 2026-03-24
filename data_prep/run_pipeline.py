@@ -30,8 +30,6 @@ Example:
     ...     --spline \\
     ...     --residue_specific_angles
 
-Consolidated from:
-- Original run_pipeline.py in data_prep/
 """
 
 import argparse

@@ -1,5 +1,5 @@
 """
-Type definitions for chemtrain clean code base.
+Type definitions for cameo_cg.
 
 Provides type aliases and TypedDict classes for better type safety.
 """
@@ -71,7 +71,7 @@ class EnergyComponents(TypedDict, total=False):
     """Energy component breakdown."""
     E_total: float
     E_prior: Optional[float]
-    E_allegro: float
+    E_ml: float
     # Prior energy components
     E_bond: Optional[float]
     E_angle: Optional[float]
@@ -87,7 +87,7 @@ class ForceComponents(TypedDict):
     """Force component breakdown."""
     F_total: jax.Array
     F_prior: Optional[jax.Array]
-    F_allegro: jax.Array
+    F_ml: jax.Array
 
 
 class SingleFrameMetrics(TypedDict):
@@ -178,15 +178,15 @@ class SplineArrays(TypedDict, total=False):
 class ModelParams(TypedDict, total=False):
     """Combined model parameters."""
     prior: Optional[PriorParams]
-    allegro: Dict  # Allegro params (complex nested structure)
+    ml: Dict  # ML backbone params (complex nested structure)
 
 
 # =============================================================================
 # Config TypedDicts (optional - for future use)
 # =============================================================================
 
-class AllegroConfig(TypedDict, total=False):
-    """Allegro model configuration."""
+class MLModelConfig(TypedDict, total=False):
+    """ML model configuration (applies to Allegro, MACE, PaiNN, etc.)."""
     max_ell: int
     num_layers: int
     n_radial_basis: int
@@ -201,6 +201,7 @@ class AllegroConfig(TypedDict, total=False):
     avg_num_neighbors: int
     max_edge_multiplier: float
     max_edges: int
+    neighbor_extra_capacity: int
 
 
 class OptimizerConfig(TypedDict, total=False):

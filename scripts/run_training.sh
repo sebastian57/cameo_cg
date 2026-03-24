@@ -4,15 +4,13 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-task=4
-#SBATCH --time=02:00:00
-#SBATCH --partition=develbooster
+#SBATCH --time=04:00:00
+#SBATCH --partition=booster
 #SBATCH --output=outputs/slurm-%j.out
 
 # =============================================================================
-# Unified SLURM script for Allegro training (works for 1 or N nodes)
+# Unified SLURM script for training (single run or array suite)
 # =============================================================================
-#
-# IMPORTANT: Submit this job from the clean_code_base/ directory
 #
 # ARCHITECTURE:
 #   - 1 process per NODE (not per GPU!)
@@ -20,32 +18,29 @@
 #   - chemtrain uses pmap internally to distribute across local GPUs
 #   - JAX distributed coordinates gradient sync across NODES
 #
-# Memory model:
-#   - Data loaded ONCE per node (not per GPU)
-#   - pmap splits batches across 4 local GPUs
-#   - For 2 nodes: 2 processes, each with 4 GPUs = 8 total GPUs
-#
 # Usage:
-#   Single-node (1 node, 4 GPUs):
+#   Single-run:
 #     sbatch scripts/run_training.sh config.yaml
 #
-#   Multi-node (2 nodes, 8 GPUs):
+#   Multi-node:
 #     sbatch --nodes=2 scripts/run_training.sh config.yaml
 #
-#   Resume from latest checkpoint:
+#   Resume:
 #     sbatch scripts/run_training.sh config.yaml --resume auto
 #
-#   Resume from specific checkpoint:
-#     sbatch scripts/run_training.sh config.yaml --resume ./checkpoints_allegro/epoch30.pkl
+#   Multi-protein:
+#     sbatch scripts/run_training.sh config.yaml --multi-protein-dir /path/to/npz
 #
-#   Multi-protein bucketed training:
-#     sbatch scripts/run_training.sh config.yaml --multi-protein-dir /path/to/03_bucketed_npz
+#   Array mode (submitted by scripts/submit_suite.sh):
+#     sbatch --array 0-N%4 \
+#       --export=ALL,CONFIG_LIST_FILE=manifest.txt,PARENT_OUTPUT_DIR=... \
+#       scripts/run_training.sh
 #
 # =============================================================================
 
 set -Eeuo pipefail
 
-RUN_TRAINING_TRACE="${RUN_TRAINING_TRACE:-1}"
+RUN_TRAINING_TRACE="${RUN_TRAINING_TRACE:-0}"
 if [[ "${RUN_TRAINING_TRACE}" == "1" ]]; then
     export PS4='[run_training.sh:${LINENO}] '
     set -x
@@ -58,110 +53,8 @@ run_training_err_trap() {
 }
 trap run_training_err_trap ERR
 
-CONFIG_FILE="$1"
-shift  # Remove config file from arguments
-
-if [[ -z "$CONFIG_FILE" ]]; then
-    echo "Usage: sbatch run_training.sh <config.yaml> [--multi-protein-dir <bucket_dir>] [--resume auto|<checkpoint.pkl>] [extra train.py args]"
-    exit 1
-fi
-
-# Parse training flags
-RESUME_VALUE=""
-MULTI_PROTEIN_DIR=""
-EXTRA_ARGS=()
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --resume)
-            if [[ -n "$2" ]]; then
-                RESUME_VALUE="$2"
-                shift 2
-            else
-                echo "ERROR: --resume requires an argument (auto or checkpoint path)"
-                exit 1
-            fi
-            ;;
-        --multi-protein-dir)
-            if [[ -n "$2" ]]; then
-                MULTI_PROTEIN_DIR="$2"
-                shift 2
-            else
-                echo "ERROR: --multi-protein-dir requires a directory path"
-                exit 1
-            fi
-            ;;
-        --)
-            shift
-            while [[ $# -gt 0 ]]; do
-                EXTRA_ARGS+=("$1")
-                shift
-            done
-            ;;
-        *)
-            EXTRA_ARGS+=("$1")
-            shift
-            ;;
-    esac
-done
-
-if [[ -n "$MULTI_PROTEIN_DIR" && -n "$RESUME_VALUE" ]]; then
-    echo "WARNING: --resume is not supported in --multi-protein-dir mode; ignoring --resume ${RESUME_VALUE}"
-    RESUME_VALUE=""
-fi
-
-# Resolve config path early so we can read ml_model before choosing venv.
-if [[ "${CONFIG_FILE}" == /* ]]; then
-    CONFIG_FILE_RESOLVED="${CONFIG_FILE}"
-elif [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/${CONFIG_FILE}" ]]; then
-    CONFIG_FILE_RESOLVED="${SLURM_SUBMIT_DIR}/${CONFIG_FILE}"
-else
-    CONFIG_FILE_RESOLVED="$(pwd)/${CONFIG_FILE}"
-fi
-
-if [[ ! -f "${CONFIG_FILE_RESOLVED}" ]]; then
-    echo "ERROR: Config file not found: ${CONFIG_FILE_RESOLVED}"
-    exit 1
-fi
-CONFIG_FILE="${CONFIG_FILE_RESOLVED}"
-
-MODEL_TYPE="$(
-    awk '
-        /^[[:space:]]*#/ { next }
-        /^[[:space:]]*ml_model:[[:space:]]*/ {
-            line = $0
-            sub(/^[[:space:]]*ml_model:[[:space:]]*/, "", line)
-            sub(/[[:space:]]*#.*/, "", line)
-            gsub(/[[:space:]"]/, "", line)
-            print line
-            exit
-        }
-    ' "${CONFIG_FILE_RESOLVED}"
-)"
-
-if [[ -z "${MODEL_TYPE}" ]]; then
-    echo "ERROR: Could not determine model.ml_model from config: ${CONFIG_FILE_RESOLVED}"
-    exit 1
-fi
-
-MODEL_TYPE_LOWER="${MODEL_TYPE,,}"
-MODEL_TYPE_CANON="${MODEL_TYPE_LOWER//-/_}"
-if [[ "${MODEL_TYPE_CANON}" == "allegro_cueq" || "${MODEL_TYPE_CANON}" == "allegro_cueq_fast" || "${MODEL_TYPE_CANON}" == "allegro_cueq_opt" || "${MODEL_TYPE_CANON}" == "allegro_cueq_b1" || "${MODEL_TYPE_CANON}" == "allegro_cueq_fast_1103" ]]; then
-    SELECTED_VENV="/p/project1/cameo/schmidt36/env_cueq_allegro_opt"
-    SELECTED_VENV_NAME="env_cueq_allegro_opt"
-elif [[ "${MODEL_TYPE_CANON}" == "allegro" ]]; then
-    SELECTED_VENV="/p/project1/cameo/schmidt36/clean_booster_env"
-    SELECTED_VENV_NAME="clean_booster_env"
-else
-    # Default all non-cuEq backbones to the clean environment.
-    SELECTED_VENV="/p/project1/cameo/schmidt36/clean_booster_env"
-    SELECTED_VENV_NAME="clean_booster_env"
-    echo "WARNING: Unrecognized ml_model='${MODEL_TYPE}'. Defaulting to ${SELECTED_VENV_NAME}."
-fi
-
-source /p/project1/cameo/schmidt36/load_modules.sh
-source "${SELECTED_VENV}/bin/activate"
-echo "Selected ml_model: ${MODEL_TYPE_CANON} -> activated ${SELECTED_VENV_NAME}"
-source /p/project1/cameo/schmidt36/set_lammps_paths.sh
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 
 is_truthy() {
     case "${1,,}" in
@@ -170,376 +63,321 @@ is_truthy() {
     esac
 }
 
-export CC=$(which gcc)
-export CXX=$(which g++)
-export CLANG_CUDA_COMPILER_PATH=$(which gcc)
-
-# CUDA setup for JAX
-CUDA_ROOT=$(python -c "import os; from jax_plugins import xla_cuda12; print(os.path.dirname(xla_cuda12.__file__))")
-SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])")
-export LD_LIBRARY_PATH="$CUDA_ROOT:$SITE_PACKAGES/nvidia/cudnn/lib:$SITE_PACKAGES/nvidia/cuda_runtime/lib:$SITE_PACKAGES/nvidia/cublas/lib:$SITE_PACKAGES/nvidia/cusolver/lib:${LD_LIBRARY_PATH:-}"
-
-export CUDA_HOME=/p/software/juwelsbooster/stages/2025/software/CUDA/12
-export XLA_FLAGS="--xla_gpu_cuda_data_dir=$CUDA_HOME --xla_gpu_autotune_level=0"
-# Match open_testing behavior for fused-SP method fallback unless caller overrides.
-export ALLEGRO_TP_METHOD_FALLBACK="${ALLEGRO_TP_METHOD_FALLBACK:-naive}"
-
-# ===== JAX Distributed Setup =====
-# JAX automatically detects SLURM environment (nodes, process IDs, coordinator)
-# No manual coordinator setup needed - jax.distributed.initialize() handles it
-
-# Memory settings for multi-GPU
-export XLA_PYTHON_CLIENT_PREALLOCATE=false
-export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
-
-# GPU visibility: defaults to all 4 GPUs; can be overridden externally for scaling tests
-# Strip trailing whitespace that SLURM may inject when setting CUDA_VISIBLE_DEVICES automatically
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES//[[:space:]]/}"
-#export CUDA_VISIBLE_DEVICES=0
-
-# Force NCCL (GPU-GPU gradient sync) to use InfiniBand, not Ethernet.
-# Without this, NCCL may pick the wrong interface and stall during collective ops.
-export NCCL_SOCKET_IFNAME=ib0
-export NCCL_DEBUG=WARN
-if is_truthy "${CHEMTRAIN_PROFILE_NCCL_INFO:-0}"; then
-    export NCCL_DEBUG=INFO
-    export NCCL_DEBUG_SUBSYS=INIT,COLL
-else
-    unset NCCL_DEBUG_SUBSYS
+# =============================================================================
+# Parse arguments
+# =============================================================================
+CONFIG_FILE="${1:-}"
+if [[ -n "${CONFIG_FILE}" ]]; then
+    shift || true
 fi
 
-# JAX distributed can fail or hang when proxy env vars are set in multi-node jobs.
-unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy
+# Array mode: pick config from manifest
+if [[ -z "${CONFIG_FILE}" && -n "${CONFIG_LIST_FILE:-}" ]]; then
+    if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
+        echo "ERROR: CONFIG_LIST_FILE provided but SLURM_ARRAY_TASK_ID is not set"
+        exit 1
+    fi
+    CONFIG_FILE="$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" "${CONFIG_LIST_FILE}")"
+fi
 
-# Normal training defaults (no profiling).
-# Read grad accumulation defaults from the YAML config when available so the
-# launcher summary matches the actual trainer behavior. Environment variables
-# still win if the user sets them explicitly before submission.
-CONFIG_GRAD_ACCUM_STEPS="$(python - "$CONFIG_FILE" <<'PYCFG'
-import sys
+if [[ -z "${CONFIG_FILE}" ]]; then
+    echo "Usage: sbatch scripts/run_training.sh <config.yaml> [--resume auto|<path>] [--multi-protein-dir <dir>]"
+    exit 1
+fi
+
+RESUME_VALUE=""
+MULTI_PROTEIN_DIR=""
+EXTRA_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --resume)
+            RESUME_VALUE="${2:?--resume requires an argument}"; shift 2 ;;
+        --multi-protein-dir)
+            MULTI_PROTEIN_DIR="${2:?--multi-protein-dir requires a directory}"; shift 2 ;;
+        --)
+            shift; EXTRA_ARGS+=("$@"); break ;;
+        *)
+            EXTRA_ARGS+=("$1"); shift ;;
+    esac
+done
+
+if [[ -n "$MULTI_PROTEIN_DIR" && -n "$RESUME_VALUE" ]]; then
+    echo "WARNING: --resume not supported with --multi-protein-dir; ignoring"
+    RESUME_VALUE=""
+fi
+
+# Resolve config to absolute path
+if [[ "${CONFIG_FILE}" != /* ]]; then
+    if [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/${CONFIG_FILE}" ]]; then
+        CONFIG_FILE="$(cd "${SLURM_SUBMIT_DIR}" && pwd -P)/${CONFIG_FILE}"
+    elif [[ -f "${PROJECT_ROOT}/${CONFIG_FILE}" ]]; then
+        CONFIG_FILE="${PROJECT_ROOT}/${CONFIG_FILE}"
+    else
+        CONFIG_FILE="$(pwd -P)/${CONFIG_FILE}"
+    fi
+fi
+if [[ ! -f "${CONFIG_FILE}" ]]; then
+    echo "ERROR: Config file not found: ${CONFIG_FILE}"
+    exit 1
+fi
+
+# Resolve multi-protein dir
+if [[ -n "$MULTI_PROTEIN_DIR" && "${MULTI_PROTEIN_DIR}" != /* ]]; then
+    MULTI_PROTEIN_DIR="${PROJECT_ROOT}/${MULTI_PROTEIN_DIR}"
+fi
+
+# =============================================================================
+# Environment setup (shared helper)
+# =============================================================================
+source "${SCRIPT_DIR}/slurm_env.sh"
+
+# =============================================================================
+# Output directory setup
+# =============================================================================
+JOB_TAG="${SLURM_JOB_ID:-local}"
+if [[ -n "${SLURM_ARRAY_JOB_ID:-}" && -n "${SLURM_ARRAY_TASK_ID:-}" ]]; then
+    JOB_TAG="${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
+fi
+
+RUN_NAME="${RUN_NAME:-$(basename "${CONFIG_FILE%.*}")}"
+DATE_TAG="$(date +%Y%m%d)"
+
+if [[ -n "${PARENT_OUTPUT_DIR:-}" ]]; then
+    # Suite mode: outputs under the parent suite directory
+    OUTPUTS_ROOT="${PARENT_OUTPUT_DIR}"
+    RUN_OUTPUT_DIR="${OUTPUTS_ROOT}/${RUN_NAME}"
+else
+    # Single-run mode
+    OUTPUTS_ROOT="${PROJECT_ROOT}/outputs"
+    RUN_OUTPUT_DIR="${OUTPUTS_ROOT}/${DATE_TAG}_${RUN_NAME}"
+fi
+
+mkdir -p "${RUN_OUTPUT_DIR}"
+RUN_OUTPUT_DIR="$(cd "${RUN_OUTPUT_DIR}" && pwd -P)"
+RUN_EXPORT_DIR="${RUN_OUTPUT_DIR}/exports"
+RUN_CHECKPOINT_DIR="${RUN_OUTPUT_DIR}/checkpoints"
+RUN_PROFILE_DIR="${RUN_OUTPUT_DIR}/profiles"
+mkdir -p "${RUN_EXPORT_DIR}" "${RUN_CHECKPOINT_DIR}" "${RUN_PROFILE_DIR}"
+
+# Runtime config: inject resolved output paths into a copy of the config
+INPUT_CONFIG_COPY="${RUN_OUTPUT_DIR}/config_input.yaml"
+RUNTIME_CONFIG="${RUN_OUTPUT_DIR}/config_runtime.yaml"
+cp -f "${CONFIG_FILE}" "${INPUT_CONFIG_COPY}"
+
+"${PYTHON_BIN}" - <<'PYCFG' "${CONFIG_FILE}" "${RUNTIME_CONFIG}" "${RUN_EXPORT_DIR}" "${RUN_CHECKPOINT_DIR}" "${RUN_PROFILE_DIR}" "${PROJECT_ROOT}"
 from pathlib import Path
-import yaml
-cfg_path = Path(sys.argv[1])
-try:
-    data = yaml.safe_load(cfg_path.read_text()) or {}
-except Exception:
-    data = {}
-value = (((data.get('training') or {}).get('grad_accum_steps', None)))
-print('' if value is None else value)
+import sys, yaml
+
+src = Path(sys.argv[1]).resolve()
+out = Path(sys.argv[2]).resolve()
+export_dir = str(Path(sys.argv[3]).resolve())
+checkpoint_dir = str(Path(sys.argv[4]).resolve())
+profile_dir = str(Path(sys.argv[5]).resolve())
+project_root = Path(sys.argv[6]).resolve()
+
+data = yaml.safe_load(src.read_text()) or {}
+
+paths = data.setdefault('paths', {})
+paths['output_dir'] = str(Path(sys.argv[3]).resolve().parent)
+paths['export_dir'] = export_dir
+paths['checkpoint_dir'] = checkpoint_dir
+paths['profile_dir'] = profile_dir
+
+# Also set legacy keys for backward compat with older code paths
+training = data.setdefault('training', {})
+training['export_path'] = export_dir
+training['checkpoint_path'] = checkpoint_dir
+profiling = training.setdefault('profiling', {})
+profiling['trace_dir'] = profile_dir
+
+# Resolve relative input paths to absolute
+model = data.setdefault('model', {})
+priors = model.get('priors') or {}
+spline_file = priors.get('spline_file')
+if spline_file:
+    sp = Path(spline_file)
+    if not sp.is_absolute():
+        for candidate in [project_root / sp, src.parent / sp]:
+            if candidate.exists():
+                priors['spline_file'] = str(candidate.resolve())
+                break
+        else:
+            priors['spline_file'] = str((project_root / sp).resolve())
+    model['priors'] = priors
+
+data_path = ((data.get('data') or {}).get('path'))
+if data_path:
+    dp = Path(data_path)
+    if not dp.is_absolute():
+        data['data']['path'] = str((project_root / dp).resolve())
+
+out.write_text(yaml.safe_dump(data, sort_keys=False))
 PYCFG
-)"
-CONFIG_GRAD_ACCUM_MODE="$(python - "$CONFIG_FILE" <<'PYCFG'
-import sys
-from pathlib import Path
-import yaml
-cfg_path = Path(sys.argv[1])
-try:
-    data = yaml.safe_load(cfg_path.read_text()) or {}
-except Exception:
-    data = {}
-value = (((data.get('training') or {}).get('grad_accum_mode', None)))
-print('' if value is None else value)
-PYCFG
-)"
+
+LOGFILE="${RUN_OUTPUT_DIR}/train_${JOB_TAG}.log"
+
+# =============================================================================
+# Read grad-accum settings from config (env vars win if set externally)
+# =============================================================================
+CONFIG_GRAD_ACCUM_STEPS="$("${PYTHON_BIN}" -c "
+import yaml, sys
+d = yaml.safe_load(open(sys.argv[1])) or {}
+v = (d.get('training') or {}).get('grad_accum_steps')
+print('' if v is None else v)
+" "${CONFIG_FILE}" 2>/dev/null || echo '')"
+CONFIG_GRAD_ACCUM_MODE="$("${PYTHON_BIN}" -c "
+import yaml, sys
+d = yaml.safe_load(open(sys.argv[1])) or {}
+v = (d.get('training') or {}).get('grad_accum_mode')
+print('' if v is None else v)
+" "${CONFIG_FILE}" 2>/dev/null || echo '')"
 export CHEMTRAIN_GRAD_ACCUM_STEPS="${CHEMTRAIN_GRAD_ACCUM_STEPS:-${CONFIG_GRAD_ACCUM_STEPS:-6}}"
 export CHEMTRAIN_GRAD_ACCUM_MODE="${CHEMTRAIN_GRAD_ACCUM_MODE:-${CONFIG_GRAD_ACCUM_MODE:-stack_scan}}"
-export CHEMTRAIN_DEBUG_MICROBATCH_GRAD_NORMS="${CHEMTRAIN_DEBUG_MICROBATCH_GRAD_NORMS:-0}"
-export CHEMTRAIN_DISABLE_GRAD_NORM=0
-export CHEMTRAIN_DISABLE_TRAIN_TARGET_LOSS_SYNC=0
-export CHEMTRAIN_PROFILE_DATALOADER_NEXT=0
-export CHEMTRAIN_PROFILE_RANK0_ONLY=1
-export CHEMTRAIN_PROFILE_BATCH_BREAKDOWN=0
-export CHEMTRAIN_PROFILE_UPDATE_BREAKDOWN=0
-export CHEMTRAIN_PROFILE_TASK_TIMING=0
-export CHEMTRAIN_PROFILE_BATCH_BREAKDOWN_LIMIT=0
-export CHEMTRAIN_PROFILE_UPDATE_FN_INTERNAL=0
-export CHEMTRAIN_PROFILE_UPDATE_FN_INTERNAL_BLOCK=0
-export CHEMTRAIN_PROFILE_UPDATE_FN_INTERNAL_RANK0_ONLY=1
-export CHEMTRAIN_PROFILE_UPDATE_FN_INTERNAL_LIMIT=0
-export CHEMTRAIN_PROFILE_GPU_TELEMETRY=0
+
+# --- Debug flags consumed by cameo_cg Python code (config.debug.* is primary) ---
 export CHEMTRAIN_DEBUG_SHAPE_TRACE="${CHEMTRAIN_DEBUG_SHAPE_TRACE:-0}"
-export CHEMTRAIN_DEBUG_NEIGHBOR="${CHEMTRAIN_DEBUG_NEIGHBOR:-1}"
+export CHEMTRAIN_DEBUG_NEIGHBOR="${CHEMTRAIN_DEBUG_NEIGHBOR:-0}"
 export CHEMTRAIN_DEBUG_NEIGHBOR_RANK0_ONLY="${CHEMTRAIN_DEBUG_NEIGHBOR_RANK0_ONLY:-1}"
-export CHEMTRAIN_DEBUG_COMPILE_SIGNATURE=0
-export CHEMTRAIN_DEBUG_COMPILE_SIGNATURE_RANK0_ONLY=1
-export JAX_LOG_COMPILES=0
-export CHEMTRAIN_DEBUG_MICROBATCH_GRAD_NORMS=0
+
+# --- Chemtrain-internal passthrough (not read by cameo_cg code) ---
+export CHEMTRAIN_DEBUG_MICROBATCH_GRAD_NORMS="${CHEMTRAIN_DEBUG_MICROBATCH_GRAD_NORMS:-0}"
+export CHEMTRAIN_DISABLE_GRAD_NORM="${CHEMTRAIN_DISABLE_GRAD_NORM:-0}"
+export CHEMTRAIN_DISABLE_TRAIN_TARGET_LOSS_SYNC="${CHEMTRAIN_DISABLE_TRAIN_TARGET_LOSS_SYNC:-0}"
 export CHEMTRAIN_SEGMENT_SUM_MODE="${CHEMTRAIN_SEGMENT_SUM_MODE:-chunked}"
 export CHEMTRAIN_SEGMENT_SUM_CHUNK_EDGES="${CHEMTRAIN_SEGMENT_SUM_CHUNK_EDGES:-65536}"
 export CHEMTRAIN_SEGMENT_SUM_DEBUG="${CHEMTRAIN_SEGMENT_SUM_DEBUG:-0}"
-# Keep runtime precision in FP32 for non-profiling training unless config
-# explicitly overrides inside the trainer.
-export CHEMTRAIN_COMPUTE_DTYPE=float32
-export CHEMTRAIN_PARAM_DTYPE=float32
-export CHEMTRAIN_REDUCE_DTYPE=float32
 
-# ===== Verification =====
-echo "============================================================"
-echo "Module Environment"
-echo "============================================================"
-module list
-echo ""
-echo "============================================================"
-echo "SLURM Job Configuration"
-echo "============================================================"
-echo "Config file:    $CONFIG_FILE"
-echo "Job ID:         $SLURM_JOB_ID"
-echo "Nodes:          $SLURM_NNODES"
-echo "Tasks/node:     1 (1 process per node)"
-echo "GPUs per node:  4 (pmap distributes across local GPUs)"
-echo "Total GPUs:     $((SLURM_NNODES * 4))"
-echo "CUDA_HOME:      $CUDA_HOME"
-echo "CUDA_VISIBLE:   $CUDA_VISIBLE_DEVICES"
-echo "Grad accum K:   $CHEMTRAIN_GRAD_ACCUM_STEPS"
-echo "Accum mode:     $CHEMTRAIN_GRAD_ACCUM_MODE"
-echo "Shape trace:    $CHEMTRAIN_DEBUG_SHAPE_TRACE"
-echo "Nbr debug:      $CHEMTRAIN_DEBUG_NEIGHBOR"
-echo "Compile sig:    $CHEMTRAIN_DEBUG_COMPILE_SIGNATURE"
-echo "JAX compiles:   $JAX_LOG_COMPILES"
-echo "Edge agg mode:  $CHEMTRAIN_SEGMENT_SUM_MODE"
-echo "Edge chunk:     $CHEMTRAIN_SEGMENT_SUM_CHUNK_EDGES"
-echo "Edge agg debug: $CHEMTRAIN_SEGMENT_SUM_DEBUG"
-echo "TP fallback:    $ALLEGRO_TP_METHOD_FALLBACK"
-if [[ -n "${CHEMTRAIN_NEIGHBOR_LIST_FORMAT:-}" ]]; then
-    echo "Nbr list fmt:   ${CHEMTRAIN_NEIGHBOR_LIST_FORMAT} (env override)"
-fi
-echo "============================================================"
-
-# Print device info from each node
-echo "Verifying GPU allocation per node..."
-srun --ntasks-per-node=1 bash -c 'echo "Host=$(hostname) CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"; nvidia-smi -L'
-
-# For multi-node: verify SLURM process IDs (JAX auto-detects coordinator)
-if [[ $SLURM_NNODES -gt 1 ]]; then
-    echo ""
+# =============================================================================
+# Multi-node coordinator verification
+# =============================================================================
+if [[ ${SLURM_NNODES:-1} -gt 1 ]]; then
     echo "============================================================"
     echo "Multi-node JAX Distributed Verification"
     echo "============================================================"
     srun --ntasks-per-node=1 bash -c 'echo "Node=$(hostname) SLURM_PROCID=$SLURM_PROCID SLURM_NTASKS=$SLURM_NTASKS"'
-    echo "JAX coordinator will be selected explicitly (host/port exported to train.py)"
-    echo "============================================================"
 
-    # Verify inter-node network reachability before starting training.
-    # Fail fast if we cannot find a coordinator address reachable from all nodes.
     COORD_NODE=$(scontrol show hostname "$SLURM_JOB_NODELIST" | head -1)
     COORD_PORT=$((29400 + (SLURM_JOB_ID % 1000)))
-    # Use a dedicated probe port for TCP reachability checks.
     TCP_PROBE_PORT=$((20000 + (SLURM_JOB_ID % 20000)))
 
-    # Candidate coordinator addresses in priority order.
-    # Prefer InfiniBand hostname first (JUWELS convention: append 'i').
     COORD_CANDIDATES=("${COORD_NODE}i.juwels" "${COORD_NODE}.juwels" "${COORD_NODE}")
-    COORD_IP_GETENT=$(getent ahostsv4 "${COORD_NODE}i.juwels" 2>/dev/null | awk 'NR==1 {print $1}')
-    if [[ -n "${COORD_IP_GETENT}" ]]; then
-        COORD_CANDIDATES+=("${COORD_IP_GETENT}")
-    fi
-    COORD_IP_GETENT=$(getent ahostsv4 "${COORD_NODE}.juwels" 2>/dev/null | awk 'NR==1 {print $1}')
-    if [[ -n "${COORD_IP_GETENT}" ]]; then
-        COORD_CANDIDATES+=("${COORD_IP_GETENT}")
-    fi
+    for host_suffix in "${COORD_NODE}i.juwels" "${COORD_NODE}.juwels"; do
+        COORD_IP_GETENT=$(getent ahostsv4 "${host_suffix}" 2>/dev/null | awk 'NR==1 {print $1}')
+        [[ -n "${COORD_IP_GETENT}" ]] && COORD_CANDIDATES+=("${COORD_IP_GETENT}")
+    done
     COORD_IP_REMOTE=$(srun --nodes=1 --ntasks=1 -w "${COORD_NODE}" \
         bash -lc "hostname -I | awk '{print \$1}'" 2>/dev/null | tail -n1)
-    if [[ -n "${COORD_IP_REMOTE}" ]]; then
-        COORD_CANDIDATES+=("${COORD_IP_REMOTE}")
-    fi
+    [[ -n "${COORD_IP_REMOTE}" ]] && COORD_CANDIDATES+=("${COORD_IP_REMOTE}")
 
     check_host_all_nodes_tcp() {
         local host="$1"
-        local listener_step_pid=""
-
-        echo "Testing inter-node TCP reachability to candidate coordinator: ${host}:${TCP_PROBE_PORT}"
-
-        # Start a short-lived TCP listener on the coordinator node.
-        srun --overlap --nodes=1 --ntasks=1 -w "${COORD_NODE}" bash -lc \
-            "python3 -u -c '
-import socket
-import time
-import sys
-
-port = int(\"${TCP_PROBE_PORT}\")
+        echo "Testing TCP reachability to ${host}:${TCP_PROBE_PORT}"
+        srun --overlap --nodes=1 --ntasks=1 -w "${COORD_NODE}" bash -lc "
+            python3 -u -c '
+import socket, time, sys
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-try:
-    s.bind((\"0.0.0.0\", port))
-except Exception as e:
-    print(f\"listener bind failed on port {port}: {e}\", flush=True)
-    sys.exit(2)
+s.bind((\"0.0.0.0\", ${TCP_PROBE_PORT}))
 s.listen(16)
-print(\"listener ready\", flush=True)
 deadline = time.time() + 25
 while time.time() < deadline:
     s.settimeout(1.0)
     try:
-        conn, _ = s.accept()
-        conn.close()
-    except socket.timeout:
-        pass
+        conn, _ = s.accept(); conn.close()
+    except socket.timeout: pass
 s.close()
-	'" >/dev/null 2>&1 &
-        listener_step_pid=$!
-
-        # Give listener time to bind before client checks.
+'" >/dev/null 2>&1 &
+        local listener_pid=$!
         sleep 1
-
-        # Verify each node can establish a TCP connection to the candidate host.
-        srun --overlap --ntasks-per-node=1 bash -lc \
-            "python3 -u -c '
-import socket
-import sys
-
-host = \"${host}\"
-port = int(\"${TCP_PROBE_PORT}\")
+        srun --overlap --ntasks-per-node=1 bash -lc "
+            python3 -u -c '
+import socket, sys
 try:
-    sock = socket.create_connection((host, port), timeout=5.0)
+    sock = socket.create_connection((\"${host}\", ${TCP_PROBE_PORT}), timeout=5.0)
     sock.close()
-    print(f\"{socket.gethostname()}: tcp connect to {host}:{port} OK\", flush=True)
 except Exception as e:
-    print(f\"{socket.gethostname()}: tcp connect to {host}:{port} FAILED ({e})\", flush=True)
     sys.exit(1)
 '"
         local rc=$?
-
-        # Ensure background listener is stopped before continuing.
-        kill "${listener_step_pid}" >/dev/null 2>&1 || true
-        wait "${listener_step_pid}" >/dev/null 2>&1 || true
+        kill "${listener_pid}" >/dev/null 2>&1 || true
+        wait "${listener_pid}" >/dev/null 2>&1 || true
         return "${rc}"
     }
 
-    # Pick first candidate reachable from all nodes.
     COORD_HOST_SELECTED=""
     declare -A _seen_coord
     for cand in "${COORD_CANDIDATES[@]}"; do
-        [[ -z "${cand}" ]] && continue
-        if [[ -n "${_seen_coord[$cand]}" ]]; then
-            continue
-        fi
+        [[ -z "${cand}" || -n "${_seen_coord[$cand]:-}" ]] && continue
         _seen_coord[$cand]=1
         if check_host_all_nodes_tcp "${cand}"; then
             COORD_HOST_SELECTED="${cand}"
             break
         fi
     done
-
     if [[ -z "${COORD_HOST_SELECTED}" ]]; then
-        echo "ERROR: No coordinator address is reachable from all nodes."
-        echo "Tried candidates: ${COORD_CANDIDATES[*]}"
+        echo "ERROR: No coordinator address reachable from all nodes."
         exit 1
     fi
-
     export CHEMTRAIN_COORDINATOR_HOST="${COORD_HOST_SELECTED}"
     export CHEMTRAIN_COORDINATOR_PORT="${COORD_PORT}"
     echo "Selected coordinator: ${CHEMTRAIN_COORDINATOR_HOST}:${CHEMTRAIN_COORDINATOR_PORT}"
     echo "============================================================"
 fi
 
-# ===== Determine paths =====
-# Use SLURM_SUBMIT_DIR (directory from which job was submitted)
-# Assumes you submit from clean_code_base/ directory
-if [[ -n "$SLURM_SUBMIT_DIR" ]]; then
-    CLEAN_CODE_BASE_DIR="$SLURM_SUBMIT_DIR"
-else
-    # Fallback: use current directory
-    CLEAN_CODE_BASE_DIR="$(pwd)"
-fi
-
-cd "${CLEAN_CODE_BASE_DIR}"
-
-# Resolve CONFIG_FILE to an absolute path so Python sees the right file
-# regardless of the working directory on any remote node.
-if [[ "${CONFIG_FILE}" != /* ]]; then
-    CONFIG_FILE="${CLEAN_CODE_BASE_DIR}/${CONFIG_FILE}"
-fi
-if [[ -n "$MULTI_PROTEIN_DIR" && "${MULTI_PROTEIN_DIR}" != /* ]]; then
-    MULTI_PROTEIN_DIR="${CLEAN_CODE_BASE_DIR}/${MULTI_PROTEIN_DIR}"
-fi
-
-SCRIPT_DIR="${CLEAN_CODE_BASE_DIR}/scripts"
-TRAIN_SCRIPT="${SCRIPT_DIR}/train.py"
-
-echo "Submit directory: ${CLEAN_CODE_BASE_DIR}"
-echo "Training script:  ${TRAIN_SCRIPT}"
-
-# Verify script exists
-if [[ ! -f "${TRAIN_SCRIPT}" ]]; then
-    echo "ERROR: Training script not found at ${TRAIN_SCRIPT}"
-    echo "Please submit this job from the clean_code_base/ directory"
-    exit 1
-fi
-
-# ===== Prepare Output Directory =====
-# Create outputs directory for logs (relative to submit directory)
-OUTPUTS_DIR="${CLEAN_CODE_BASE_DIR}/outputs"
-mkdir -p "${OUTPUTS_DIR}"
-
-# Save the exact input config snapshot before starting Python/JAX init.
-PRELAUNCH_CONFIG_COPY="${OUTPUTS_DIR}/config_${SLURM_JOB_ID}_prelaunch.yaml"
-cp -f "${CONFIG_FILE}" "${PRELAUNCH_CONFIG_COPY}"
-echo "Pre-launch config snapshot: ${PRELAUNCH_CONFIG_COPY}"
-
+# =============================================================================
+# GPU telemetry (optional)
+# =============================================================================
 GPU_TELEMETRY_SRUN_PID=""
-if is_truthy "${CHEMTRAIN_PROFILE_GPU_TELEMETRY}"; then
-    echo "Starting per-node GPU telemetry sampling (1 Hz)..."
-    GPU_TELEMETRY_PREFIX="${OUTPUTS_DIR}/gpu_telemetry_${SLURM_JOB_ID}"
+if is_truthy "${CHEMTRAIN_PROFILE_GPU_TELEMETRY:-0}"; then
+    GPU_TELEMETRY_PREFIX="${RUN_OUTPUT_DIR}/gpu_telemetry_${JOB_TAG}"
     srun --overlap --ntasks-per-node=1 bash -lc "
         out='${GPU_TELEMETRY_PREFIX}_\$(hostname).csv'
         echo 'timestamp,index,util_gpu,util_mem,power_w,sm_clock_mhz,mem_clock_mhz,pci_gen,pci_width' > \"\$out\"
         while true; do
-            nvidia-smi \
-                --query-gpu=timestamp,index,utilization.gpu,utilization.memory,power.draw,clocks.sm,clocks.mem,pcie.link.gen.current,pcie.link.width.current \
-                --format=csv,noheader,nounits >> \"\$out\"
+            nvidia-smi --query-gpu=timestamp,index,utilization.gpu,utilization.memory,power.draw,clocks.sm,clocks.mem,pcie.link.gen.current,pcie.link.width.current --format=csv,noheader,nounits >> \"\$out\"
             sleep 1
         done
     " &
     GPU_TELEMETRY_SRUN_PID=$!
-    echo "GPU telemetry sampler PID: ${GPU_TELEMETRY_SRUN_PID}"
 fi
 
 cleanup_background_jobs() {
     local rc=$?
-    if [[ -n "${GPU_TELEMETRY_SRUN_PID}" ]]; then
-        kill "${GPU_TELEMETRY_SRUN_PID}" >/dev/null 2>&1 || true
+    [[ -n "${GPU_TELEMETRY_SRUN_PID}" ]] && kill "${GPU_TELEMETRY_SRUN_PID}" >/dev/null 2>&1 || true
+    # In suite mode, copy the bootstrap slurm output into the run directory
+    if [[ -n "${PARENT_OUTPUT_DIR:-}" ]]; then
+        BOOTSTRAP_SLURM_OUT="${OUTPUTS_ROOT}/slurm-bootstrap-${JOB_TAG}.out"
+        [[ -f "${BOOTSTRAP_SLURM_OUT}" ]] && cp -f "${BOOTSTRAP_SLURM_OUT}" "${RUN_OUTPUT_DIR}/slurm-${JOB_TAG}.out" 2>/dev/null || true
     fi
     echo "[run_training.sh] EXIT rc=${rc}" >&2
 }
 trap cleanup_background_jobs EXIT
 
-# ===== Run Training =====
-# Launch 1 process per NODE - chemtrain's pmap handles local multi-GPU
-LOGFILE="${OUTPUTS_DIR}/train_allegro_${SLURM_JOB_ID}.log"
+# =============================================================================
+# Launch training
+# =============================================================================
+cd "${PROJECT_ROOT}"
+TRAIN_SCRIPT="${SCRIPT_DIR}/train.py"
+if [[ ! -f "${TRAIN_SCRIPT}" ]]; then
+    echo "ERROR: Training script not found: ${TRAIN_SCRIPT}"
+    exit 1
+fi
 
 echo "============================================================"
-if [[ "${RUN_TRAINING_TRACE}" == "1" ]]; then
-    set +x
-fi
-
-echo "Starting training with $SLURM_NNODES node(s), 4 GPUs each..."
-echo "Log file: ${LOGFILE}"
-if [[ -n "$MULTI_PROTEIN_DIR" ]]; then
-    echo "Multi-protein mode: bucket_dir=${MULTI_PROTEIN_DIR}"
-fi
-if [[ -n "$RESUME_VALUE" ]]; then
-    echo "Resume mode: --resume ${RESUME_VALUE}"
-fi
-if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
-    echo "Extra train.py args: ${EXTRA_ARGS[*]}"
-fi
+echo "Config:       ${RUNTIME_CONFIG}"
+echo "Run dir:      ${RUN_OUTPUT_DIR}"
+echo "Job tag:      ${JOB_TAG}"
+echo "Nodes:        ${SLURM_NNODES:-1}"
+echo "GPUs/node:    4"
+echo "Grad accum:   ${CHEMTRAIN_GRAD_ACCUM_STEPS} (${CHEMTRAIN_GRAD_ACCUM_MODE})"
 echo "============================================================"
 
-# Build argument list for train.py
-TRAIN_ARGS=("$CONFIG_FILE" "${SLURM_JOB_ID}")
-if [[ -n "$MULTI_PROTEIN_DIR" ]]; then
-    TRAIN_ARGS+=("--multi-protein-dir" "$MULTI_PROTEIN_DIR")
-fi
-if [[ -n "$RESUME_VALUE" ]]; then
-    TRAIN_ARGS+=("--resume" "$RESUME_VALUE")
-fi
-if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
-    TRAIN_ARGS+=("${EXTRA_ARGS[@]}")
-fi
+TRAIN_ARGS=("${RUNTIME_CONFIG}" "${JOB_TAG}")
+[[ -n "$MULTI_PROTEIN_DIR" ]] && TRAIN_ARGS+=("--multi-protein-dir" "$MULTI_PROTEIN_DIR")
+[[ -n "$RESUME_VALUE" ]] && TRAIN_ARGS+=("--resume" "$RESUME_VALUE")
+[[ ${#EXTRA_ARGS[@]} -gt 0 ]] && TRAIN_ARGS+=("${EXTRA_ARGS[@]}")
 
-# srun launches 1 task per node, each sees 4 local GPUs
-srun -l --ntasks-per-node=1 python3 -u "${TRAIN_SCRIPT}" \
+srun -l --ntasks-per-node=1 "${PYTHON_BIN}" -u "${TRAIN_SCRIPT}" \
     "${TRAIN_ARGS[@]}" 2>&1 | tee "${LOGFILE}"
 
 echo "============================================================"

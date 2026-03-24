@@ -1,6 +1,26 @@
-# Clean Code Base - Command Reference
+# cameo_cg — Command Reference
 
-Quick reference for common operations using the clean code base.
+Quick reference for common operations.
+
+---
+
+## Repository Layout
+
+```
+cameo_cg/
+├── config/            # ConfigManager + type definitions
+├── configs/           # base_config.yaml (all options documented)
+├── data/              # DatasetLoader, CoordinatePreprocessor
+├── data_prep/         # CG mapping, prior fitting, dataset tools
+├── models/            # ML model wrappers, PriorEnergy, topology
+├── training/          # Trainer, optimizers, prior residual
+├── export/            # ModelExporter (MLIR for LAMMPS)
+├── analysis_tests/    # All evaluation, analysis, and test scripts
+├── scripts/           # train.py, SLURM wrappers, shell scripts
+├── utils/             # Shared JAX setup utilities
+├── new_conf.yaml      # Working example config
+└── COMMANDS.md        # This file
+```
 
 ---
 
@@ -8,349 +28,210 @@ Quick reference for common operations using the clean code base.
 
 ### Single-Node Training (4 GPUs)
 
-Submit from the `clean_code_base/` directory:
-
 ```bash
-cd /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base
-sbatch scripts/run_training.sh config.yaml
+sbatch scripts/run_training.sh new_conf.yaml
 ```
 
-### Multi-Node Training (8 GPUs across 2 nodes)
+### Multi-Node Training
 
 ```bash
-sbatch --nodes=2 scripts/run_training.sh config.yaml
+sbatch --nodes=2 scripts/run_training.sh new_conf.yaml
 ```
 
-### Resume Training from Checkpoint
+### Resume from Checkpoint
 
 ```bash
-# Auto-detect latest checkpoint
-sbatch scripts/run_training.sh config.yaml --resume auto
-
-# Resume from specific checkpoint
-sbatch scripts/run_training.sh config.yaml --resume ./checkpoints_allegro/epoch30.pkl
+sbatch scripts/run_training.sh new_conf.yaml --resume auto
+sbatch scripts/run_training.sh new_conf.yaml --resume ./checkpoints/epoch30.pkl
 ```
 
-### Change Training Time or Account
+### Suite of Experiments (Array Jobs)
+
+Place multiple config files in a directory, then:
 
 ```bash
-# Shorter job (2 hours)
-sbatch --time=02:00:00 scripts/run_training.sh config.yaml
+bash scripts/submit_suite.sh --input_dir ./my_configs/ --name my_experiment
+```
 
-# Different account
-sbatch --account=cameo scripts/run_training.sh config.yaml
+This creates a SLURM array job — one task per config file. Results are
+written to each config's `paths.output_dir`.
+
+### Run Analysis Over a Suite
+
+```bash
+sbatch scripts/run_analysis.sh /path/to/suite/output/
+```
+
+Or directly:
+
+```bash
+python analysis_tests/analyze_suite.py /path/to/suite/output/ --detailed-force-eval
 ```
 
 ---
 
-## Plotting Loss Curves
+## Evaluation
 
-Use `evaluation/visualizer.py` to plot training and validation loss from log files:
+All evaluation scripts live in `analysis_tests/`.
 
-```bash
-cd /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base
+### Force Evaluation
 
-# Basic usage
-python evaluation/visualizer.py <log_file> [config.yaml] [output.png]
-
-# Example with config (adds annotations to plot)
-python evaluation/visualizer.py \
-    train_allegro_13172105.log \
-    config_excluded_vol.yaml \
-    loss_excluded_vol.png
-
-# Minimal (just log file, output auto-named)
-python evaluation/visualizer.py train_allegro_13172105.log
-```
-
-Output:
-- Plot saved to: specified path or `loss_curve_<log_stem>.png`
-- Data saved to: `<output_path>.txt` (same name, .txt extension)
-
-**Note:** Loss is also automatically plotted at the end of training by `train.py`.
-
----
-
-## Evaluating Trained Models
-
-### Quick Force Evaluation (with plots)
-
-The `evaluate_forces.py` script supports three evaluation modes to compare different model components:
-- **`full`** (default): Evaluate complete model (ML + priors if configured)
-- **`prior-only`**: Evaluate ONLY prior terms (parametric, spline, or trained priors)
-- **`ml-only`**: Evaluate ONLY ML model (disable priors)
-
-#### Full Model Evaluation (ML + Priors)
+Three modes: `full` (ML + priors), `prior-only`, `ml-only`.
 
 ```bash
-cd /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base
+# Full model evaluation
+python analysis_tests/evaluate_forces.py \
+    exported_models/model_params.pkl new_conf.yaml --frames 50
 
-# Evaluate full model on 10 random frames (default)
-python scripts/evaluate_forces.py \
-    exported_models/model_params.pkl \
-    config.yaml
+# Prior-only
+python analysis_tests/evaluate_forces.py \
+    new_conf.yaml --mode prior-only --frames 10
 
-# Evaluate from training checkpoint (supports chemtrain checkpoint format)
-python scripts/evaluate_forces.py \
-    checkpoints_allegro/epoch00040.pkl \
-    config.yaml \
-    --frames 50
-
-# Custom output directory
-python scripts/evaluate_forces.py \
-    exported_models/model_params.pkl \
-    config.yaml \
-    --frames 20 \
-    --output ./my_eval_results/
+# ML-only
+python analysis_tests/evaluate_forces.py \
+    exported_models/model_params.pkl new_conf.yaml --mode ml-only
 ```
-
-**Note**: The script automatically detects and supports:
-- Exported model files (`model_params.pkl`)
-- Training checkpoints (`epoch*.pkl`, `stage_*.pkl`)
-- Both chemtrain trainer format and direct params dict format
-
-#### Prior-Only Evaluation
-
-Evaluate physics-based priors without ML component. Supports three prior types:
-- **Parametric priors**: Histogram-fitted parameters from config YAML
-- **Spline priors**: Cubic spline PMFs from NPZ file
-- **Trained priors**: Optimized prior parameters from training
-
-```bash
-# Evaluate parametric priors (from config YAML)
-python scripts/evaluate_forces.py \
-    config_preprior.yaml \
-    --mode prior-only \
-    --frames 10
-
-# Evaluate spline priors (from config with spline_file specified)
-python scripts/evaluate_forces.py \
-    config_template.yaml \
-    --mode prior-only \
-    --frames 50
-
-# Evaluate trained priors (from params.pkl if train_priors was enabled)
-python scripts/evaluate_forces.py \
-    exported_models/model_params.pkl \
-    config.yaml \
-    --mode prior-only
-
-# Evaluate trained priors from checkpoint
-python scripts/evaluate_forces.py \
-    checkpoints_allegro/stage_adabelief_epoch50.pkl \
-    config.yaml \
-    --mode prior-only
-```
-
-**Note**: Prior-only mode is much faster than full evaluation since it skips the expensive ML computation entirely.
-
-#### ML-Only Evaluation
-
-Evaluate only the ML model, disabling priors even if configured:
-
-```bash
-# Force disable priors for pure ML evaluation
-python scripts/evaluate_forces.py \
-    exported_models/model_params.pkl \
-    config.yaml \
-    --mode ml-only \
-    --frames 50
-```
-
-#### Output Files
-
-Saved to `./force_eval/` by default, with mode-specific naming:
-- **Full mode**: `<model_id>_force_*.png`
-- **Prior-only**: `<model_id>_prior_only_{prior_type}_force_*.png`
-- **ML-only**: `<model_id>_ml_only_force_*.png`
-
-Files generated:
-- `*_force_components.png` - Pred vs Ref scatter plots for X/Y/Z
-- `*_force_vs_position.png` - For each axis, force component vs position (pred and ref overlaid)
-- `*_force_distribution.png` - Force magnitude distributions
-- `*_force_gaussian_distribution.png` - Gaussian-fit density comparison of ref vs pred/prior force components (X/Y/Z)
-- `*_force_magnitude.png` - Magnitude comparison
-- `*_force_metrics.txt` - Numerical RMSE/MAE values
 
 ### Full Dataset Evaluation
 
 ```bash
-# Evaluate single frame
-python scripts/evaluate.py config.yaml params.pkl --frame 0
-
-# Evaluate entire dataset
-python scripts/evaluate.py config.yaml params.pkl --full
-
-# Custom output directory
-python scripts/evaluate.py config.yaml params.pkl --full --output-dir ./full_eval/
+python analysis_tests/evaluate.py new_conf.yaml params.pkl --full
 ```
 
----
-
-## Dataset Analysis
-
-Analyze NPZ datasets before training:
+### Plotting Loss Curves
 
 ```bash
-cd /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base
-
-python data_prep/analyze_dataset.py \
-    --npz data_prep/datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz
+python analysis_tests/visualizer.py train.log new_conf.yaml loss_plot.png
 ```
 
-Output includes:
-- Array shapes and dtypes
-- NaN/Inf checks
-- Force magnitude statistics
-- Training loss predictions
+Loss curves are also auto-plotted at the end of training.
 
 ---
 
 ## Data Preparation
 
-### Coarse-Graining All-Atom Data
-
-Convert all-atom trajectories to 1-bead-per-residue CG representation:
+### Coarse-Graining
 
 ```bash
-cd /p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base
-
 python data_prep/cg_1bead.py \
-    --npz data_prep/raw_data/protein_allatom.npz \
-    --pdb data_prep/raw_data/protein_topology.pdb \
+    --npz raw_data/protein_allatom.npz \
+    --pdb raw_data/protein_topology.pdb \
     --output data_prep/datasets/protein_cg.npz
 ```
 
-### Prior Fitting (Legacy + Spline)
-
-Fit legacy parametric priors (histogram/Fourier path):
+### Prior Fitting
 
 ```bash
-cd /p/project1/cameo/schmidt36/cameo_cg
-
+# Parametric + spline priors
 python data_prep/prior_fitting_script.py \
-    --data /path/to/combined_dataset.npz \
-    --out_yaml data_prep/fitted_priors.yaml \
-    --plots_dir data_prep/plots \
-    --T 320.0
-```
-
-Fit spline priors as an add-on (also writes legacy YAML above):
-
-```bash
-cd /p/project1/cameo/schmidt36/cameo_cg
-
-python data_prep/prior_fitting_script.py \
-    --data /path/to/combined_dataset.npz \
+    --data /path/to/dataset.npz \
     --out_yaml data_prep/fitted_priors.yaml \
     --plots_dir data_prep/plots \
     --T 320.0 \
     --spline \
-    --spline_out data_prep/datasets/fitted_priors_spline.npz \
-    --residue_specific_angles \
-    --angle_min_samples 500 \
-    --kde_bandwidth_factor 1.0 \
-    --spline_grid_points 500
+    --spline_out data_prep/datasets/fitted_priors_spline.npz
 ```
 
----
-
-## Checking Job Status
+### Dataset Analysis
 
 ```bash
-# Check your running jobs
-squeue -u $USER
-
-# Check specific job details
-scontrol show job <JOB_ID>
-
-# Cancel a job
-scancel <JOB_ID>
-
-# View SLURM output in real-time
-tail -f outputs/slurm-<JOB_ID>.out
-
-# View training log in real-time
-tail -f outputs/train_allegro_<JOB_ID>.log
+python data_prep/analyze_dataset.py --npz data_prep/datasets/my_data.npz
 ```
-
-**Note:** All SLURM outputs and training logs are now saved in the `outputs/` directory for better organization.
 
 ---
 
-## Configuration Files
+## Configuration
 
-Available example configurations in `clean_code_base/`:
+Reference config with all options documented: `configs/base_config.yaml`
 
-| Config File | Description |
-|-------------|-------------|
-| `config_allegro_only.yaml` | Pure Allegro model (no priors, `use_priors: false`) |
-| `config_excluded_vol.yaml` | Allegro + priors, no prior pretraining (`pretrain_prior: false`) |
-| `config_preprior.yaml` | Allegro + priors, with LBFGS prior pretraining (`pretrain_prior: true`) |
+Working example: `new_conf.yaml`
 
-Key configuration options:
+### Key Sections
 
 ```yaml
+debug:
+  neighbor_logging: false
+  shape_trace: false
+  model_logging: false
+
+paths:
+  output_dir: ./outputs/my_run
+  checkpoint_dir: null       # null -> {output_dir}/checkpoints
+  export_dir: null           # null -> {output_dir}/exports
+
+data:
+  path: data_prep/datasets/my_data.npz
+  batch_mode: standard       # standard | tiled
+
 model:
-  use_priors: true/false      # Enable physics-based priors
-  cutoff: 10.0                # Neighbor list cutoff (Angstrom)
-  allegro_size: "default"     # Options: "default", "large", "med"
+  ml_model: allegro          # allegro | allegro_cueq | allegro_cueq_fast | mace | painn
+  use_priors: true
+  cutoff: 10.0
+  allegro:                   # direct hyperparameters (no size indirection)
+    num_types: 22
+    max_ell: 2
+    num_layers: 3
+    ...
 
 training:
-  pretrain_prior: true/false  # LBFGS pretraining of prior weights
-  epochs_adabelief: 30        # Stage 1 epochs
-  epochs_yogi: 50             # Stage 2 epochs (0 to skip)
-  batch_per_device: 2         # Batch size per GPU
+  stages:                    # ordered list — add more stages freely
+    - optimizer: adabelief
+      epochs: 80
+    - optimizer: lamb
+      epochs: 0
+  batch_per_device: 2
+  compute_dtype: float32     # float32 | bfloat16
 ```
 
 ---
 
-## Useful Paths
+## SLURM Job Management
 
 ```bash
-# Clean code base
-/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base
-
-# Datasets
-/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/clean_code_base/data_prep/datasets/
-
-# Training outputs (SLURM logs, training logs)
-./outputs/
-
-# Checkpoints (during training)
-./checkpoints_allegro/
-
-# Exported models (after training)
-./exported_models/
-
-# Environment activation
-source /p/project1/cameo/schmidt36/load_modules.sh
-source /p/project1/cameo/schmidt36/clean_booster_env/bin/activate
+squeue -u $USER                         # list jobs
+scontrol show job <JOB_ID>              # details
+scancel <JOB_ID>                        # cancel
+tail -f outputs/slurm-<JOB_ID>.out      # live output
 ```
 
 ---
 
 ## Debugging
 
-### Check GPU Allocation
+### Debug Config Section
+
+All debug flags default to off. Override via YAML or environment variables:
+
+```yaml
+debug:
+  neighbor_logging: true     # or: CHEMTRAIN_DEBUG_NEIGHBOR=1
+  shape_trace: true          # or: CHEMTRAIN_DEBUG_SHAPE_TRACE=1
+  model_logging: true        # jax.debug.print in compiled blocks
+```
+
+### GPU / JAX Checks
 
 ```bash
-# On compute node
 nvidia-smi -L
 echo $CUDA_VISIBLE_DEVICES
 ```
 
-### Verify JAX Configuration
-
 ```python
 import jax
-print(f"Devices: {jax.devices()}")
-print(f"Process count: {jax.process_count()}")
-print(f"Process index: {jax.process_index()}")
+print(jax.devices(), jax.process_count(), jax.process_index())
 ```
+
+### Environment Variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `JAX_ENABLE_X64` | `0` | Enable 64-bit precision |
+| `JAX_INIT_TIMEOUT` | `1800` | Distributed init timeout (seconds) |
+| `CHEMTRAIN_DEBUG_NEIGHBOR` | `0` | Neighbor list debug logging |
+| `CHEMTRAIN_DEBUG_SHAPE_TRACE` | `0` | One-shot shape trace |
 
 ### Common Issues
 
-1. **QOSMaxWallDurationPerJobLimit**: Reduce `--time` (try 2-4 hours)
-2. **Multi-node failures**: Check SLURM output for coordinator setup issues
+1. **QOSMaxWallDurationPerJobLimit**: Reduce `--time`
+2. **Multi-node failures**: Check coordinator setup in SLURM output
 3. **Memory errors**: Reduce `batch_per_device` or `max_frames`

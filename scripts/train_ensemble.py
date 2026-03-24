@@ -31,33 +31,10 @@ IMPORTANT: JAX distributed initialization must happen before any other JAX opera
 import os
 import jax
 
-def _apply_jax_compat_shims():
-    """
-    Runtime compatibility shims for jax_md/chemtrain with newer JAX releases.
+sys.path.insert(0, str(os.path.join(os.path.dirname(__file__), "..")))
+from utils.jax_setup import apply_jax_compat_shims, apply_numpy_dataloader_patch
 
-    These shims are no-ops on older JAX versions where symbols still exist.
-    """
-    # jax_md<=0.2.8 expects KeyArray on jax.random.
-    if not hasattr(jax.random, "KeyArray"):
-        jax.random.KeyArray = jax.Array
-
-    # Older jax_md imports tree_* helpers from top-level jax namespace.
-    if not hasattr(jax, "tree_map"):
-        jax.tree_map = jax.tree_util.tree_map
-    if not hasattr(jax, "tree_leaves"):
-        jax.tree_leaves = jax.tree_util.tree_leaves
-    if not hasattr(jax, "tree_flatten"):
-        jax.tree_flatten = jax.tree_util.tree_flatten
-    if not hasattr(jax, "tree_unflatten"):
-        jax.tree_unflatten = jax.tree_util.tree_unflatten
-
-    # Older jax_md imports xla_bridge from jax.lib.
-    if not hasattr(jax.lib, "xla_bridge"):
-        from jax._src import xla_bridge as _xla_bridge
-        jax.lib.xla_bridge = _xla_bridge
-
-
-_apply_jax_compat_shims()
+apply_jax_compat_shims()
 
 def _initialize_jax_distributed():
     """
@@ -130,33 +107,15 @@ import jax.numpy as jnp
 from jax_sgmc.data.numpy_loader import NumpyDataLoader
 from chemtrain.data.data_loaders import DataLoaders
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from config.manager import ConfigManager
 from data.loader import DatasetLoader
 from data.preprocessor import CoordinatePreprocessor
 from models.combined_model import CombinedModel
 from training.trainer import Trainer
-from export.exporter import AllegroExporter
-from evaluation.visualizer import LossPlotter
+from export.exporter import ModelExporter
+from analysis_tests.visualizer import LossPlotter
 from utils.logging import data_logger, model_logger, training_logger, export_logger
 import logging
-
-
-def apply_numpy_dataloader_patch():
-    """Apply necessary patch to NumpyDataLoader for cache_size."""
-    from jax_sgmc.data.numpy_loader import NumpyDataLoader as _NDL
-
-    _orig_get_indices = _NDL._get_indices
-
-    def _patched_get_indices(self, chain_id: int):
-        chain = self._chains[chain_id]
-        if chain.get("cache_size", 0) <= 0:
-            chain["cache_size"] = 1
-        return _orig_get_indices(self, chain_id)
-
-    _NDL._get_indices = _patched_get_indices
-    logging.info("[Patch] Applied NumpyDataLoader cache_size fix")
 
 
 def train_single_model(
@@ -492,7 +451,7 @@ def main(config_file: str, job_id: str = None):
 
     # Export best model MLIR
     mlir_path = export_dir / f"{model_name}_best.mlir"
-    exporter = AllegroExporter.from_combined_model(
+    exporter = ModelExporter.from_combined_model(
         model=best_model,
         params=best_params,
         box=box,
@@ -518,7 +477,7 @@ def main(config_file: str, job_id: str = None):
             model_params_path = export_dir / f"{model_name}_ensemble_{i}_params.pkl"
 
             # Export MLIR
-            exporter = AllegroExporter.from_combined_model(
+            exporter = ModelExporter.from_combined_model(
                 model=result["model"],
                 params=result["params"],
                 box=box,

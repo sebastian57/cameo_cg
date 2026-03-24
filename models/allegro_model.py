@@ -3,12 +3,8 @@ Allegro Equivariant Neural Network Model Wrapper
 
 Wraps the Allegro model initialization and inference for force field training.
 Handles neighbor lists, species types, and coordinate masking.
-
-Extracted from:
-- allegro_energyfn_multiple_proteins.py
 """
 
-import os
 import numpy as np
 
 import jax
@@ -18,16 +14,12 @@ from chemutils.models.allegro.model import allegro_neighborlist_pp
 from typing import Optional, Tuple, Any
 from jax_md_mod import custom_partition
 
+from .base_model import BaseMLModel, register_ml_model, resolve_compute_dtype
 from .neighborlist_utils import resolve_neighbor_list_format, compute_avg_num_neighbors
 from utils.logging import model_logger
 
-
-def _resolve_compute_dtype(config) -> tuple[str, jnp.dtype]:
-    """Resolve model compute dtype from config."""
-    name = str(config.get_compute_dtype()).lower()
-    if name == "bfloat16":
-        return name, jnp.bfloat16
-    return "float32", jnp.float32
+# Keep module-level alias so allegro_cueq_model.py import still works
+_resolve_compute_dtype = resolve_compute_dtype
 
 
 def _resolve_mlp_activation(value, allow_linear: bool = False) -> tuple[str, Any]:
@@ -68,21 +60,12 @@ def _resolve_mlp_activation(value, allow_linear: bool = False) -> tuple[str, Any
     return raw, options[raw]
 
 
-class AllegroModel:
-    """
-    Wrapper for Allegro equivariant graph neural network.
+@register_ml_model("allegro")
+class AllegroModel(BaseMLModel):
+    """Wrapper for Allegro equivariant graph neural network.
 
-    Handles:
-    - Allegro model initialization from config
-    - Neighbor list management
-    - Species handling
-    - Coordinate masking for padded systems
-
-    Example:
-        >>> config = ConfigManager("config.yaml")
-        >>> model = AllegroModel(config, R0, box, species0, N_max)
-        >>> params = model.initialize_params(jax.random.PRNGKey(0))
-        >>> energy = model.compute_energy(params, R, mask, species)
+    Handles model initialization, neighbor list management, species handling,
+    and coordinate masking for padded systems.
     """
 
     def __init__(
@@ -107,18 +90,12 @@ class AllegroModel:
         """
         self.config = config
         self.N_max = N_max
-        self.compute_dtype_name, self.compute_dtype = _resolve_compute_dtype(config)
+        self.compute_dtype_name, self.compute_dtype = resolve_compute_dtype(config)
         self.remat_level = int(config.get_remat_level())
         self.remat_policy = str(config.get_remat_policy())
-        self._neighbor_debug_enabled = str(
-            os.environ.get("CHEMTRAIN_DEBUG_NEIGHBOR", "1")
-        ).strip().lower() in ("1", "true", "yes", "on")
-        self._neighbor_debug_rank0_only = str(
-            os.environ.get("CHEMTRAIN_DEBUG_NEIGHBOR_RANK0_ONLY", "1")
-        ).strip().lower() in ("1", "true", "yes", "on")
-        self._debug_shape_trace = str(
-            os.environ.get("CHEMTRAIN_DEBUG_SHAPE_TRACE", "0")
-        ).strip().lower() in ("1", "true", "yes", "on")
+        self._neighbor_debug_enabled = config.debug_neighbor_logging()
+        self._neighbor_debug_rank0_only = config.debug_neighbor_rank0_only()
+        self._debug_shape_trace = config.debug_shape_trace()
         self._shape_trace_budget = [1]
 
         # Model parameters from config
@@ -128,18 +105,10 @@ class AllegroModel:
             config.get_neighbor_list_format()
         )
 
-        # Get Allegro hyperparameters
-        # Support different model sizes: default, large, med
-        allegro_size = config.get_allegro_size()
-        self.allegro_config = config.get_allegro_config(size=allegro_size)
+        self.allegro_config = config.get_allegro_config()
         self._pad_spacing = jnp.asarray(
             self.cutoff + self.dr_threshold + 1.0, dtype=self.compute_dtype
         )
-
-        # Note: padded positions are computed on-the-fly in _spread_padded_coordinates
-        # so that the method is compatible with symbolic/abstract shapes during jax.export().
-
-        model_logger.info(f"Using Allegro size: {allegro_size}")
         model_logger.info(f"Allegro compute dtype: {self.compute_dtype_name}")
         model_logger.info(
             f"Allegro remat policy: level={self.remat_level}, policy={self.remat_policy}"
@@ -232,7 +201,6 @@ class AllegroModel:
             self.n_species = n_species_data
 
         model_logger.info(f"Detected {self.n_species} unique species")
-        model_logger.info(f"Using Allegro config size: {allegro_size}")
         model_logger.info(
             f"Allegro MLP activations: hidden={self.mlp_hidden_activation_name}, "
             f"output={self.mlp_output_activation_name}"
@@ -414,48 +382,9 @@ class AllegroModel:
         # Keep scalar losses/reductions in float32 for numerical stability.
         return jnp.asarray(E_allegro, dtype=jnp.float32)
 
-    def compute_energy_and_forces(
-        self,
-        params: Any,
-        R: jax.Array,
-        mask: jax.Array,
-        species: jax.Array,
-        neighbor: Optional[Any] = None,
-        segment_id: Optional[jax.Array] = None,
-    ) -> Tuple[jax.Array, jax.Array]:
-        """
-        Compute energy and forces via automatic differentiation.
-
-        Args:
-            params: Allegro model parameters
-            R: Coordinates, shape (n_atoms, 3)
-            mask: Validity mask, shape (n_atoms,)
-            species: Species IDs, shape (n_atoms,)
-            neighbor: Neighbor list (optional)
-
-        Returns:
-            energy: Total energy (scalar)
-            forces: Forces, shape (n_atoms, 3)
-        """
-        def energy_fn(R_):
-            return self.compute_energy(
-                params, R_, mask, species, neighbor, segment_id=segment_id
-            )
-
-        E = energy_fn(R)
-        F = -jax.grad(energy_fn)(R)
-
-        return E, F
-
     @property
     def model_apply_fn(self):
-        """Get raw Haiku apply function (for exporter compatibility)."""
         return self.apply_allegro
-
-    @property
-    def initial_neighbors(self) -> Any:
-        """Get initial neighbor list for training setup."""
-        return self.nbrs_init
 
     def summarize_neighborlist(self, nbrs: Any, valid_mask: jax.Array) -> dict[str, Any]:
         """

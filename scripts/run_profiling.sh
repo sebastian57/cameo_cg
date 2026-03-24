@@ -236,7 +236,7 @@ cleanup_background_jobs() {
 trap cleanup_background_jobs EXIT
 
 # ===== Run Training =====
-LOGFILE="${OUTPUTS_DIR}/train_allegro_${SLURM_JOB_ID}.log"
+LOGFILE="${OUTPUTS_DIR}/train_${SLURM_JOB_ID}.log"
 
 echo "============================================================"
 echo "Starting profiling run with $SLURM_NNODES node(s), 4 GPUs each..."

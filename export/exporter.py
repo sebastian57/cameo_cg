@@ -1,11 +1,7 @@
 """
 MLIR Model Export for LAMMPS Integration
 
-Exports trained ML models (Allegro, MACE, or PaiNN) to MLIR format for use
-with chemtrain-deploy and LAMMPS.
-
-Extracted from:
-- model_exporters.py (Allegro-only, MACE and PaiNN removed)
+Exports trained ML models to MLIR format for use with chemtrain-deploy and LAMMPS.
 """
 
 import re
@@ -84,11 +80,11 @@ def _normalize_inline_location_ranges(mlir_path: Path) -> int:
     return int(num_replacements)
 
 
-class AllegroExporter(exporter.Exporter):
+class ModelExporter(exporter.Exporter):
     """
-    Exporter for Allegro models to MLIR format.
+    Exporter for ML models to MLIR format.
 
-    Wraps trained Allegro models (with or without priors) for deployment
+    Wraps trained models (with or without priors) for deployment
     to LAMMPS via chemtrain-deploy.
 
     Example:
@@ -96,7 +92,7 @@ class AllegroExporter(exporter.Exporter):
         >>> model = CombinedModel(config, R0, box, species, N_max)
         >>> params = trainer.get_best_params()
         >>>
-        >>> exp = AllegroExporter.from_combined_model(model, params, box, species[0])
+        >>> exp = ModelExporter.from_combined_model(model, params, box, species[0])
         >>> exp.export_to_file("model.mlir")
     """
 
@@ -122,11 +118,11 @@ class AllegroExporter(exporter.Exporter):
         r_cutoff: float
     ):
         """
-        Initialize Allegro exporter.
+        Initialize model exporter.
 
         Args:
             apply_fn: Energy function that takes (params, apply_model, nneigh_fn, ...)
-            apply_model: Allegro model apply function
+            apply_model: ML model apply function
             nneigh_fn: Neighbor list function
             displacement: JAX-MD displacement function
             box: Simulation box dimensions
@@ -244,12 +240,12 @@ class AllegroExporter(exporter.Exporter):
             apply_fn: Optional custom apply function (uses model's if None)
 
         Returns:
-            AllegroExporter instance
+            ModelExporter instance
 
         Example:
             >>> model = CombinedModel(config, R0, box, species, N_max)
             >>> params = trainer.get_best_params()
-            >>> exporter = AllegroExporter.from_combined_model(
+            >>> exporter = ModelExporter.from_combined_model(
             ...     model, params, box, species
             ... )
             >>> exporter.export_to_file("model.mlir")
@@ -306,6 +302,6 @@ class AllegroExporter(exporter.Exporter):
 
     def __repr__(self) -> str:
         return (
-            f"AllegroExporter(r_cutoff={self.r_cutoff}, "
+            f"ModelExporter(r_cutoff={self.r_cutoff}, "
             f"n_atoms={self.species.shape[0]})"
         )

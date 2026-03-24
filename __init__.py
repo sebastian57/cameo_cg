@@ -40,6 +40,7 @@ __all__ = [
     "LossPlotter",
     "ForceAnalyzer",
     # Export
+    "ModelExporter",
     "AllegroExporter",
 ]
 
@@ -54,10 +55,11 @@ _LAZY_SYMBOLS = {
     "CombinedModel": ("cameo_cg.models.combined_model", "CombinedModel"),
     "Trainer": ("cameo_cg.training.trainer", "Trainer"),
     "create_optimizer": ("cameo_cg.training.optimizers", "create_optimizer"),
-    "Evaluator": ("cameo_cg.evaluation.evaluator", "Evaluator"),
-    "LossPlotter": ("cameo_cg.evaluation.visualizer", "LossPlotter"),
-    "ForceAnalyzer": ("cameo_cg.evaluation.visualizer", "ForceAnalyzer"),
-    "AllegroExporter": ("cameo_cg.export.exporter", "AllegroExporter"),
+    "Evaluator": ("cameo_cg.analysis_tests.evaluator", "Evaluator"),
+    "LossPlotter": ("cameo_cg.analysis_tests.visualizer", "LossPlotter"),
+    "ForceAnalyzer": ("cameo_cg.analysis_tests.visualizer", "ForceAnalyzer"),
+    "ModelExporter": ("cameo_cg.export.exporter", "ModelExporter"),
+    "AllegroExporter": ("cameo_cg.export.exporter", "ModelExporter"),
 }
 
 

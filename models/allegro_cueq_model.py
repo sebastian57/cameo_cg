@@ -16,10 +16,11 @@ Two new config keys are recognised under model.allegro (or model.allegro_cuEq / 
 import jax
 import jax.numpy as jnp
 from jax_md import space, partition
-from typing import Optional, Tuple, Any
+from typing import Optional, Any
 from jax_md_mod import custom_partition
 
-from .allegro_model import _resolve_compute_dtype, _resolve_mlp_activation
+from .base_model import BaseMLModel, register_ml_model, resolve_compute_dtype
+from .allegro_model import _resolve_mlp_activation
 from .neighborlist_utils import resolve_neighbor_list_format, compute_avg_num_neighbors
 from utils.logging import model_logger
 
@@ -34,7 +35,8 @@ def _resolve_mlp_dtype(cfg_value) -> tuple[str, jnp.dtype]:
     return "float32", jnp.float32
 
 
-class AllegroModelCuEq:
+@register_ml_model("allegro_cueq", "allegro_cueq_fast")
+class AllegroModelCuEq(BaseMLModel):
     """
     Allegro equivariant neural network backed by cuEquivariance.
 
@@ -80,7 +82,7 @@ class AllegroModelCuEq:
         """
         self.config = config
         self.N_max = N_max
-        self.compute_dtype_name, self.compute_dtype = _resolve_compute_dtype(config)
+        self.compute_dtype_name, self.compute_dtype = resolve_compute_dtype(config)
         self.remat_level = int(config.get_remat_level())
         self.remat_policy = str(config.get_remat_policy())
 
@@ -90,9 +92,7 @@ class AllegroModelCuEq:
             config.get_neighbor_list_format()
         )
 
-        # Load Allegro hyperparameters from config (same section as baseline)
-        allegro_size = config.get_allegro_size()
-        self.allegro_config = dict(config.get_allegro_config(size=allegro_size))
+        self.allegro_config = dict(config.get_allegro_config())
         self._pad_spacing = jnp.asarray(
             self.cutoff + self.dr_threshold + 1.0, dtype=self.compute_dtype
         )
@@ -105,8 +105,8 @@ class AllegroModelCuEq:
         mlp_dtype_cfg = self.allegro_config.pop("mlp_dtype", "float32")
         self.mlp_dtype_name, self.mlp_dtype = _resolve_mlp_dtype(mlp_dtype_cfg)
 
-        # Logging: enables jax.debug.print inside compiled model blocks
-        enable_logging = bool(self.allegro_config.pop("logging", True))
+        enable_logging = config.debug_model_logging()
+        self.allegro_config.pop("logging", None)
 
         # ------------------------------------------------------------------ #
         #  Activation resolution (mirrors allegro_model.py)                  #
@@ -139,7 +139,6 @@ class AllegroModelCuEq:
         # ------------------------------------------------------------------ #
 
         model_logger.info(f"Using AllegroModelCuEq (cuEquivariance backend)")
-        model_logger.info(f"  allegro_size     = {allegro_size}")
         model_logger.info(f"  compute_dtype    = {self.compute_dtype_name}")
         model_logger.info(f"  mlp_dtype        = {self.mlp_dtype_name}")
         model_logger.info(
@@ -344,34 +343,9 @@ class AllegroModelCuEq:
         )
         return jnp.asarray(E, dtype=jnp.float32)
 
-    def compute_energy_and_forces(
-        self,
-        params: Any,
-        R: jax.Array,
-        mask: jax.Array,
-        species: jax.Array,
-        neighbor: Optional[Any] = None,
-        segment_id: Optional[jax.Array] = None,
-    ) -> Tuple[jax.Array, jax.Array]:
-        """Compute energy and forces via automatic differentiation."""
-        def energy_fn(R_):
-            return self.compute_energy(
-                params, R_, mask, species, neighbor, segment_id=segment_id
-            )
-
-        E = energy_fn(R)
-        F = -jax.grad(energy_fn)(R)
-        return E, F
-
     @property
     def model_apply_fn(self):
-        """Raw Haiku apply function (for exporter compatibility)."""
         return self.apply_allegro
-
-    @property
-    def initial_neighbors(self) -> Any:
-        """Initial neighbor list for training setup."""
-        return self.nbrs_init
 
     def __repr__(self) -> str:
         return (

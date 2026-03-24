@@ -8,12 +8,8 @@ Implements physics-based energy terms:
 - Repulsive: Soft-sphere non-bonded interactions
 
 Supports two evaluation modes:
-- Parametric (legacy): harmonic bond, Fourier angle, periodic dihedral
-- Spline (new): cubic spline PMF from KDE + Boltzmann inversion
-
-Consolidated from:
-- allegro_energyfn_multiple_proteins.py
-- prior_energyfn.py
+- Parametric: harmonic bond, Fourier angle, periodic dihedral
+- Spline: cubic spline PMF from KDE + Boltzmann inversion
 """
 
 import jax
@@ -516,25 +512,15 @@ class PriorEnergy:
         self.topology = topology
         self.displacement = displacement
 
-        # Load energy term weights from config
-        self.weights = config.get("model", "priors", "weights", default={
-            "bond": 0.5,
-            "angle": 0.1,
-            "repulsive": 0.25,
-            "dihedral": 0.15,
-            "excluded_volume": 1.0,
-            "dh": 0.0,
-            "stickiness": 0.0,
-            "salt_bridge": 0.0,
-        })
+        self.weights = config.get_prior_weights()
 
         # Get topology
         self.bonds, self.angles = topology.get_bonds_and_angles()
         self.dihedrals = topology.get_dihedrals()
         self.rep_pairs = topology.get_repulsive_pairs()
-        # Excluded volume pairs: residues at sequence separation 2-5
-        # (not covered by bonds/angles/dihedrals or the long-range repulsion)
-        self.excluded_vol_pairs = topology.get_excluded_volume_pairs(min_sep=2, max_sep=5)
+        ev_min = int(config.get("model", "priors", "excluded_volume_min_sep", default=2))
+        ev_max = int(config.get("model", "priors", "excluded_volume_max_sep", default=5))
+        self.excluded_vol_pairs = topology.get_excluded_volume_pairs(min_sep=ev_min, max_sep=ev_max)
         self._init_typed_interaction_metadata(config, id_to_aa)
 
         # Check for spline-based priors.
