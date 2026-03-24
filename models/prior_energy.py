@@ -2,7 +2,7 @@
 Prior Energy Terms for Coarse-Grained Proteins
 
 Implements physics-based energy terms:
-- Bonds: Harmonic stretching between consecutive beads
+- Bonds: Harmonic stretching between sequence-separated beads (i, i+4)
 - Angles: Fourier series bending potential
 - Dihedrals: Periodic torsion potential
 - Repulsive: Soft-sphere non-bonded interactions

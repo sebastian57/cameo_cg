@@ -146,6 +146,7 @@ E_total = E_ml(params_ml, R, species, neighbors) + E_prior(R, mask)
 
 - **ML backbone selection** via `model.ml_model` config key:
   - `"allegro"` (default): Equivariant message-passing GNN
+  - `"allegro_cuEq"` / `"allegro_cueq"`: Allegro with cuEquivariance backend
   - `"mace"`: Multi Atomic Cluster Expansion
   - `"painn"`: Polarizable Atom Interaction Neural Network
 
@@ -159,9 +160,11 @@ E_total = E_ml(params_ml, R, species, neighbors) + E_prior(R, mask)
 
 ### 4.2 ML Backends
 
-All three backends come from `chemutils` (inside `chemtrain-deploy`). They share the same `hk.transform` / `(init_fn, apply_fn)` interface:
+All backends share the same `hk.transform` / `(init_fn, apply_fn)` interface:
 
 - **AllegroModel** (`allegro_model.py`): Equivariant message-passing GNN. Configurable sizes: `"default"` (3 layers, 24 radial basis), `"large"` (4 layers, 36), `"med"` (3 layers, 18). Uses `jax_md` Dense neighbor lists (free-space, no PBC).
+
+- **AllegroModelCuEq** (`allegro_cueq_model.py`): Allegro with cuEquivariance kernels (faster SH/TP path). Drop-in compatible with `AllegroModel`.
 
 - **MACEModel** (`mace_model.py`): Multi Atomic Cluster Expansion. Drop-in replacement for Allegro (same interface). Computes per-node energies instead of per-edge.
 
@@ -467,7 +470,7 @@ Typed accessor for nested YAML configuration:
 ```yaml
 model:
   use_priors: true/false      # Enable physics-based priors
-  ml_model: "allegro"         # Options: "allegro", "mace", "painn"
+  ml_model: "allegro"         # Options: "allegro", "allegro_cuEq", "mace", "painn"
   cutoff: 10.0                # Neighbor list cutoff (Angstrom)
   allegro_size: "default"     # Options: "default", "large", "med"
 

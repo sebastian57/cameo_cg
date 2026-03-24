@@ -31,7 +31,8 @@ class CombinedModel:
 
     The ML backbone is selected via config `model.ml_model`:
     - "allegro" (default): Allegro equivariant neural network
-    - "allegro_cueq": Allegro with cuEquivariance backend (faster SH + TP)
+    - "allegro_cuEq" / "allegro_cueq": Allegro with cuEquivariance backend
+    - "allegro_cueq_fast": Allegro with cuEquivariance fast backend
     - "mace": MACE equivariant neural network
     - "painn": PaiNN polarizable interaction neural network
 
@@ -75,7 +76,13 @@ class CombinedModel:
         # Determine which ML backbone to use
         self.ml_model_type = config.get_ml_model_type()
 
-        if self.ml_model_type == "mace":
+        if self.ml_model_type == "allegro":
+            self.ml_model = AllegroModel(
+                config, R0, box, species, N_max,
+                n_species_override=n_species_override
+            )
+            model_logger.info("ML backbone: Allegro")
+        elif self.ml_model_type == "mace":
             self.ml_model = MACEModel(
                 config, R0, box, species, N_max,
                 n_species_override=n_species_override
@@ -87,7 +94,7 @@ class CombinedModel:
                 n_species_override=n_species_override
             )
             model_logger.info("ML backbone: PaiNN")
-        elif self.ml_model_type == "allegro_cueq":
+        elif self.ml_model_type in ("allegro_cueq", "allegro_cueq_fast"):
             from .allegro_cueq_model import AllegroModelCuEq  # lazy: requires cuequivariance
             self.ml_model = AllegroModelCuEq(
                 config, R0, box, species, N_max,
@@ -95,11 +102,10 @@ class CombinedModel:
             )
             model_logger.info("ML backbone: Allegro (cuEquivariance)")
         else:
-            self.ml_model = AllegroModel(
-                config, R0, box, species, N_max,
-                n_species_override=n_species_override
+            raise ValueError(
+                f"Unsupported model.ml_model='{self.ml_model_type}'. "
+                "Expected one of: allegro, allegro_cueq, allegro_cueq_fast, mace, painn."
             )
-            model_logger.info("ML backbone: Allegro")
 
         # Backward-compatible alias: existing code references self.allegro
         self.allegro = self.ml_model
@@ -139,7 +145,8 @@ class CombinedModel:
         R: jax.Array,
         mask: jax.Array,
         species: jax.Array,
-        neighbor: Optional[Any] = None
+        neighbor: Optional[Any] = None,
+        segment_id: Optional[jax.Array] = None,
     ) -> jax.Array:
         """
         Compute total energy (Allegro + Prior if enabled, or prior-only).
@@ -150,6 +157,8 @@ class CombinedModel:
             mask: Validity mask, shape (n_atoms,)
             species: Species IDs, shape (n_atoms,)
             neighbor: Neighbor list (optional)
+            segment_id: Optional segment IDs used to preserve disconnected
+                packed structures in tiled mode.
 
         Returns:
             Total energy (scalar)
@@ -174,7 +183,7 @@ class CombinedModel:
         # Normal mode: compute ML (and optionally add priors)
         # ML energy (has internal R_masked handling)
         E_ml = self.ml_model.compute_energy(
-            params['allegro'], R, mask, species, neighbor
+            params['allegro'], R, mask, species, neighbor, segment_id=segment_id
         )
 
         # Add prior energy if enabled
@@ -201,7 +210,8 @@ class CombinedModel:
         R: jax.Array,
         mask: jax.Array,
         species: jax.Array,
-        neighbor: Optional[Any] = None
+        neighbor: Optional[Any] = None,
+        segment_id: Optional[jax.Array] = None,
     ) -> jax.Array:
         """
         Compute total energy (alias for compute_energy for compatibility).
@@ -215,11 +225,14 @@ class CombinedModel:
             mask: Validity mask, shape (n_atoms,)
             species: Species IDs, shape (n_atoms,)
             neighbor: Neighbor list (optional)
+            segment_id: Optional segment IDs used in tiled mode.
 
         Returns:
             Total energy (scalar)
         """
-        return self.compute_energy(params, R, mask, species, neighbor)
+        return self.compute_energy(
+            params, R, mask, species, neighbor, segment_id=segment_id
+        )
 
     def compute_components(
         self,
@@ -374,11 +387,14 @@ class CombinedModel:
         def energy_fn(R: jax.Array, neighbor: Any, **kwargs) -> jax.Array:
             mask = kwargs["mask"]
             species = kwargs["species"]
+            segment_id = kwargs.get("segment_id")
 
             # Ensure species are valid for masked atoms
             species = jnp.where(mask > 0, species, 0).astype(jnp.int32)
 
-            E = self.compute_energy(params, R, mask, species, neighbor=neighbor)
+            E = self.compute_energy(
+                params, R, mask, species, neighbor=neighbor, segment_id=segment_id
+            )
             return E
 
         return energy_fn

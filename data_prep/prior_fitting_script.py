@@ -47,7 +47,7 @@ def build_bonds_angles_dihedrals(resid):
     order = order_from_resid(resid)
     N = len(order)
 
-    bonds = np.stack([order[:-1], order[1:]], axis=1).astype(np.int32)
+    bonds = np.stack([order[:-4], order[4:]], axis=1).astype(np.int32)
     angles = np.stack([order[:-2], order[1:-1], order[2:]], axis=1).astype(np.int32)
 
     if N >= 4:

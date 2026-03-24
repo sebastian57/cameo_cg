@@ -13,7 +13,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from pathlib import Path
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Tuple, Optional, Sequence
 from glob import glob
 
 from config.types import PathLike, as_path
@@ -136,6 +136,263 @@ def create_species_mapping(resnames: np.ndarray) -> Tuple[Dict[str, int], Dict[i
     id_to_aa = {i: aa for aa, i in aa_to_id.items()}
 
     return aa_to_id, id_to_aa
+
+
+def _choose_tile_capacity(
+    n_valid: int,
+    target_beads: int,
+    bucket_beads: Optional[Sequence[int]],
+) -> int:
+    """Choose padded tile capacity for a packed tile."""
+    if bucket_beads:
+        for bucket in bucket_beads:
+            if n_valid <= int(bucket):
+                return int(bucket)
+        raise ValueError(
+            f"Tile with {n_valid} valid beads does not fit into configured "
+            f"data.tile_bucket_beads={list(bucket_beads)}."
+        )
+    return max(int(target_beads), int(n_valid))
+
+
+def _pack_structures_greedy(
+    sorted_indices: np.ndarray,
+    valid_counts: np.ndarray,
+    target_beads: int,
+    drop_incomplete: bool,
+) -> list[list[int]]:
+    """Greedily pack structures into tiles by valid bead budget."""
+    tiles: list[list[int]] = []
+    current: list[int] = []
+    current_beads = 0
+
+    for idx in sorted_indices:
+        n_valid = int(valid_counts[idx])
+        if n_valid <= 0:
+            continue
+        if current and (current_beads + n_valid > target_beads):
+            tiles.append(current)
+            current = []
+            current_beads = 0
+        current.append(int(idx))
+        current_beads += n_valid
+
+    if current:
+        if not drop_incomplete or current_beads >= target_beads or not tiles:
+            tiles.append(current)
+
+    return tiles
+
+
+def compute_force_loss_weights(split: Dict[str, np.ndarray]) -> np.ndarray:
+    """Build per-particle weights that average force MSE uniformly by structure."""
+    mask = np.asarray(split["mask"], dtype=np.float32)
+    weights = np.zeros_like(mask, dtype=np.float32)
+
+    if "segment_id" in split:
+        segment_id = np.asarray(split["segment_id"], dtype=np.int32)
+        for batch_idx in range(mask.shape[0]):
+            valid = mask[batch_idx] > 0
+            if not np.any(valid):
+                continue
+            valid_segments = segment_id[batch_idx][valid]
+            if valid_segments.size == 0:
+                continue
+            counts = np.bincount(
+                valid_segments, minlength=int(valid_segments.max()) + 1
+            ).astype(np.float32)
+            weights[batch_idx, valid] = 1.0 / np.maximum(counts[valid_segments], 1.0)
+        return weights
+
+    n_valid = np.sum(mask > 0, axis=1, dtype=np.float32)
+    safe_n_valid = np.maximum(n_valid[:, None], 1.0)
+    weights = np.where(mask > 0, mask / safe_n_valid, 0.0)
+    return np.asarray(weights, dtype=np.float32)
+
+
+def attach_batch_metadata(split: Dict[str, np.ndarray], sample_ids: np.ndarray) -> Dict[str, np.ndarray]:
+    """Attach profiling and loss-normalization metadata to a batch split."""
+    annotated = dict(split)
+    sample_ids = np.asarray(sample_ids, dtype=np.int32)
+    n_items = int(sample_ids.shape[0])
+    n_valid = np.asarray(np.sum(annotated["mask"] > 0, axis=1), dtype=np.int32)
+    capacity = int(annotated["R"].shape[1])
+
+    annotated.setdefault("force_loss_mask", np.asarray(annotated["mask"], dtype=np.float32))
+    annotated.setdefault("force_loss_weights", compute_force_loss_weights(annotated))
+    annotated.setdefault("n_valid", n_valid)
+    annotated.setdefault("n_segments", np.ones((n_items,), dtype=np.int32))
+    annotated.setdefault("meta_batch_item_id", sample_ids)
+    annotated.setdefault("meta_capacity", np.full((n_items,), capacity, dtype=np.int32))
+    annotated.setdefault("meta_fill_ratio", n_valid.astype(np.float32) / max(capacity, 1))
+    annotated.setdefault("meta_n_force_components", np.asarray(n_valid * 3, dtype=np.int32))
+    annotated.setdefault("meta_source_structure_ids", sample_ids[:, None])
+    annotated.setdefault("meta_source_structure_n_valid", n_valid[:, None])
+    annotated.setdefault("meta_structure_size_min", n_valid)
+    annotated.setdefault("meta_structure_size_mean", n_valid.astype(np.float32))
+    annotated.setdefault("meta_structure_size_max", n_valid)
+    annotated.setdefault("meta_structure_size_std", np.zeros((n_items,), dtype=np.float32))
+    return annotated
+
+
+def build_tiled_dataset(
+    R: np.ndarray,
+    F: np.ndarray,
+    mask: np.ndarray,
+    species: np.ndarray,
+    structure_ids: Optional[np.ndarray] = None,
+    target_beads: int = 1000,
+    bucket_beads: Optional[Sequence[int]] = None,
+    shuffle_structures: bool = False,
+    sort_by_size: bool = True,
+    drop_incomplete: bool = False,
+    seed: int = 0,
+) -> Dict[str, np.ndarray]:
+    """
+    Pack many small structures into disconnected tiled pseudo-structures.
+
+    Each tile is represented as a single dense padded sample with unchanged core
+    fields (`R`, `F`, `mask`, `species`) plus `segment_id` metadata identifying
+    the original structure segment per valid node.
+
+    Profiling metadata is included with a `meta_` prefix so later training
+    diagnostics can attribute optimizer updates back to tile composition.
+    """
+    if target_beads <= 0:
+        raise ValueError(f"target_beads must be > 0, got {target_beads}.")
+
+    if R.ndim != 3 or F.ndim != 3:
+        raise ValueError("R and F must have shape (n_structures, n_atoms, 3).")
+    if mask.ndim != 2 or species.ndim != 2:
+        raise ValueError("mask and species must have shape (n_structures, n_atoms).")
+    if not (R.shape[0] == F.shape[0] == mask.shape[0] == species.shape[0]):
+        raise ValueError("R/F/mask/species must share the same leading dimension.")
+
+    n_structures = int(R.shape[0])
+    valid_counts = np.asarray(np.sum(mask > 0, axis=1), dtype=np.int32)
+    if structure_ids is None:
+        structure_ids = np.arange(n_structures, dtype=np.int32)
+    else:
+        structure_ids = np.asarray(structure_ids, dtype=np.int32)
+        if structure_ids.shape != (n_structures,):
+            raise ValueError(
+                "structure_ids must have shape (n_structures,), "
+                f"got {structure_ids.shape}."
+            )
+
+    order = np.arange(n_structures, dtype=np.int32)
+    if shuffle_structures:
+        rng = np.random.RandomState(seed)
+        rng.shuffle(order)
+    if sort_by_size:
+        # First-fit decreasing improves fill ratio and keeps behavior deterministic.
+        order = order[np.argsort(valid_counts[order])[::-1]]
+
+    tiles = _pack_structures_greedy(
+        order, valid_counts, target_beads=target_beads, drop_incomplete=drop_incomplete
+    )
+    if not tiles:
+        raise ValueError(
+            "No tiles were constructed. Check mask/target_beads/drop_incomplete settings."
+        )
+    max_segments = max(len(tile) for tile in tiles)
+
+    tile_R = []
+    tile_F = []
+    tile_mask = []
+    tile_species = []
+    tile_segment_id = []
+    tile_n_valid = []
+    tile_n_segments = []
+    meta_batch_item_id = []
+    meta_capacity = []
+    meta_fill_ratio = []
+    meta_n_force_components = []
+    meta_source_structure_ids = []
+    meta_source_structure_n_valid = []
+    meta_structure_size_min = []
+    meta_structure_size_mean = []
+    meta_structure_size_max = []
+    meta_structure_size_std = []
+
+    for tile_id, tile_indices in enumerate(tiles):
+        tile_indices_arr = np.asarray(tile_indices, dtype=np.int32)
+        struct_valid = valid_counts[tile_indices_arr]
+        n_valid_tile = int(np.sum(struct_valid))
+        capacity = _choose_tile_capacity(
+            n_valid=n_valid_tile,
+            target_beads=target_beads,
+            bucket_beads=bucket_beads,
+        )
+
+        R_out = np.zeros((capacity, 3), dtype=np.float32)
+        F_out = np.zeros((capacity, 3), dtype=np.float32)
+        mask_out = np.zeros((capacity,), dtype=np.float32)
+        species_out = np.zeros((capacity,), dtype=np.int32)
+        segment_out = np.full((capacity,), -1, dtype=np.int32)
+
+        cursor = 0
+        for seg_id, struct_idx in enumerate(tile_indices):
+            valid_idx = np.flatnonzero(mask[struct_idx] > 0)
+            n_valid = int(valid_idx.shape[0])
+            if n_valid == 0:
+                continue
+            if cursor + n_valid > capacity:
+                raise ValueError(
+                    f"Tile overflow: required {cursor + n_valid} > capacity {capacity}."
+                )
+            sl = slice(cursor, cursor + n_valid)
+            R_out[sl] = R[struct_idx, valid_idx]
+            F_out[sl] = F[struct_idx, valid_idx]
+            mask_out[sl] = 1.0
+            species_out[sl] = species[struct_idx, valid_idx]
+            segment_out[sl] = np.int32(seg_id)
+            cursor += n_valid
+
+        tile_R.append(R_out)
+        tile_F.append(F_out)
+        tile_mask.append(mask_out)
+        tile_species.append(species_out)
+        tile_segment_id.append(segment_out)
+        tile_n_valid.append(np.int32(cursor))
+        tile_n_segments.append(np.int32(len(tile_indices)))
+        meta_batch_item_id.append(np.int32(tile_id))
+        meta_capacity.append(np.int32(capacity))
+        meta_fill_ratio.append(np.float32(cursor / max(capacity, 1)))
+        meta_n_force_components.append(np.int32(cursor * 3))
+
+        source_ids = np.full((max_segments,), -1, dtype=np.int32)
+        source_valid = np.zeros((max_segments,), dtype=np.int32)
+        source_ids[: len(tile_indices)] = structure_ids[tile_indices_arr]
+        source_valid[: len(tile_indices)] = struct_valid
+        meta_source_structure_ids.append(source_ids)
+        meta_source_structure_n_valid.append(source_valid)
+        meta_structure_size_min.append(np.int32(np.min(struct_valid)))
+        meta_structure_size_mean.append(np.float32(np.mean(struct_valid)))
+        meta_structure_size_max.append(np.int32(np.max(struct_valid)))
+        meta_structure_size_std.append(np.float32(np.std(struct_valid)))
+
+    return {
+        "R": np.stack(tile_R, axis=0),
+        "F": np.stack(tile_F, axis=0),
+        "mask": np.stack(tile_mask, axis=0),
+        "species": np.stack(tile_species, axis=0),
+        "segment_id": np.stack(tile_segment_id, axis=0),
+        "n_valid": np.asarray(tile_n_valid, dtype=np.int32),
+        "n_segments": np.asarray(tile_n_segments, dtype=np.int32),
+        "meta_batch_item_id": np.asarray(meta_batch_item_id, dtype=np.int32),
+        "meta_capacity": np.asarray(meta_capacity, dtype=np.int32),
+        "meta_fill_ratio": np.asarray(meta_fill_ratio, dtype=np.float32),
+        "meta_n_force_components": np.asarray(meta_n_force_components, dtype=np.int32),
+        "meta_source_structure_ids": np.stack(meta_source_structure_ids, axis=0),
+        "meta_source_structure_n_valid": np.stack(
+            meta_source_structure_n_valid, axis=0
+        ),
+        "meta_structure_size_min": np.asarray(meta_structure_size_min, dtype=np.int32),
+        "meta_structure_size_mean": np.asarray(meta_structure_size_mean, dtype=np.float32),
+        "meta_structure_size_max": np.asarray(meta_structure_size_max, dtype=np.int32),
+        "meta_structure_size_std": np.asarray(meta_structure_size_std, dtype=np.float32),
+    }
 
 
 class DatasetLoader:

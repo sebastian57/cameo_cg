@@ -58,6 +58,13 @@ def _mlp_cast(mlp_module, x, dtype):
     return mlp_module(x.astype(dtype)).astype(jnp.float32)
 
 
+def _mesh_safe_softplus(x):
+    """Softplus variant that avoids problematic sharding metadata propagation."""
+    x = jnp.asarray(x)
+    zero = jnp.zeros_like(x)
+    return jnp.maximum(x, zero) + jnp.log1p(jnp.exp(-jnp.abs(x)))
+
+
 class Allegro(hk.Module):
     """Allegro for molecular property prediction.
 
@@ -75,6 +82,7 @@ class Allegro(hk.Module):
                  hidden_irreps: e3nn.Irreps = 128 * e3nn.Irreps("0o + 1o + 1e + 2e + 2o + 3o + 3e"),
                  output_irreps: e3nn.Irreps = e3nn.Irreps("0e"),
                  mlp_activation: Callable[[jnp.ndarray], jnp.ndarray] = jax.nn.silu,
+                 mlp_output_activation: Callable[[jnp.ndarray], jnp.ndarray] = None,
                  mlp_n_hidden: int = 1024,
                  mlp_n_layers: int = 3,
                  embed_n_hidden: Iterable[int] = (64, 128, 256),
@@ -128,8 +136,13 @@ class Allegro(hk.Module):
 
         self.envelope_fn = layers.SmoothingEnvelope(envelope_p)
 
-        # Learnable normalization depending on the number of neighbors
-        self.epsilon = 1 / jnp.sqrt(1 + jax_nn.softplus(epsilon))
+        # Learnable normalization depending on the number of neighbors.
+        # Use mesh-safe softplus to avoid Manual-vs-Auto sharding mismatches
+        # when this module is traced inside shmap.
+        epsilon_sp = _mesh_safe_softplus(epsilon)
+        self.epsilon = jnp.reciprocal(
+            jnp.sqrt(jnp.ones_like(epsilon_sp) + epsilon_sp)
+        )
 
         if charge_eq_fn is not None:
             try:
@@ -189,7 +202,9 @@ class Allegro(hk.Module):
 
         self.readout_layer = AllegroReadout(
             output_n_hidden=mlp_n_hidden, output_n_layers=1,
-            output_activation=mlp_activation, envelope_p=envelope_p,
+            output_activation=mlp_activation,
+            final_activation=mlp_output_activation,
+            envelope_p=envelope_p,
             output_irreps=e3nn.Irreps(output_irreps),
             mlp_dtype=mlp_dtype,
         )
@@ -234,9 +249,10 @@ class Allegro(hk.Module):
             else:
                 y, V = out
 
-            # Perform residual update through a weighted sum
-            x = (x + jax_nn.softplus(self.alpha) * y)
-            x /= (1 + jax_nn.softplus(self.alpha))
+            # Perform residual update through a weighted sum.
+            alpha_sp = _mesh_safe_softplus(self.alpha)
+            x = x + alpha_sp * y
+            x /= (jnp.ones_like(alpha_sp) + alpha_sp)
 
         # Readout layer
 
@@ -500,6 +516,7 @@ class AllegroReadout(hk.Module):
                  output_n_hidden: int = 64,
                  output_n_layers: int = 1,
                  output_activation: Callable[[jnp.ndarray], jnp.ndarray] = jax_nn.silu,
+                 final_activation: Callable[[jnp.ndarray], jnp.ndarray] = None,
                  envelope_p: int = 6,
                  mlp_dtype: jnp.dtype = jnp.float32,
                  *,
@@ -511,6 +528,7 @@ class AllegroReadout(hk.Module):
             (output_n_hidden,) * output_n_layers,
             output_activation, output_activation=False)
         self.linear = e3nn.haiku.Linear(output_irreps)
+        self.final_activation = final_activation
 
         self.output_irreps = output_irreps
         self.envelope_fn = layers.SmoothingEnvelope(envelope_p)
@@ -520,6 +538,8 @@ class AllegroReadout(hk.Module):
     def __call__(self, vectors, x: jnp.ndarray, V: e3nn.IrrepsArray) -> jnp.ndarray:
 
         x = _mlp_cast(self.mlp, x, self.mlp_dtype)
+        if self.final_activation is not None:
+            x = self.final_activation(x)
         xV = self.linear(e3nn.concatenate([x, V]))
 
         if xV.irreps != self.output_irreps:
@@ -640,7 +660,7 @@ def allegro_qeq_neighborlist_pp(displacement: space.DisplacementFn,
                                 n_species: int = 100,
                                 positions_test: jnp.ndarray = None,
                                 neighbor_test: partition.NeighborList = None,
-                                max_edge_multiplier: float = 1.25,
+                                max_edge_multiplier: float = 1.1,
                                 max_edges=None,
                                 avg_num_neighbors: float = None,
                                 mode: str = "energy",
@@ -802,10 +822,12 @@ def allegro_qeq_neighborlist_pp(displacement: space.DisplacementFn,
             return charges, pot
 
         mlp_activation = allegro_kwargs.pop("mlp_activation", jax_nn.mish)
+        mlp_output_activation = allegro_kwargs.pop("mlp_output_activation", None)
         net = Allegro(
             avg_num_neighbors=avg_num_neighbors,
             num_species=n_species,
             mlp_activation=mlp_activation,
+            mlp_output_activation=mlp_output_activation,
             charge_eq_fn=_charge_eq_fn,
             **allegro_kwargs
         )
@@ -834,7 +856,9 @@ def allegro_qeq_neighborlist_pp(displacement: space.DisplacementFn,
         else:
             raise NotImplementedError(f"Mode {mode} not implemented.")
 
-    return jax.jit(model.init), jax.jit(model.apply)
+    # Let the caller own JIT/sharding (e.g. chemtrain shmap/pmap) to avoid
+    # nested compilation contexts with conflicting mesh semantics.
+    return model.init, model.apply
 
 
 def allegro_neighborlist_pp(displacement: space.DisplacementFn,
@@ -842,7 +866,7 @@ def allegro_neighborlist_pp(displacement: space.DisplacementFn,
                             n_species: int = 100,
                             positions_test: jnp.ndarray = None,
                             neighbor_test: partition.NeighborList = None,
-                            max_edge_multiplier: float = 1.25,
+                            max_edge_multiplier: float = 1.1,
                             max_edges=None,
                             avg_num_neighbors: float = None,
                             mode: str = "energy",
@@ -966,10 +990,12 @@ def allegro_neighborlist_pp(displacement: space.DisplacementFn,
         vectors = e3nn.IrrepsArray(e3nn.Irreps("1o"), vectors)
 
         mlp_activation = allegro_kwargs.pop("mlp_activation", jax_nn.mish)
+        mlp_output_activation = allegro_kwargs.pop("mlp_output_activation", None)
         net = Allegro(
             avg_num_neighbors=avg_num_neighbors,
             num_species=n_species,
             mlp_activation=mlp_activation,
+            mlp_output_activation=mlp_output_activation,
             **allegro_kwargs
         )
 
@@ -994,4 +1020,6 @@ def allegro_neighborlist_pp(displacement: space.DisplacementFn,
         else:
             raise NotImplementedError(f"Mode {mode} not implemented.")
 
-    return jax.jit(model.init), jax.jit(model.apply)
+    # Let the caller own JIT/sharding (e.g. chemtrain shmap/pmap) to avoid
+    # nested compilation contexts with conflicting mesh semantics.
+    return model.init, model.apply

@@ -107,6 +107,72 @@ class ConfigManager:
         """Get maximum number of frames to use from dataset."""
         return self.get("data", "max_frames", default=None)
 
+    def get_batch_mode(self) -> str:
+        """
+        Get dataset batch construction mode.
+
+        Returns:
+            "standard" for legacy per-structure batching or
+            "tiled" for disconnected packed tile batching.
+        """
+        raw = str(self.get("data", "batch_mode", default="standard")).strip().lower()
+        if raw not in ("standard", "tiled"):
+            raise ValueError(
+                f"Unsupported data.batch_mode='{raw}'. "
+                "Expected one of: standard, tiled."
+            )
+        return raw
+
+    def get_tile_target_beads(self) -> int:
+        """Target number of valid beads per tile in tiled batch mode."""
+        value = int(self.get("data", "tile_target_beads", default=1000))
+        if value <= 0:
+            raise ValueError(
+                f"data.tile_target_beads must be > 0, got {value}."
+            )
+        return value
+
+    def get_tile_bucket_beads(self) -> Optional[list[int]]:
+        """
+        Optional fixed tile-size buckets (in bead count) for tiled mode.
+
+        Returns:
+            Sorted unique positive bucket sizes, or None if not configured.
+        """
+        values = self.get("data", "tile_bucket_beads", default=None)
+        if values is None:
+            return None
+        if not isinstance(values, (list, tuple)):
+            raise ValueError(
+                "data.tile_bucket_beads must be a list of positive integers."
+            )
+        parsed = sorted({int(v) for v in values})
+        if not parsed or parsed[0] <= 0:
+            raise ValueError(
+                f"data.tile_bucket_beads must contain positive integers, got {values}."
+            )
+        return parsed
+
+    def tile_shuffle_structures_enabled(self) -> bool:
+        """Whether to shuffle structures before greedy tile packing."""
+        return bool(self.get("data", "tile_shuffle_structures", default=False))
+
+    def tile_sort_by_size_enabled(self) -> bool:
+        """Whether tiled packing should sort structures by valid bead count."""
+        return bool(self.get("data", "tile_sort_by_size", default=True))
+
+    def tile_rebuild_each_epoch_enabled(self) -> bool:
+        """Whether tiled training should rebuild tile composition at each epoch."""
+        return bool(self.get("data", "tile_rebuild_each_epoch", default=False))
+
+    def tile_drop_incomplete_enabled(self) -> bool:
+        """Whether to drop the final under-filled tile."""
+        return bool(self.get("data", "tile_drop_incomplete", default=False))
+
+    def tile_train_only_enabled(self) -> bool:
+        """Whether tiled mode should only be applied to training batches."""
+        return bool(self.get("data", "tile_train_only", default=True))
+
     # ----- Preprocessing Section -----
 
     def get_buffer_multiplier(self) -> float:
@@ -167,11 +233,26 @@ class ConfigManager:
         Returns:
             Dictionary of Allegro hyperparameters
         """
-        if size == "default":
-            cfg = self.get("model", "allegro", default={})
-        else:
-            key = f"allegro_{size}"
-            cfg = self.get("model", key, default=self.get("model", "allegro", default={}))
+        use_cueq_cfg = self.get_ml_model_type() in ("allegro_cueq", "allegro_cueq_fast")
+        cfg: Dict[str, Any] = {}
+
+        def _merge_if_dict(key: str):
+            value = self.get("model", key, default=None)
+            if isinstance(value, dict):
+                cfg.update(value)
+
+        # Start from the generic Allegro settings, then layer backend-specific
+        # overrides on top. This keeps cuEq and e3nn runs aligned by default.
+        _merge_if_dict("allegro")
+        if size != "default":
+            _merge_if_dict(f"allegro_{size}")
+
+        if use_cueq_cfg:
+            _merge_if_dict("allegro_cuEq")
+            _merge_if_dict("allegro_cueq")
+            if size != "default":
+                _merge_if_dict(f"allegro_cuEq_{size}")
+                _merge_if_dict(f"allegro_cueq_{size}")
 
         # Keep activation explicit/configurable while preserving current behavior.
         cfg = dict(cfg)
@@ -336,6 +417,66 @@ class ConfigManager:
         """
         return self.get("training", "gammas", default={"F": 1.0, "U": 0.0})
 
+    def get_force_loss_normalization(self) -> str:
+        """Get force-loss normalization mode for force matching."""
+        raw = str(
+            self.get("training", "force_loss_normalization", default="legacy_mean")
+        ).strip().lower()
+        if raw not in ("legacy_mean", "valid_components", "per_structure_components"):
+            raise ValueError(
+                f"Unsupported training.force_loss_normalization='{raw}'. "
+                "Expected one of: legacy_mean, valid_components, per_structure_components."
+            )
+        return raw
+
+    def prior_residual_enabled(self) -> bool:
+        """
+        Check if prior-force residual training mode is enabled.
+
+        In this mode, prior forces are precomputed on untiled data and force
+        targets are transformed to residual targets:
+            F_residual = F_ref - F_prior.
+        """
+        return bool(self.get("training", "prior_residual", "enabled", default=False))
+
+    def prior_residual_cache_enabled(self) -> bool:
+        """Check if residual-prior precompute cache is enabled."""
+        return bool(
+            self.get("training", "prior_residual", "cache_enabled", default=True)
+        )
+
+    def get_prior_residual_cache_path(self) -> Optional[str]:
+        """
+        Get optional cache path for residual-prior precompute data.
+
+        If None, callers should use a default path under checkpoint_path.
+        """
+        path = self.get("training", "prior_residual", "cache_path", default=None)
+        if path is None:
+            return None
+        path = str(path).strip()
+        if path == "":
+            return None
+        return path
+
+    def prior_residual_force_recompute(self) -> bool:
+        """Whether to bypass cache and recompute prior forces."""
+        return bool(
+            self.get("training", "prior_residual", "force_recompute", default=False)
+        )
+
+    def get_prior_residual_compute_batch_size(self) -> int:
+        """Batch size used for chunked prior-force precompute."""
+        value = int(
+            self.get("training", "prior_residual", "compute_batch_size", default=128)
+        )
+        if value <= 0:
+            raise ValueError(
+                "training.prior_residual.compute_batch_size must be > 0, "
+                f"got {value}."
+            )
+        return value
+
     def get_checkpoint_path(self) -> str:
         """Get checkpoint directory path."""
         return self.get("training", "checkpoint_path", default="./checkpoints_allegro")
@@ -347,6 +488,10 @@ class ConfigManager:
     def get_export_path(self) -> str:
         """Get model export directory path."""
         return self.get("training", "export_path", default="./exported_models")
+
+    def export_combined_ml_priors_enabled(self) -> bool:
+        """Whether eval/export should reconstruct full forces as ML + priors."""
+        return bool(self.get("training", "export_combined_ml_priors", default=True))
 
     def get_profiling_config(self) -> Dict[str, Any]:
         """
@@ -362,6 +507,12 @@ class ConfigManager:
                 - batch_profiler_enabled: enable per-batch dispatch/barrier timing
                 - batch_profiler_warmup: batches to skip before sampling (JIT warmup)
                 - batch_profiler_samples: number of batches to profile per stage
+                - batch_stats_enabled: log optimizer-step accounting and batch composition
+                - batch_stats_rank0_only: only emit batch stats on rank 0
+                - batch_stats_log_every: log every N profiled steps
+                - loss_profile_enabled: recompute sampled force-loss views for diagnosis
+                - loss_profile_steps: number of profiled steps to run manual loss views on
+                - epoch_summary_enabled: emit epoch-level summaries from the profiled steps
         """
         return {
             "enabled": self.get("training", "profiling", "enabled", default=False),
@@ -382,6 +533,24 @@ class ConfigManager:
             "batch_profiler_samples": int(self.get(
                 "training", "profiling", "batch_profiler_samples", default=50
             )),
+            "batch_stats_enabled": self.get(
+                "training", "profiling", "batch_stats_enabled", default=False
+            ),
+            "batch_stats_rank0_only": self.get(
+                "training", "profiling", "batch_stats_rank0_only", default=True
+            ),
+            "batch_stats_log_every": int(self.get(
+                "training", "profiling", "batch_stats_log_every", default=1
+            )),
+            "loss_profile_enabled": self.get(
+                "training", "profiling", "loss_profile_enabled", default=False
+            ),
+            "loss_profile_steps": int(self.get(
+                "training", "profiling", "loss_profile_steps", default=4
+            )),
+            "epoch_summary_enabled": self.get(
+                "training", "profiling", "epoch_summary_enabled", default=False
+            ),
         }
 
     # ----- Model Configuration (New) -----
@@ -403,9 +572,34 @@ class ConfigManager:
         Get which ML model backbone to use.
 
         Returns:
-            Model type: "allegro", "mace", or "painn"
+            Canonical model type:
+            - "allegro"
+            - "allegro_cueq"
+            - "allegro_cueq_fast"
+            - "mace"
+            - "painn"
         """
-        return self.get("model", "ml_model", default="allegro")
+        raw = str(self.get("model", "ml_model", default="allegro"))
+        normalized = raw.strip().lower().replace("-", "_")
+
+        aliases = {
+            "allegro": "allegro",
+            "allegro_cueq": "allegro_cueq",
+            "allegro_cueq_opt": "allegro_cueq",
+            "allegro_cueq_b1": "allegro_cueq",
+            "allegro_cueq_fast": "allegro_cueq_fast",
+            "allegro_cueq_fast_1103": "allegro_cueq_fast",
+            "mace": "mace",
+            "painn": "painn",
+        }
+        canonical = aliases.get(normalized)
+        if canonical is None:
+            allowed = ", ".join(sorted(aliases.keys()))
+            raise ValueError(
+                f"Unsupported model.ml_model='{raw}'. "
+                f"Expected one of: {allowed}"
+            )
+        return canonical
 
     def get_allegro_size(self) -> str:
         """

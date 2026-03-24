@@ -23,27 +23,27 @@ def precompute_chain_topology(N_max: int) -> Tuple[jax.Array, jax.Array]:
     """
     Generate bonds and angles for a linear chain topology.
 
-    For 1-bead-per-residue proteins, consecutive beads are bonded,
-    and every triplet forms an angle.
+    For 1-bead-per-residue proteins, bonds connect beads with sequence
+    separation 4 (i, i+4), and every triplet forms an angle.
 
     Args:
         N_max: Maximum number of beads in the chain
 
     Returns:
-        bonds: Array of shape (N_max-1, 2) with bond pairs
+        bonds: Array of shape (N_max-4, 2) with bond pairs
         angles: Array of shape (N_max-2, 3) with angle triplets
 
     Example:
         >>> bonds, angles = precompute_chain_topology(5)
         >>> bonds.shape
-        (4, 2)
+        (1, 2)
         >>> angles.shape
         (3, 3)
     """
     i = jnp.arange(N_max, dtype=jnp.int32)
 
-    # Bonds: consecutive pairs (i, i+1)
-    bonds = jnp.stack([i[:-1], i[1:]], axis=1)  # (N_max-1, 2)
+    # Bonds: sequence-separated pairs (i, i+4)
+    bonds = jnp.stack([i[:-4], i[4:]], axis=1)  # (N_max-4, 2)
 
     # Angles: triplets (i, i+1, i+2)
     angles = jnp.stack([i[:-2], i[1:-1], i[2:]], axis=1)  # (N_max-2, 3)

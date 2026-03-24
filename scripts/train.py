@@ -42,6 +42,35 @@ IMPORTANT: JAX distributed initialization must happen before any other JAX opera
 import os
 import sys
 import jax
+from typing import Optional, Dict
+
+def _apply_jax_compat_shims():
+    """
+    Runtime compatibility shims for jax_md/chemtrain with newer JAX releases.
+
+    These shims are no-ops on older JAX versions where symbols still exist.
+    """
+    # jax_md<=0.2.8 expects KeyArray on jax.random.
+    if not hasattr(jax.random, "KeyArray"):
+        jax.random.KeyArray = jax.Array
+
+    # Older jax_md imports tree_* helpers from top-level jax namespace.
+    if not hasattr(jax, "tree_map"):
+        jax.tree_map = jax.tree_util.tree_map
+    if not hasattr(jax, "tree_leaves"):
+        jax.tree_leaves = jax.tree_util.tree_leaves
+    if not hasattr(jax, "tree_flatten"):
+        jax.tree_flatten = jax.tree_util.tree_flatten
+    if not hasattr(jax, "tree_unflatten"):
+        jax.tree_unflatten = jax.tree_util.tree_unflatten
+
+    # Older jax_md imports xla_bridge from jax.lib.
+    if not hasattr(jax.lib, "xla_bridge"):
+        from jax._src import xla_bridge as _xla_bridge
+        jax.lib.xla_bridge = _xla_bridge
+
+
+_apply_jax_compat_shims()
 
 def _initialize_jax_distributed():
     """
@@ -188,10 +217,13 @@ _IS_DISTRIBUTED, _RANK, _WORLD_SIZE = _initialize_jax_distributed()
 # =============================================================================
 
 import sys
+import copy
 import pickle
+import time
 from pathlib import Path
 import numpy as np
 import jax.numpy as jnp
+from jax.experimental import multihost_utils
 from jax_sgmc.data.numpy_loader import NumpyDataLoader
 from chemtrain.data.data_loaders import DataLoaders
 
@@ -199,14 +231,91 @@ from chemtrain.data.data_loaders import DataLoaders
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config.manager import ConfigManager
-from data.loader import DatasetLoader, BucketedDatasetLoader
+from data.loader import DatasetLoader, BucketedDatasetLoader, build_tiled_dataset
 from data.preprocessor import CoordinatePreprocessor
 from models.combined_model import CombinedModel
+from training.prior_residual import apply_prior_force_residual_targets, pretrain_prior_for_residual
 from training.trainer import Trainer
 from export.exporter import AllegroExporter
 from evaluation.visualizer import LossPlotter
 from utils.logging import data_logger, model_logger, training_logger, export_logger
 import logging
+
+
+def _sync_all_ranks(tag: str) -> None:
+    """Synchronize all distributed ranks at a named barrier."""
+    if _WORLD_SIZE > 1:
+        multihost_utils.sync_global_devices(tag)
+
+
+def _make_export_model(
+    config: ConfigManager,
+    model: CombinedModel,
+    R0,
+    box,
+    species0,
+    id_to_aa,
+    n_max: int,
+) -> CombinedModel:
+    """Build the model variant that should be used for export/evaluation."""
+    export_with_priors = config.export_combined_ml_priors_enabled()
+    has_prior_config = config.get("model", "priors", default=None) is not None
+
+    if not export_with_priors:
+        export_logger.info("Export mode: ML-only (training.export_combined_ml_priors=false)")
+        return model
+
+    if model.use_priors:
+        export_logger.info("Export mode: ML+priors (model already has priors enabled)")
+        return model
+
+    if not has_prior_config:
+        export_logger.warning(
+            "Export mode requested ML+priors, but model.priors is missing; falling back to ML-only export."
+        )
+        return model
+
+    export_config = ConfigManager(config.config_path)
+    export_config._config = copy.deepcopy(config._config)
+    export_config._config.setdefault("model", {})["use_priors"] = True
+    export_config._config["model"]["train_priors"] = False
+
+    export_logger.info(
+        "Export mode: ML+priors (training.export_combined_ml_priors=true; priors re-enabled for export)"
+    )
+    return CombinedModel(
+        config=export_config,
+        R0=R0,
+        box=box,
+        species=species0,
+        N_max=n_max,
+        id_to_aa=id_to_aa,
+        prior_only=False,
+    )
+
+
+def _apply_grad_accum_overrides(config: ConfigManager) -> None:
+    """
+    Allow per-config gradient accumulation overrides.
+
+    This intentionally overrides values pre-set in the launcher script so
+    experiment YAMLs can define their own accumulation behavior.
+    """
+    grad_acc_steps = config.get("training", "grad_accum_steps", default=None)
+    grad_acc_mode = config.get("training", "grad_accum_mode", default=None)
+
+    if grad_acc_steps is not None:
+        os.environ["CHEMTRAIN_GRAD_ACCUM_STEPS"] = str(int(grad_acc_steps))
+        training_logger.info(
+            "[Config] Override CHEMTRAIN_GRAD_ACCUM_STEPS=%s from YAML",
+            os.environ["CHEMTRAIN_GRAD_ACCUM_STEPS"],
+        )
+    if grad_acc_mode is not None and str(grad_acc_mode).strip() != "":
+        os.environ["CHEMTRAIN_GRAD_ACCUM_MODE"] = str(grad_acc_mode)
+        training_logger.info(
+            "[Config] Override CHEMTRAIN_GRAD_ACCUM_MODE=%s from YAML",
+            os.environ["CHEMTRAIN_GRAD_ACCUM_MODE"],
+        )
 
 
 def apply_numpy_dataloader_patch():
@@ -259,6 +368,350 @@ def find_latest_checkpoint(checkpoint_dir: Path):
     return latest
 
 
+def _shuffle_dataset_for_split(dataset: dict, seed: int) -> dict:
+    """
+    Shuffle frame-ordered dataset arrays before train/validation split.
+
+    Only arrays whose leading dimension matches n_frames are shuffled.
+    Non-frame metadata entries (if any) are left untouched.
+    """
+    if "R" not in dataset:
+        return dataset
+
+    n_frames = int(dataset["R"].shape[0])
+    if n_frames <= 1:
+        return dataset
+
+    rng = np.random.RandomState(seed)
+    permutation = rng.permutation(n_frames)
+
+    shuffled = {}
+    for key, value in dataset.items():
+        if hasattr(value, "shape") and len(value.shape) > 0 and int(value.shape[0]) == n_frames:
+            shuffled[key] = np.asarray(value)[permutation]
+        else:
+            shuffled[key] = value
+
+    data_logger.info(
+        "[Split] Shuffled %d frames before train/val split (seed=%d).",
+        n_frames,
+        seed,
+    )
+    return shuffled
+
+
+def _validate_tiled_mode_constraints(config: ConfigManager) -> None:
+    """Validate currently supported constraints for tiled training mode."""
+    if config.get_batch_mode() != "tiled":
+        return
+    if config.use_priors():
+        raise ValueError(
+            "data.batch_mode='tiled' currently supports only pure-ML training. "
+            "Set model.use_priors=false for Phase 1 tiled training."
+        )
+    if not config.tile_train_only_enabled():
+        raise ValueError(
+            "data.tile_train_only=false is not supported yet. "
+            "Phase 1 tiled mode is training-only."
+        )
+
+
+def _validate_prior_residual_mode_constraints(config: ConfigManager) -> None:
+    """Validate configuration constraints for residual-prior target mode."""
+    if not config.prior_residual_enabled():
+        return
+
+    if config.use_priors():
+        raise ValueError(
+            "training.prior_residual.enabled=true requires model.use_priors=false. "
+            "Residual mode trains ML against F_ref - F_prior and does not add prior "
+            "energy at runtime."
+        )
+    if config.train_priors_enabled():
+        raise ValueError(
+            "training.prior_residual.enabled=true requires model.train_priors=false. "
+            "Residual mode assumes frozen prior forces."
+        )
+
+    gammas = config.get_gammas()
+    gamma_u = float(gammas.get("U", 0.0))
+    if abs(gamma_u) > 0.0:
+        raise ValueError(
+            "training.prior_residual.enabled=true currently requires "
+            "training.gammas.U == 0.0."
+        )
+
+    if config.get("model", "priors", default=None) is None:
+        raise ValueError(
+            "training.prior_residual.enabled=true requires model.priors "
+            "configuration to be present."
+        )
+
+
+def _pretrain_for_residual_if_needed(
+    config: ConfigManager,
+    dataset: dict,
+    id_to_aa: Optional[Dict[int, str]],
+) -> Optional[dict]:
+    """
+    Run LBFGS prior pretraining against raw F_ref if both pretrain_prior and
+    prior_residual are enabled.  Must be called BEFORE _apply_prior_residual_if_enabled
+    so that fitting sees the original reference forces, not already-subtracted residuals.
+
+    Returns fitted_params dict (numpy arrays) or None if pretraining was skipped.
+    """
+    fitted_params = pretrain_prior_for_residual(config, dataset, id_to_aa)
+    if fitted_params is not None:
+        training_logger.info(
+            "[PriorResidual] Prior pretraining complete. "
+            "Residuals will be computed with fitted parameters."
+        )
+    return fitted_params
+
+
+def _apply_prior_residual_if_enabled(
+    *,
+    config: ConfigManager,
+    dataset: dict,
+    dataset_path: Path,
+    dataset_tag: str,
+    id_to_aa: Optional[Dict[int, str]],
+    seed: int,
+    max_frames: Optional[int],
+    cutoff: float,
+    buffer_mult: float,
+    park_mult: float,
+    fitted_params: Optional[dict] = None,
+) -> dict:
+    """Apply prior-force residual targets on untiled preprocessed dataset."""
+    if not config.prior_residual_enabled():
+        return dataset
+
+    script_dir = Path(__file__).parent
+    project_root = script_dir.parent
+    stats = apply_prior_force_residual_targets(
+        config=config,
+        dataset=dataset,
+        dataset_path=dataset_path,
+        dataset_tag=dataset_tag,
+        id_to_aa=id_to_aa,
+        project_root=project_root,
+        seed=seed,
+        max_frames=max_frames,
+        cutoff=cutoff,
+        buffer_multiplier=buffer_mult,
+        park_multiplier=park_mult,
+        fitted_params=fitted_params,
+    )
+    data_logger.info(
+        "[PriorResidual] Applied residual targets for '%s' "
+        "(cache_hit=%s, cache_path=%s, mean_prior_norm=%.4f, mean_residual_norm=%.4f).",
+        dataset_tag,
+        bool(stats.get("cache_hit", False)),
+        stats.get("cache_path"),
+        float(stats.get("mean_prior_norm", 0.0)),
+        float(stats.get("mean_residual_norm", 0.0)),
+    )
+    return dataset
+
+
+def _compute_force_loss_weights(split: dict) -> np.ndarray:
+    """Build per-particle weights that average force MSE uniformly by structure."""
+    mask = np.asarray(split["mask"], dtype=np.float32)
+    weights = np.zeros_like(mask, dtype=np.float32)
+
+    if "segment_id" in split:
+        segment_id = np.asarray(split["segment_id"], dtype=np.int32)
+        for batch_idx in range(mask.shape[0]):
+            valid = mask[batch_idx] > 0
+            if not np.any(valid):
+                continue
+            valid_segments = segment_id[batch_idx][valid]
+            if valid_segments.size == 0:
+                continue
+            counts = np.bincount(valid_segments, minlength=int(valid_segments.max()) + 1).astype(np.float32)
+            weights[batch_idx, valid] = 1.0 / np.maximum(counts[valid_segments], 1.0)
+        return weights
+
+    n_valid = np.sum(mask > 0, axis=1, dtype=np.float32)
+    safe_n_valid = np.maximum(n_valid[:, None], 1.0)
+    weights = np.where(mask > 0, mask / safe_n_valid, 0.0)
+    return np.asarray(weights, dtype=np.float32)
+
+
+def _attach_batch_metadata(split: dict, sample_ids: np.ndarray) -> dict:
+    """Attach uniform profiling metadata to a training split."""
+    annotated = dict(split)
+    sample_ids = np.asarray(sample_ids, dtype=np.int32)
+    n_items = int(sample_ids.shape[0])
+    n_valid = np.asarray(np.sum(annotated["mask"] > 0, axis=1), dtype=np.int32)
+    capacity = int(annotated["R"].shape[1])
+
+    annotated.setdefault("force_loss_mask", np.asarray(annotated["mask"], dtype=np.float32))
+    annotated.setdefault("force_loss_weights", _compute_force_loss_weights(annotated))
+    annotated.setdefault("n_valid", n_valid)
+    annotated.setdefault("n_segments", np.ones((n_items,), dtype=np.int32))
+    annotated.setdefault("meta_batch_item_id", sample_ids)
+    annotated.setdefault("meta_capacity", np.full((n_items,), capacity, dtype=np.int32))
+    annotated.setdefault("meta_fill_ratio", n_valid.astype(np.float32) / max(capacity, 1))
+    annotated.setdefault("meta_n_force_components", np.asarray(n_valid * 3, dtype=np.int32))
+    annotated.setdefault("meta_source_structure_ids", sample_ids[:, None])
+    annotated.setdefault("meta_source_structure_n_valid", n_valid[:, None])
+    annotated.setdefault("meta_structure_size_min", n_valid)
+    annotated.setdefault("meta_structure_size_mean", n_valid.astype(np.float32))
+    annotated.setdefault("meta_structure_size_max", n_valid)
+    annotated.setdefault("meta_structure_size_std", np.zeros((n_items,), dtype=np.float32))
+    return annotated
+
+
+def _build_loader_kwargs(split: dict) -> dict:
+    """Build NumpyDataLoader kwargs while preserving auxiliary arrays."""
+    loader_kwargs = {"copy": False}
+    for key, value in split.items():
+        if key in ("R", "F", "mask", "species", "segment_id", "force_loss_mask", "force_loss_weights"):
+            loader_kwargs[key] = value
+        elif key.startswith("meta_") or key in ("n_valid", "n_segments"):
+            loader_kwargs[key] = value
+    return loader_kwargs
+
+
+def _build_validation_split(dataset: dict, start: int, stop: int) -> dict:
+    """Build an untiled validation split with auxiliary loss-mask fields."""
+    val_split = {
+        "R": np.asarray(dataset["R"][start:stop], dtype=np.float32),
+        "F": np.asarray(dataset["F"][start:stop], dtype=np.float32),
+        "mask": np.asarray(dataset["mask"][start:stop], dtype=np.float32),
+        "species": np.asarray(dataset["species"][start:stop], dtype=np.int32),
+    }
+    sample_ids = np.arange(start, stop, dtype=np.int32)
+    return _attach_batch_metadata(val_split, sample_ids)
+
+
+def _build_tiled_train_source(dataset: dict, n_train: int) -> dict:
+    """Capture the untiled training structures used to rebuild random tiles."""
+    return {
+        "R": np.asarray(dataset["R"][:n_train], dtype=np.float32),
+        "F": np.asarray(dataset["F"][:n_train], dtype=np.float32),
+        "mask": np.asarray(dataset["mask"][:n_train], dtype=np.float32),
+        "species": np.asarray(dataset["species"][:n_train], dtype=np.int32),
+        "structure_ids": np.arange(n_train, dtype=np.int32),
+    }
+
+
+def _log_train_split_profile(train_split: dict, config: ConfigManager) -> None:
+    """Log dataset-level profiling summaries for baseline or tiled training."""
+    n_items = int(train_split["R"].shape[0])
+    n_valid = np.asarray(train_split["n_valid"], dtype=np.int32)
+    n_segments = np.asarray(train_split["n_segments"], dtype=np.int32)
+    fill_ratio = np.asarray(train_split["meta_fill_ratio"], dtype=np.float32)
+    n_force_components = np.asarray(train_split["meta_n_force_components"], dtype=np.int32)
+    unique_structures = np.asarray(train_split["meta_source_structure_ids"], dtype=np.int32)
+    unique_structures = unique_structures[unique_structures >= 0]
+
+    if config.get_batch_mode() == "tiled":
+        data_logger.info(
+            "[TilingProfile] items=%d unique_structures=%d mean_structures_per_tile=%.2f "
+            "mean_valid_beads=%.1f fill_ratio(mean/min/max)=%.3f/%.3f/%.3f",
+            n_items,
+            int(np.unique(unique_structures).size),
+            float(np.mean(n_segments)),
+            float(np.mean(n_valid)),
+            float(np.mean(fill_ratio)),
+            float(np.min(fill_ratio)),
+            float(np.max(fill_ratio)),
+        )
+        if config.tile_rebuild_each_epoch_enabled():
+            data_logger.info(
+                "[TilingProfile] tile compositions are rebuilt every epoch with shuffle=%s and sort_by_size=%s. "
+                "Loader shuffling still randomizes tile order within each epoch.",
+                bool(config.tile_shuffle_structures_enabled()),
+                bool(config.tile_sort_by_size_enabled()),
+            )
+        else:
+            data_logger.info(
+                "[TilingProfile] tile compositions are built once before training; loader shuffling changes tile order only. "
+                "shuffle=%s sort_by_size=%s.",
+                bool(config.tile_shuffle_structures_enabled()),
+                bool(config.tile_sort_by_size_enabled()),
+            )
+    else:
+        data_logger.info(
+            "[BatchProfile] structures=%d mean_valid_beads=%.1f force_components(total)=%d "
+            "fill_ratio(mean/min/max)=%.3f/%.3f/%.3f",
+            n_items,
+            float(np.mean(n_valid)),
+            int(np.sum(n_force_components)),
+            float(np.mean(fill_ratio)),
+            float(np.min(fill_ratio)),
+            float(np.max(fill_ratio)),
+        )
+
+
+def _build_train_split(
+    dataset: dict,
+    n_train: int,
+    config: ConfigManager,
+    seed: int,
+) -> dict:
+    """Build the training split and optionally tile it."""
+    train_split = {
+        "R": np.asarray(dataset["R"][:n_train], dtype=np.float32),
+        "F": np.asarray(dataset["F"][:n_train], dtype=np.float32),
+        "mask": np.asarray(dataset["mask"][:n_train], dtype=np.float32),
+        "species": np.asarray(dataset["species"][:n_train], dtype=np.int32),
+    }
+    structure_ids = np.arange(n_train, dtype=np.int32)
+    if config.get_batch_mode() != "tiled":
+        train_split = _attach_batch_metadata(train_split, structure_ids)
+        _log_train_split_profile(train_split, config)
+        return train_split
+
+    t_tile_build_start = time.perf_counter()
+    tiled = build_tiled_dataset(
+        R=train_split["R"],
+        F=train_split["F"],
+        mask=train_split["mask"],
+        species=train_split["species"],
+        structure_ids=structure_ids,
+        target_beads=config.get_tile_target_beads(),
+        bucket_beads=config.get_tile_bucket_beads(),
+        shuffle_structures=config.tile_shuffle_structures_enabled(),
+        sort_by_size=config.tile_sort_by_size_enabled(),
+        drop_incomplete=config.tile_drop_incomplete_enabled(),
+        seed=seed,
+    )
+    t_tile_build_end = time.perf_counter()
+    tiled = _attach_batch_metadata(tiled, np.arange(tiled["R"].shape[0], dtype=np.int32))
+    t_tile_meta_end = time.perf_counter()
+
+    data_logger.info(
+        "[Tiling] Built %d tiles from %d structures "
+        "(target_beads=%d, bucket_beads=%s, shuffled=%s, sort_by_size=%s, drop_incomplete=%s).",
+        int(tiled["R"].shape[0]),
+        int(train_split["R"].shape[0]),
+        int(config.get_tile_target_beads()),
+        config.get_tile_bucket_beads(),
+        bool(config.tile_shuffle_structures_enabled()),
+        bool(config.tile_sort_by_size_enabled()),
+        bool(config.tile_drop_incomplete_enabled()),
+    )
+    data_logger.info(
+        "[Tiling] Tile shape: R=%s, segment_id=%s, mean_valid=%.1f, mean_segments=%.2f",
+        tuple(tiled["R"].shape),
+        tuple(tiled["segment_id"].shape),
+        float(np.mean(tiled["n_valid"])),
+        float(np.mean(tiled["n_segments"])),
+    )
+    data_logger.info(
+        "[TilingTiming] build_ms=%.3f metadata_ms=%.3f total_ms=%.3f",
+        (t_tile_build_end - t_tile_build_start) * 1e3,
+        (t_tile_meta_end - t_tile_build_end) * 1e3,
+        (t_tile_meta_end - t_tile_build_start) * 1e3,
+    )
+    _log_train_split_profile(tiled, config)
+    return tiled
+
+
 def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     """
     Main training pipeline.
@@ -276,6 +729,9 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     apply_numpy_dataloader_patch()
 
     config = ConfigManager(config_file)
+    _validate_tiled_mode_constraints(config)
+    _validate_prior_residual_mode_constraints(config)
+    _apply_grad_accum_overrides(config)
     env_neighbor_fmt = os.environ.get("CHEMTRAIN_NEIGHBOR_LIST_FORMAT")
     effective_neighbor_fmt = config.get_neighbor_list_format()
     if env_neighbor_fmt is not None and str(env_neighbor_fmt).strip() != "":
@@ -374,6 +830,23 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     dataset = loader.get_all()
     dataset["R"] = preprocessor.center_and_park(dataset["R"], dataset["mask"], extent, R_shift)
 
+    # LBFGS prior pretraining must happen against raw F_ref, before residuals are subtracted.
+    fitted_prior_params = _pretrain_for_residual_if_needed(config, dataset, loader.id_to_aa)
+
+    dataset = _apply_prior_residual_if_enabled(
+        config=config,
+        dataset=dataset,
+        dataset_path=data_path_obj,
+        dataset_tag=data_path_obj.stem,
+        id_to_aa=loader.id_to_aa,
+        seed=seed,
+        max_frames=max_frames,
+        cutoff=cutoff,
+        buffer_mult=buffer_mult,
+        park_mult=park_mult,
+        fitted_params=fitted_prior_params,
+    )
+
     box = extent
     data_logger.info(f"[Preprocessing] Computed box: {jax.device_get(box)}")
     data_logger.info(f"[Preprocessing] R_shift: {jax.device_get(R_shift)}")
@@ -388,31 +861,13 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
             "parametric priors."
         )
 
-    # ===== Initialize model =====
-    logging.info("\n" + "=" * 60)
-    logging.info("INITIALIZING MODEL")
-    logging.info("=" * 60)
-
-    R0 = dataset["R"][0]
-    mask0 = dataset["mask"][0]
-
-    model = CombinedModel(
-        config=config,
-        R0=R0,
-        box=box,
-        species=species0,
-        N_max=N_max,
-        n_species_override=n_species_global,
-        id_to_aa=loader.id_to_aa,
-        prior_only=config.prior_only_enabled()
-    )
-
-    model_logger.info(f"Initialized: {model}")
-
     # ===== Setup data loaders =====
     logging.info("\n" + "=" * 60)
     logging.info("PREPARING TRAINING")
     logging.info("=" * 60)
+
+    split_seed = int(config.get_seed())
+    dataset = _shuffle_dataset_for_split(dataset, seed=split_seed)
 
     val_fraction = config.get_val_fraction()
     N_train = int(np.round(len(dataset["R"]) * (1 - val_fraction)))
@@ -432,25 +887,67 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
 
     data_logger.info(f"[Split] Training: {N_train}, Validation: {N_val if N_val > 0 else 'using train'}")
 
-    train_loader = NumpyDataLoader(
-        R=dataset["R"][:N_train],
-        F=dataset["F"][:N_train],
-        mask=dataset["mask"][:N_train],
-        species=dataset["species"][:N_train],
-        copy=False
+    tiled_train_source = None
+    if config.get_batch_mode() == "tiled":
+        tiled_train_source = _build_tiled_train_source(dataset, N_train)
+
+    train_split = _build_train_split(
+        dataset=dataset,
+        n_train=N_train,
+        config=config,
+        seed=split_seed,
     )
 
-    # Use training data for validation if validation set is too small or disabled
-    if N_val == 0 or val_fraction == 0.0:
+    # ===== Initialize model =====
+    # Important for tiled mode: initialize neighbor list state with the same
+    # particle axis as training batches to avoid shape mismatches at neighbor_update().
+    logging.info("\n" + "=" * 60)
+    logging.info("INITIALIZING MODEL")
+    logging.info("=" * 60)
+    if config.get_batch_mode() == "tiled":
+        R0 = train_split["R"][0]
+        species0 = train_split["species"][0]
+        N_max = int(train_split["R"].shape[1])
+        data_logger.info(
+            "[Tiling] Model initialization uses tiled particle axis N_max=%d.",
+            N_max,
+        )
+    else:
+        R0 = dataset["R"][0]
+        species0 = loader.species[0]
+        N_max = int(loader.N_max)
+
+    model = CombinedModel(
+        config=config,
+        R0=R0,
+        box=box,
+        species=species0,
+        N_max=N_max,
+        n_species_override=n_species_global,
+        id_to_aa=loader.id_to_aa,
+        prior_only=config.prior_only_enabled()
+    )
+
+    model_logger.info(f"Initialized: {model}")
+
+    train_loader_kwargs = _build_loader_kwargs(train_split)
+    train_loader = NumpyDataLoader(**train_loader_kwargs)
+
+    # Use training data for validation if validation set is too small/disabled.
+    # In tiled mode, validation currently reuses tiled batches to keep the
+    # particle axis fixed and avoid neighbor-list reference shape mismatches.
+    if config.get_batch_mode() == "tiled":
+        data_logger.warning(
+            "[Tiling] Validation currently reuses tiled training loader "
+            "(particle axis N=%d). Untiled validation is disabled in Phase 1.",
+            int(train_split["R"].shape[1]),
+        )
+        val_loader = train_loader
+    elif N_val == 0 or val_fraction == 0.0:
         val_loader = train_loader
     else:
-        val_loader = NumpyDataLoader(
-            R=dataset["R"][N_train:N_train + N_val],
-            F=dataset["F"][N_train:N_train + N_val],
-            mask=dataset["mask"][N_train:N_train + N_val],
-            species=dataset["species"][N_train:N_train + N_val],
-            copy=False
-        )
+        val_split = _build_validation_split(dataset, N_train, N_train + N_val)
+        val_loader = NumpyDataLoader(**_build_loader_kwargs(val_split))
 
     loaders = DataLoaders(
         train_loader=train_loader,
@@ -465,18 +962,26 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
 
     # Prepare training data dict for prior pre-training (avoid _chains access)
     train_data = {
-        "R": jnp.asarray(dataset["R"][:N_train]),
-        "F": jnp.asarray(dataset["F"][:N_train]),
-        "mask": jnp.asarray(dataset["mask"][:N_train]),
-        "species": jnp.asarray(dataset["species"][:N_train]),
+        "R": jnp.asarray(train_split["R"]),
+        "F": jnp.asarray(train_split["F"]),
+        "mask": jnp.asarray(train_split["mask"]),
+        "species": jnp.asarray(train_split["species"]),
+        "force_loss_mask": jnp.asarray(train_split["force_loss_mask"]),
+        "force_loss_weights": jnp.asarray(train_split["force_loss_weights"]),
     }
+    if "segment_id" in train_split:
+        train_data["segment_id"] = jnp.asarray(train_split["segment_id"])
+    for key, value in train_split.items():
+        if key.startswith("meta_") or key in ("n_valid", "n_segments"):
+            train_data[key] = jnp.asarray(value)
 
     trainer = Trainer(
         model=model,
         config=config,
         train_loader=train_loader,
         val_loader=val_loader,
-        train_data=train_data
+        train_data=train_data,
+        tiled_train_source=tiled_train_source,
     )
 
     # Handle resume from checkpoint
@@ -498,37 +1003,33 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     # Run full pipeline (prior pretrain + stage1 + stage2)
     results = trainer.train_full_pipeline(resume_from=resolved_checkpoint)
 
-    # Save checkpoint after training
-    checkpoint_path = export_dir / f"{model_name}_checkpoint.pkl"
-    trainer.save_checkpoint(checkpoint_path, metadata={"job_id": job_id, "results": results})
+    # Save checkpoint after training (rank 0 only to avoid write races)
+    if rank == 0:
+        checkpoint_path = export_dir / f"{model_name}_checkpoint.pkl"
+        trainer.save_checkpoint(checkpoint_path, metadata={"job_id": job_id, "results": results})
 
     training_logger.info("\nComplete!")
     for stage, result in results.items():
         training_logger.info(f"  {stage}: {result}")
 
-    # ===== Diagnostics =====
-    logging.info("\n" + "=" * 60)
-    logging.info("DIAGNOSTICS")
-    logging.info("=" * 60)
-
     best_params = trainer.get_best_params()
 
-    # Energy components
-    components = model.compute_components(
-        best_params, R0, mask0, species0
-    )
-    model_logger.info("[Energy components]")
-    for key, val in components.items():
-        model_logger.info(f"  {key}: {val:.6f}")
+    # Keep ranks in sync before rank-0-only post-processing to avoid distributed
+    # shutdown barrier mismatches.
+    _sync_all_ranks("post_train_ready_for_export")
 
-    # Force components
-    force_components = model.compute_force_components(
-        best_params, R0, mask0, species0
-    )
-    model_logger.info("\n[Force component norms]")
-    for key, val in force_components.items():
-        norm = jnp.linalg.norm(val)
-        model_logger.info(f"  {key}: {norm:.6f}")
+    # In multi-process jobs, only rank 0 should write artifacts and perform
+    # post-training export to avoid concurrent file writes to the same path.
+    if rank != 0:
+        training_logger.info(
+            "Rank %d: skipping diagnostics/export/plot (rank 0 only); waiting for rank 0 post-processing.",
+            rank,
+        )
+        _sync_all_ranks("rank0_postprocessing_done")
+        return
+
+    # Diagnostics are intentionally skipped to keep post-training fast:
+    # export artifacts + loss plots only.
 
     # ===== Export =====
     logging.info("\n" + "=" * 60)
@@ -536,8 +1037,17 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     logging.info("=" * 60)
 
     mlir_path = export_dir / f"{model_name}.mlir"
-    exporter = AllegroExporter.from_combined_model(
+    export_model = _make_export_model(
+        config=config,
         model=model,
+        R0=R0,
+        box=box,
+        species0=species0,
+        id_to_aa=loader.id_to_aa,
+        n_max=model.N_max,
+    )
+    exporter = AllegroExporter.from_combined_model(
+        model=export_model,
         params=best_params,
         box=box,
         species=species0
@@ -585,6 +1095,7 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     logging.info("\n" + "=" * 60)
     logging.info("TRAINING PIPELINE COMPLETE")
     logging.info("=" * 60)
+    _sync_all_ranks("rank0_postprocessing_done")
 
 
 def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
@@ -608,6 +1119,9 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
     apply_numpy_dataloader_patch()
 
     config = ConfigManager(config_file)
+    _validate_tiled_mode_constraints(config)
+    _validate_prior_residual_mode_constraints(config)
+    _apply_grad_accum_overrides(config)
     env_neighbor_fmt = os.environ.get("CHEMTRAIN_NEIGHBOR_LIST_FORMAT")
     effective_neighbor_fmt = config.get_neighbor_list_format()
     if env_neighbor_fmt is not None and str(env_neighbor_fmt).strip() != "":
@@ -661,25 +1175,39 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
             f"{'=' * 60}"
         )
 
-        species0 = loader.species[0]
         extent, R_shift = preprocessor.compute_box_extent(loader.R, loader.mask)
         dataset = loader.get_all()
         dataset["R"] = preprocessor.center_and_park(
             dataset["R"], dataset["mask"], extent, R_shift
         )
-        box = extent
-        R0 = dataset["R"][0]
-        mask0 = dataset["mask"][0]
 
-        model = CombinedModel(
-            config=config, R0=R0, box=box, species=species0, N_max=n_max,
-            n_species_override=global_n_species,
+        # pretrain_prior + prior_residual is not supported in multi-protein mode
+        # (each bucket is a different protein with different N_max/topology).
+        if config.pretrain_prior_enabled() and config.prior_residual_enabled():
+            training_logger.warning(
+                "[PriorResidual] pretrain_prior=true is not supported in multi-protein "
+                "bucketed mode (different topologies per bucket). "
+                "Residuals will use initial config prior parameters."
+            )
+
+        dataset = _apply_prior_residual_if_enabled(
+            config=config,
+            dataset=dataset,
+            dataset_path=loader.npz_path,
+            dataset_tag=loader.npz_path.stem,
             id_to_aa=loader.id_to_aa,
-            prior_only=config.prior_only_enabled()
+            seed=config.get_seed(),
+            max_frames=config.get_max_frames(),
+            cutoff=cutoff,
+            buffer_mult=buffer_mult,
+            park_mult=park_mult,
         )
-        model_logger.info(f"Bucket {bucket_idx}: {model}")
+        box = extent
 
         # Data loaders
+        split_seed = int(config.get_seed()) + int(bucket_idx)
+        dataset = _shuffle_dataset_for_split(dataset, seed=split_seed)
+
         val_fraction = config.get_val_fraction()
         N_train = int(np.round(len(dataset["R"]) * (1 - val_fraction)))
         N_val = len(dataset["R"]) - N_train
@@ -690,32 +1218,77 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
             N_train = len(dataset["R"])
             N_val = 0
 
-        train_loader = NumpyDataLoader(
-            R=dataset["R"][:N_train], F=dataset["F"][:N_train],
-            mask=dataset["mask"][:N_train], species=dataset["species"][:N_train],
-            copy=False
-        )
-        val_loader = (
-            NumpyDataLoader(
-                R=dataset["R"][N_train:N_train + N_val],
-                F=dataset["F"][N_train:N_train + N_val],
-                mask=dataset["mask"][N_train:N_train + N_val],
-                species=dataset["species"][N_train:N_train + N_val],
-                copy=False
-            ) if N_val > 0 else train_loader
+        tiled_train_source = None
+        if config.get_batch_mode() == "tiled":
+            tiled_train_source = _build_tiled_train_source(dataset, N_train)
+
+        train_split = _build_train_split(
+            dataset=dataset,
+            n_train=N_train,
+            config=config,
+            seed=split_seed,
         )
 
+        if config.get_batch_mode() == "tiled":
+            R0 = train_split["R"][0]
+            species0 = train_split["species"][0]
+            model_n_max = int(train_split["R"].shape[1])
+            data_logger.info(
+                "[Tiling][Bucket %d] Model initialization uses tiled particle axis N_max=%d.",
+                bucket_idx,
+                model_n_max,
+            )
+        else:
+            R0 = dataset["R"][0]
+            species0 = loader.species[0]
+            model_n_max = int(n_max)
+
+        model = CombinedModel(
+            config=config, R0=R0, box=box, species=species0, N_max=model_n_max,
+            n_species_override=global_n_species,
+            id_to_aa=loader.id_to_aa,
+            prior_only=config.prior_only_enabled()
+        )
+        model_logger.info(f"Bucket {bucket_idx}: {model}")
+
+        train_loader_kwargs = _build_loader_kwargs(train_split)
+        train_loader = NumpyDataLoader(**train_loader_kwargs)
+        if config.get_batch_mode() == "tiled":
+            val_loader = train_loader
+            data_logger.warning(
+                "[Tiling][Bucket %d] Validation reuses tiled training loader "
+                "(particle axis N=%d).",
+                bucket_idx,
+                int(train_split["R"].shape[1]),
+            )
+        else:
+            val_loader = (
+                NumpyDataLoader(
+                    **_build_loader_kwargs(
+                        _build_validation_split(dataset, N_train, N_train + N_val)
+                    )
+                ) if N_val > 0 else train_loader
+            )
+
         train_data = {
-            "R": jnp.asarray(dataset["R"][:N_train]),
-            "F": jnp.asarray(dataset["F"][:N_train]),
-            "mask": jnp.asarray(dataset["mask"][:N_train]),
-            "species": jnp.asarray(dataset["species"][:N_train]),
+            "R": jnp.asarray(train_split["R"]),
+            "F": jnp.asarray(train_split["F"]),
+            "mask": jnp.asarray(train_split["mask"]),
+            "species": jnp.asarray(train_split["species"]),
+            "force_loss_mask": jnp.asarray(train_split["force_loss_mask"]),
+        "force_loss_weights": jnp.asarray(train_split["force_loss_weights"]),
         }
+        if "segment_id" in train_split:
+            train_data["segment_id"] = jnp.asarray(train_split["segment_id"])
+        for key, value in train_split.items():
+            if key.startswith("meta_") or key in ("n_valid", "n_segments"):
+                train_data[key] = jnp.asarray(value)
 
         trainer = Trainer(
             model=model, config=config,
             train_loader=train_loader, val_loader=val_loader,
-            train_data=train_data
+            train_data=train_data,
+            tiled_train_source=tiled_train_source,
         )
 
         # Warm-start from previous bucket's params
@@ -734,25 +1307,48 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
 
     # Export using final bucket's params (largest N_max)
     final_n_max, final_loader = bucketed.buckets[-1]
-    final_species0 = final_loader.species[0]
+    # Use the model-initialization species vector from the last bucket.
+    # In tiled mode this carries the tiled particle axis; in standard mode it
+    # is identical to final_loader.species[0].
+    final_species0 = species0
 
     training_logger.info(f"\nExporting model (N_max={final_n_max})…")
 
-    checkpoint_path = export_dir / f"{model_name}_checkpoint.pkl"
-    trainer.save_checkpoint(checkpoint_path, metadata={"job_id": job_id, "results": all_results})
+    _sync_all_ranks("multi_protein_post_train_ready_for_export")
 
-    mlir_path = export_dir / f"{model_name}.mlir"
-    exporter = AllegroExporter.from_combined_model(
-        model=model, params=prev_params,
-        box=box, species=final_species0
-    )
-    exporter.export_to_file(mlir_path)
-    export_logger.info(f"MLIR: {mlir_path}")
+    # Only rank 0 writes exported artifacts/checkpoints.
+    if rank == 0:
+        checkpoint_path = export_dir / f"{model_name}_checkpoint.pkl"
+        trainer.save_checkpoint(checkpoint_path, metadata={"job_id": job_id, "results": all_results})
 
-    params_path = export_dir / f"{model_name}_params.pkl"
-    with open(params_path, 'wb') as f:
-        pickle.dump(prev_params, f)
-    export_logger.info(f"Parameters: {params_path}")
+        mlir_path = export_dir / f"{model_name}.mlir"
+        export_model = _make_export_model(
+            config=config,
+            model=model,
+            R0=R0,
+            box=box,
+            species0=final_species0,
+            id_to_aa=loader.id_to_aa,
+            n_max=final_n_max,
+        )
+        exporter = AllegroExporter.from_combined_model(
+            model=export_model, params=prev_params,
+            box=box, species=final_species0
+        )
+        exporter.export_to_file(mlir_path)
+        export_logger.info(f"MLIR: {mlir_path}")
+
+        params_path = export_dir / f"{model_name}_params.pkl"
+        with open(params_path, 'wb') as f:
+            pickle.dump(prev_params, f)
+        export_logger.info(f"Parameters: {params_path}")
+    else:
+        training_logger.info(
+            "Rank %d: skipping final export/checkpoint write (rank 0 only); waiting for rank 0 export.",
+            rank,
+        )
+
+    _sync_all_ranks("multi_protein_rank0_export_done")
 
     training_logger.info("\nMulti-protein training complete.")
     for bucket_name, result in all_results.items():

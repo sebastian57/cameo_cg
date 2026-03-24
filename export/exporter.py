@@ -8,15 +8,20 @@ Extracted from:
 - model_exporters.py (Allegro-only, MACE and PaiNN removed)
 """
 
+import re
+
 import jax
 import jax.numpy as jnp
 from jax_md import partition
 from chemtrain.deploy import exporter, graphs
+from chemtrain.deploy._protobuf import model_pb2 as deploy_model_proto
 from pathlib import Path
 from typing import Any, Optional
 
 from config.types import PathLike, as_path
 from utils.logging import export_logger
+
+_INLINE_LOC_RANGE_RE = re.compile(rb'":(\d+):(\d+) to :(\d+)\)')
 
 
 def _ensure_per_atom_energy(e: jax.Array, n_atoms: int) -> jax.Array:
@@ -45,6 +50,38 @@ def _ensure_per_atom_energy(e: jax.Array, n_atoms: int) -> jax.Array:
         e = e.reshape((n_atoms,))
 
     return e
+
+
+def _normalize_inline_location_ranges(mlir_path: Path) -> int:
+    """Normalize new MLIR inline location shorthand for older StableHLO parsers.
+
+    Newer JAX/MLIR can emit locations like `:227:15 to :70` (same end line
+    omitted). Older parser stacks used by existing chemtrain-deploy builds
+    expect `:227:15 to 227:70`. This rewrite keeps semantics unchanged and
+    improves cross-version load compatibility.
+    """
+    model = deploy_model_proto.Model()
+    raw = mlir_path.read_bytes()
+    consumed = model.ParseFromString(raw)
+    if consumed != len(raw):
+        raise ValueError(
+            f"Could not parse full protobuf payload in {mlir_path}; "
+            f"consumed={consumed}, size={len(raw)}"
+        )
+
+    module_bytes = model.mlir_module.encode("utf-8")
+
+    def _expand(match: re.Match[bytes]) -> bytes:
+        start_line = match.group(1)
+        start_col = match.group(2)
+        end_col = match.group(3)
+        return b'":' + start_line + b":" + start_col + b" to " + start_line + b":" + end_col + b")"
+
+    patched, num_replacements = _INLINE_LOC_RANGE_RE.subn(_expand, module_bytes)
+    if num_replacements > 0:
+        model.mlir_module = patched.decode("utf-8")
+        mlir_path.write_bytes(model.SerializeToString())
+    return int(num_replacements)
 
 
 class AllegroExporter(exporter.Exporter):
@@ -178,6 +215,12 @@ class AllegroExporter(exporter.Exporter):
         # Call parent class export and save methods
         self.export()
         self.save(str(output_path))
+        replacements = _normalize_inline_location_ranges(output_path)
+        if replacements:
+            export_logger.info(
+                "Normalized %d inline location ranges for StableHLO compatibility.",
+                replacements,
+            )
 
         export_logger.info(f"Exported model to: {output_path}")
 

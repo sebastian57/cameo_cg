@@ -3,7 +3,9 @@ outputs/
 train_allegro_*.log
 slurm-*.out
 force_matching.log
-
+configs_testing/
+tiling_testing/
+test_configs/
 # --- crash dumps / core files ---
 core.*
 
@@ -18,6 +20,9 @@ checkpoints_painn/
 checkpoints_phase1_r1/
 scaling_results/
 rand_plots/
+ml_training_testing_suite/outputs/
+training_exp_configs/
+checkpoints_configs_testing/
 
 # --- pycache / python artifacts ---
 models/__pycache__/
@@ -39,7 +44,7 @@ force_eval/__pycache__/
 # --- large / generated datasets ---
 data_prep/datasets/
 data_prep/plots
-
+data_prep/plots_2g4q4z5k_i4/
 # --- temporary / old scripts --- 
 scripts/analyze_scaling.py
 scripts/config_scaling_test.yaml

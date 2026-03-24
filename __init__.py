@@ -30,6 +30,7 @@ __all__ = [
     "TopologyBuilder",
     "PriorEnergy",
     "AllegroModel",
+    "AllegroModelCuEq",
     "CombinedModel",
     # Training
     "Trainer",
@@ -49,6 +50,7 @@ _LAZY_SYMBOLS = {
     "TopologyBuilder": ("cameo_cg.models.topology", "TopologyBuilder"),
     "PriorEnergy": ("cameo_cg.models.prior_energy", "PriorEnergy"),
     "AllegroModel": ("cameo_cg.models.allegro_model", "AllegroModel"),
+    "AllegroModelCuEq": ("cameo_cg.models.allegro_cueq_model", "AllegroModelCuEq"),
     "CombinedModel": ("cameo_cg.models.combined_model", "CombinedModel"),
     "Trainer": ("cameo_cg.training.trainer", "Trainer"),
     "create_optimizer": ("cameo_cg.training.optimizers", "create_optimizer"),

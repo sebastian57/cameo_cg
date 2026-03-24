@@ -1,11 +1,11 @@
-#!/bin/bash -x
+#!/bin/bash
 
 #SBATCH --account=cameo
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-task=4
-#SBATCH --time=04:00:00
-#SBATCH --partition=booster
+#SBATCH --time=02:00:00
+#SBATCH --partition=develbooster
 #SBATCH --output=outputs/slurm-%j.out
 
 # =============================================================================
@@ -42,6 +42,21 @@
 #     sbatch scripts/run_training.sh config.yaml --multi-protein-dir /path/to/03_bucketed_npz
 #
 # =============================================================================
+
+set -Eeuo pipefail
+
+RUN_TRAINING_TRACE="${RUN_TRAINING_TRACE:-1}"
+if [[ "${RUN_TRAINING_TRACE}" == "1" ]]; then
+    export PS4='[run_training.sh:${LINENO}] '
+    set -x
+fi
+
+run_training_err_trap() {
+    local rc=$?
+    echo "[run_training.sh] ERROR rc=${rc} line=${BASH_LINENO[0]} cmd=${BASH_COMMAND}" >&2
+    exit "${rc}"
+}
+trap run_training_err_trap ERR
 
 CONFIG_FILE="$1"
 shift  # Remove config file from arguments
@@ -94,11 +109,58 @@ if [[ -n "$MULTI_PROTEIN_DIR" && -n "$RESUME_VALUE" ]]; then
     RESUME_VALUE=""
 fi
 
+# Resolve config path early so we can read ml_model before choosing venv.
+if [[ "${CONFIG_FILE}" == /* ]]; then
+    CONFIG_FILE_RESOLVED="${CONFIG_FILE}"
+elif [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/${CONFIG_FILE}" ]]; then
+    CONFIG_FILE_RESOLVED="${SLURM_SUBMIT_DIR}/${CONFIG_FILE}"
+else
+    CONFIG_FILE_RESOLVED="$(pwd)/${CONFIG_FILE}"
+fi
+
+if [[ ! -f "${CONFIG_FILE_RESOLVED}" ]]; then
+    echo "ERROR: Config file not found: ${CONFIG_FILE_RESOLVED}"
+    exit 1
+fi
+CONFIG_FILE="${CONFIG_FILE_RESOLVED}"
+
+MODEL_TYPE="$(
+    awk '
+        /^[[:space:]]*#/ { next }
+        /^[[:space:]]*ml_model:[[:space:]]*/ {
+            line = $0
+            sub(/^[[:space:]]*ml_model:[[:space:]]*/, "", line)
+            sub(/[[:space:]]*#.*/, "", line)
+            gsub(/[[:space:]"]/, "", line)
+            print line
+            exit
+        }
+    ' "${CONFIG_FILE_RESOLVED}"
+)"
+
+if [[ -z "${MODEL_TYPE}" ]]; then
+    echo "ERROR: Could not determine model.ml_model from config: ${CONFIG_FILE_RESOLVED}"
+    exit 1
+fi
+
+MODEL_TYPE_LOWER="${MODEL_TYPE,,}"
+MODEL_TYPE_CANON="${MODEL_TYPE_LOWER//-/_}"
+if [[ "${MODEL_TYPE_CANON}" == "allegro_cueq" || "${MODEL_TYPE_CANON}" == "allegro_cueq_fast" || "${MODEL_TYPE_CANON}" == "allegro_cueq_opt" || "${MODEL_TYPE_CANON}" == "allegro_cueq_b1" || "${MODEL_TYPE_CANON}" == "allegro_cueq_fast_1103" ]]; then
+    SELECTED_VENV="/p/project1/cameo/schmidt36/env_cueq_allegro_opt"
+    SELECTED_VENV_NAME="env_cueq_allegro_opt"
+elif [[ "${MODEL_TYPE_CANON}" == "allegro" ]]; then
+    SELECTED_VENV="/p/project1/cameo/schmidt36/clean_booster_env"
+    SELECTED_VENV_NAME="clean_booster_env"
+else
+    # Default all non-cuEq backbones to the clean environment.
+    SELECTED_VENV="/p/project1/cameo/schmidt36/clean_booster_env"
+    SELECTED_VENV_NAME="clean_booster_env"
+    echo "WARNING: Unrecognized ml_model='${MODEL_TYPE}'. Defaulting to ${SELECTED_VENV_NAME}."
+fi
+
 source /p/project1/cameo/schmidt36/load_modules.sh
-source /p/project1/cameo/schmidt36/clean_booster_env/bin/activate
-# Inject cuequivariance packages via PYTHONPATH rather than activating the overlay
-# venv (activating it would replace clean_booster_env and lose jax_sgmc etc.).
-# export PYTHONPATH="/p/project1/cameo/schmidt36/cueq_allegro/cueq_overlay_env/lib/python3.12/site-packages:${PYTHONPATH:-}"
+source "${SELECTED_VENV}/bin/activate"
+echo "Selected ml_model: ${MODEL_TYPE_CANON} -> activated ${SELECTED_VENV_NAME}"
 source /p/project1/cameo/schmidt36/set_lammps_paths.sh
 
 is_truthy() {
@@ -114,10 +176,13 @@ export CLANG_CUDA_COMPILER_PATH=$(which gcc)
 
 # CUDA setup for JAX
 CUDA_ROOT=$(python -c "import os; from jax_plugins import xla_cuda12; print(os.path.dirname(xla_cuda12.__file__))")
-export LD_LIBRARY_PATH=$CUDA_ROOT:$(python -c "import site; print(site.getsitepackages()[0])")/nvidia/cuda_runtime/lib:$(python -c "import site; print(site.getsitepackages()[0])")/nvidia/cublas/lib:$(python -c "import site; print(site.getsitepackages()[0])")/nvidia/cusolver/lib:$LD_LIBRARY_PATH
+SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])")
+export LD_LIBRARY_PATH="$CUDA_ROOT:$SITE_PACKAGES/nvidia/cudnn/lib:$SITE_PACKAGES/nvidia/cuda_runtime/lib:$SITE_PACKAGES/nvidia/cublas/lib:$SITE_PACKAGES/nvidia/cusolver/lib:${LD_LIBRARY_PATH:-}"
 
 export CUDA_HOME=/p/software/juwelsbooster/stages/2025/software/CUDA/12
 export XLA_FLAGS="--xla_gpu_cuda_data_dir=$CUDA_HOME --xla_gpu_autotune_level=0"
+# Match open_testing behavior for fused-SP method fallback unless caller overrides.
+export ALLEGRO_TP_METHOD_FALLBACK="${ALLEGRO_TP_METHOD_FALLBACK:-naive}"
 
 # ===== JAX Distributed Setup =====
 # JAX automatically detects SLURM environment (nodes, process IDs, coordinator)
@@ -131,6 +196,7 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
 # Strip trailing whitespace that SLURM may inject when setting CUDA_VISIBLE_DEVICES automatically
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES//[[:space:]]/}"
+#export CUDA_VISIBLE_DEVICES=0
 
 # Force NCCL (GPU-GPU gradient sync) to use InfiniBand, not Ethernet.
 # Without this, NCCL may pick the wrong interface and stall during collective ops.
@@ -147,9 +213,37 @@ fi
 unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy
 
 # Normal training defaults (no profiling).
-# Keep K=8 fixed for this run to match prior microbatch behavior.
-export CHEMTRAIN_GRAD_ACCUM_STEPS=1
-export CHEMTRAIN_GRAD_ACCUM_MODE="${CHEMTRAIN_GRAD_ACCUM_MODE:-stack_scan}"
+# Read grad accumulation defaults from the YAML config when available so the
+# launcher summary matches the actual trainer behavior. Environment variables
+# still win if the user sets them explicitly before submission.
+CONFIG_GRAD_ACCUM_STEPS="$(python - "$CONFIG_FILE" <<'PYCFG'
+import sys
+from pathlib import Path
+import yaml
+cfg_path = Path(sys.argv[1])
+try:
+    data = yaml.safe_load(cfg_path.read_text()) or {}
+except Exception:
+    data = {}
+value = (((data.get('training') or {}).get('grad_accum_steps', None)))
+print('' if value is None else value)
+PYCFG
+)"
+CONFIG_GRAD_ACCUM_MODE="$(python - "$CONFIG_FILE" <<'PYCFG'
+import sys
+from pathlib import Path
+import yaml
+cfg_path = Path(sys.argv[1])
+try:
+    data = yaml.safe_load(cfg_path.read_text()) or {}
+except Exception:
+    data = {}
+value = (((data.get('training') or {}).get('grad_accum_mode', None)))
+print('' if value is None else value)
+PYCFG
+)"
+export CHEMTRAIN_GRAD_ACCUM_STEPS="${CHEMTRAIN_GRAD_ACCUM_STEPS:-${CONFIG_GRAD_ACCUM_STEPS:-6}}"
+export CHEMTRAIN_GRAD_ACCUM_MODE="${CHEMTRAIN_GRAD_ACCUM_MODE:-${CONFIG_GRAD_ACCUM_MODE:-stack_scan}}"
 export CHEMTRAIN_DEBUG_MICROBATCH_GRAD_NORMS="${CHEMTRAIN_DEBUG_MICROBATCH_GRAD_NORMS:-0}"
 export CHEMTRAIN_DISABLE_GRAD_NORM=0
 export CHEMTRAIN_DISABLE_TRAIN_TARGET_LOSS_SYNC=0
@@ -167,9 +261,9 @@ export CHEMTRAIN_PROFILE_GPU_TELEMETRY=0
 export CHEMTRAIN_DEBUG_SHAPE_TRACE="${CHEMTRAIN_DEBUG_SHAPE_TRACE:-0}"
 export CHEMTRAIN_DEBUG_NEIGHBOR="${CHEMTRAIN_DEBUG_NEIGHBOR:-1}"
 export CHEMTRAIN_DEBUG_NEIGHBOR_RANK0_ONLY="${CHEMTRAIN_DEBUG_NEIGHBOR_RANK0_ONLY:-1}"
-export CHEMTRAIN_DEBUG_COMPILE_SIGNATURE="${CHEMTRAIN_DEBUG_COMPILE_SIGNATURE:-1}"
-export CHEMTRAIN_DEBUG_COMPILE_SIGNATURE_RANK0_ONLY="${CHEMTRAIN_DEBUG_COMPILE_SIGNATURE_RANK0_ONLY:-1}"
-export JAX_LOG_COMPILES="${JAX_LOG_COMPILES:-1}"
+export CHEMTRAIN_DEBUG_COMPILE_SIGNATURE=0
+export CHEMTRAIN_DEBUG_COMPILE_SIGNATURE_RANK0_ONLY=1
+export JAX_LOG_COMPILES=0
 export CHEMTRAIN_DEBUG_MICROBATCH_GRAD_NORMS=0
 export CHEMTRAIN_SEGMENT_SUM_MODE="${CHEMTRAIN_SEGMENT_SUM_MODE:-chunked}"
 export CHEMTRAIN_SEGMENT_SUM_CHUNK_EDGES="${CHEMTRAIN_SEGMENT_SUM_CHUNK_EDGES:-65536}"
@@ -206,6 +300,7 @@ echo "JAX compiles:   $JAX_LOG_COMPILES"
 echo "Edge agg mode:  $CHEMTRAIN_SEGMENT_SUM_MODE"
 echo "Edge chunk:     $CHEMTRAIN_SEGMENT_SUM_CHUNK_EDGES"
 echo "Edge agg debug: $CHEMTRAIN_SEGMENT_SUM_DEBUG"
+echo "TP fallback:    $ALLEGRO_TP_METHOD_FALLBACK"
 if [[ -n "${CHEMTRAIN_NEIGHBOR_LIST_FORMAT:-}" ]]; then
     echo "Nbr list fmt:   ${CHEMTRAIN_NEIGHBOR_LIST_FORMAT} (env override)"
 fi
@@ -401,9 +496,11 @@ if is_truthy "${CHEMTRAIN_PROFILE_GPU_TELEMETRY}"; then
 fi
 
 cleanup_background_jobs() {
+    local rc=$?
     if [[ -n "${GPU_TELEMETRY_SRUN_PID}" ]]; then
         kill "${GPU_TELEMETRY_SRUN_PID}" >/dev/null 2>&1 || true
     fi
+    echo "[run_training.sh] EXIT rc=${rc}" >&2
 }
 trap cleanup_background_jobs EXIT
 
@@ -412,6 +509,10 @@ trap cleanup_background_jobs EXIT
 LOGFILE="${OUTPUTS_DIR}/train_allegro_${SLURM_JOB_ID}.log"
 
 echo "============================================================"
+if [[ "${RUN_TRAINING_TRACE}" == "1" ]]; then
+    set +x
+fi
+
 echo "Starting training with $SLURM_NNODES node(s), 4 GPUs each..."
 echo "Log file: ${LOGFILE}"
 if [[ -n "$MULTI_PROTEIN_DIR" ]]; then

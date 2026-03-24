@@ -31,6 +31,34 @@ IMPORTANT: JAX distributed initialization must happen before any other JAX opera
 import os
 import jax
 
+def _apply_jax_compat_shims():
+    """
+    Runtime compatibility shims for jax_md/chemtrain with newer JAX releases.
+
+    These shims are no-ops on older JAX versions where symbols still exist.
+    """
+    # jax_md<=0.2.8 expects KeyArray on jax.random.
+    if not hasattr(jax.random, "KeyArray"):
+        jax.random.KeyArray = jax.Array
+
+    # Older jax_md imports tree_* helpers from top-level jax namespace.
+    if not hasattr(jax, "tree_map"):
+        jax.tree_map = jax.tree_util.tree_map
+    if not hasattr(jax, "tree_leaves"):
+        jax.tree_leaves = jax.tree_util.tree_leaves
+    if not hasattr(jax, "tree_flatten"):
+        jax.tree_flatten = jax.tree_util.tree_flatten
+    if not hasattr(jax, "tree_unflatten"):
+        jax.tree_unflatten = jax.tree_util.tree_unflatten
+
+    # Older jax_md imports xla_bridge from jax.lib.
+    if not hasattr(jax.lib, "xla_bridge"):
+        from jax._src import xla_bridge as _xla_bridge
+        jax.lib.xla_bridge = _xla_bridge
+
+
+_apply_jax_compat_shims()
+
 def _initialize_jax_distributed():
     """
     Initialize JAX distributed training.

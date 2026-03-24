@@ -567,14 +567,14 @@ class ForceAnalyzer:
                 norm = sigma * np.sqrt(2.0 * np.pi)
                 return np.exp(-0.5 * ((xv - mu) / sigma) ** 2) / norm
 
-            # ax.plot(
-            #     x, _gauss_pdf(x, ref_mu, ref_sigma), color=colors["ref"], linewidth=2.0,
-            #     label=f"Ref N({ref_mu:.2f}, {ref_sigma:.2f})"
-            # )
-            # ax.plot(
-            #     x, _gauss_pdf(x, pred_mu, pred_sigma), color=colors["pred"], linewidth=2.0,
-            #     label=f"Pred N({pred_mu:.2f}, {pred_sigma:.2f})"
-            # )
+            ax.plot(
+                x, _gauss_pdf(x, ref_mu, ref_sigma), color=colors["ref"], linewidth=2.0,
+                label=f"Ref N({ref_mu:.2f}, {ref_sigma:.2f})"
+            )
+            ax.plot(
+                x, _gauss_pdf(x, pred_mu, pred_sigma), color=colors["pred"], linewidth=2.0,
+                label=f"Pred N({pred_mu:.2f}, {pred_sigma:.2f})"
+            )
 
             ax.set_xlabel(f"Force {name} (kcal/mol/A)", fontsize=11)
             if i == 0:

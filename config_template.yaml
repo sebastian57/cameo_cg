@@ -18,6 +18,7 @@ preprocessing:
   park_multiplier: 0.95   # Parking location for padded atoms (fraction of box extent)
 
 model:
+  ml_model: "allegro"  # Options: "allegro", "allegro_cuEq", "mace", "painn"
   use_priors: true  # Set to false for pure Allegro (ML only)
   train_priors: false  # Train prior parameters during force-matching stages
 
@@ -45,6 +46,13 @@ model:
     # max_edge_multiplier is used only for inferred mode.
     # max_edges: 2000
     max_edge_multiplier: 1.25
+
+  # Optional cuEquivariance-specific overrides. Used when:
+  #   model.ml_model: "allegro_cuEq"
+  # If omitted, the "allegro" section above is used.
+  #allegro_cuEq:
+  #  mlp_dtype: "bfloat16"  # "float32" | "bfloat16"
+  #  logging: false
 
   allegro_large:  # Large model for complex systems
     max_ell: 2
@@ -232,6 +240,16 @@ training:
   pretrain_prior_min_steps: 10  # Minimum LBFGS steps before convergence check
   pretrain_prior_max_steps: 200  # Maximum LBFGS iterations
   pretrain_prior_tol_grad: 1.0e-6  # Gradient tolerance for convergence
+
+  # Optional residual-prior target mode:
+  # Precompute F_prior on untiled data and train with F_residual = F_ref - F_prior.
+  # Constraints: model.use_priors=false, model.train_priors=false, gammas.U=0.
+  prior_residual:
+    enabled: false
+    cache_enabled: true
+    cache_path: null  # null -> <checkpoint_path>/prior_residual_cache/<dataset>_prior_residual.npz
+    force_recompute: false
+    compute_batch_size: 128
 
   profiling:
     enabled: false           # Enable profiling features

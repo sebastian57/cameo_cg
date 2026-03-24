@@ -44,4 +44,13 @@ Check for any recompilation
 
 Maybe remove numpy data loader and use a jax variant. 
 
+17.03.2026
+Reduce weight of evaluate convergence (post training chemtrain module). Might not need early stopping or per-epoch validation loss, or can trim it some other way
+
+Still need to fix the export of the model. Rather need to recompile my LAMMPS connector due to a changed cuda version
+
+
+19.03.2026
+Standard deviation of forces. Trained vs. 0 prediction. 
+Safe and minimal LJ prior for anti MD explosions.
 

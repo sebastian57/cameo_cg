@@ -49,14 +49,29 @@ if str(clean_code_base) not in sys.path:
 # =============================================================================
 # JAX/jax_md compatibility patch (must be before any jax_md imports)
 # =============================================================================
-# jax_md uses jax.random.KeyArray which was removed in newer JAX versions
 import jax
-jax.random.KeyArray = jax.Array
 
-# Clear cached modules to ensure patch takes effect
-_to_uncache = [mod for mod in sys.modules if mod.startswith('jax.random')]
-for mod in _to_uncache:
-    del sys.modules[mod]
+# jax_md<=0.2.8 expects KeyArray on jax.random.
+if not hasattr(jax.random, "KeyArray"):
+    jax.random.KeyArray = jax.Array
+
+# Older jax_md imports tree_* helpers from top-level jax namespace.
+if not hasattr(jax, "tree_map"):
+    jax.tree_map = jax.tree_util.tree_map
+if not hasattr(jax, "tree_leaves"):
+    jax.tree_leaves = jax.tree_util.tree_leaves
+if not hasattr(jax, "tree_flatten"):
+    jax.tree_flatten = jax.tree_util.tree_flatten
+if not hasattr(jax, "tree_unflatten"):
+    jax.tree_unflatten = jax.tree_util.tree_unflatten
+
+# Older jax_md imports xla_bridge from jax.lib.
+if not hasattr(jax.lib, "xla_bridge"):
+    from jax._src import xla_bridge as _xla_bridge
+    jax.lib.xla_bridge = _xla_bridge
+
+# Keep the patched jax/jax.lib modules loaded so downstream jax_md imports
+# see the compatibility shims immediately.
 # =============================================================================
 
 import argparse
@@ -119,9 +134,9 @@ def main():
     config = ConfigManager(args.config)
 
     # Validate prior-only mode requirements
-    if args.mode == 'prior-only' and not config.use_priors():
-        print("\nERROR: --mode prior-only requires model.use_priors=true in config")
-        print("       Please enable priors in your config file")
+    if args.mode == 'prior-only' and config.get('model', 'priors', default=None) is None:
+        print("\nERROR: --mode prior-only requires model.priors to be configured")
+        print("       Please add the prior config to your YAML file")
         sys.exit(1)
 
     # Validate spline file exists and resolve to an absolute path.
@@ -324,6 +339,7 @@ def main():
         if not config._config.get('model'):
             config._config['model'] = {}
         config._config['model']['use_priors'] = True
+        config._config['model']['train_priors'] = False
         print("  Mode: prior-only (priors enabled, ML will not be used)")
     elif args.mode == 'ml-only':
         # Force disable priors for ML-only evaluation
@@ -332,7 +348,15 @@ def main():
         config._config['model']['use_priors'] = False
         print("  Mode: ml-only (priors disabled)")
     else:
-        print(f"  Mode: full (use_priors={config.use_priors()})")
+        if not config._config.get('model'):
+            config._config['model'] = {}
+        use_combined = config.export_combined_ml_priors_enabled()
+        has_prior_config = config.get('model', 'priors', default=None) is not None
+        config._config['model']['use_priors'] = bool(use_combined and has_prior_config)
+        config._config['model']['train_priors'] = False
+        print(
+            f"  Mode: full (export_combined_ml_priors={use_combined}, use_priors={config.use_priors()})"
+        )
 
     # Suppress both stdout and stderr during model initialization
     # (Allegro prints to both, and we don't need to see it for prior-only mode)

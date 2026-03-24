@@ -14,7 +14,8 @@ import numpy as np
 import optax
 import os
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from collections import defaultdict, deque
+from typing import Dict, Any, Optional, Tuple, Callable
 import pickle
 import time
 
@@ -25,6 +26,28 @@ from chemtrain.data.data_loaders import DataLoaders
 from config.types import PretrainResult, TrainingResults, StageResult
 from .optimizers import create_optimizer_from_config
 from utils.logging import training_logger
+from data.loader import build_tiled_dataset, attach_batch_metadata
+
+
+def valid_component_mse(predictions, targets, weights=None):
+    """Average squared force error over valid force components only."""
+    squared_differences = jnp.square(targets - predictions)
+    if weights is None:
+        return jnp.mean(squared_differences)
+
+    weights = jnp.asarray(weights, dtype=squared_differences.dtype)
+    if weights.ndim == squared_differences.ndim - 1:
+        weights = weights[..., None]
+    try:
+        weights = jnp.broadcast_to(weights, squared_differences.shape)
+    except ValueError as exc:
+        raise ValueError(
+            "force_loss_mask must match force target shape after broadcasting. "
+            f"Got weights shape {weights.shape} and force shape {squared_differences.shape}."
+        ) from exc
+    numerator = jnp.sum(squared_differences * weights)
+    denominator = jnp.maximum(jnp.sum(weights), 1.0)
+    return numerator / denominator
 
 
 class Trainer:
@@ -57,6 +80,7 @@ class Trainer:
         train_loader,  # DatasetLoader or NumpyDataLoader
         val_loader: Optional[Any] = None,
         train_data: Optional[Dict[str, jax.Array]] = None,
+        tiled_train_source: Optional[Dict[str, np.ndarray]] = None,
         seed: Optional[int] = None,  # Optional seed override for ensemble training
     ):
         """
@@ -68,6 +92,7 @@ class Trainer:
             train_loader: Training data loader
             val_loader: Validation data loader (optional)
             train_data: Optional dict with R, F, mask for prior pre-training
+            tiled_train_source: Untiled training structures used to rebuild tiled batches
             seed: Optional seed override (for ensemble training). If None, uses config seed.
         """
         self.model = model
@@ -83,6 +108,31 @@ class Trainer:
         self.checkpoint_path.mkdir(parents=True, exist_ok=True)
         self._rank = jax.process_index()
         self._world_size = jax.process_count()
+        self._batch_mode = config.get_batch_mode()
+        self._global_device_count = jax.device_count()
+        self._global_batch_size = self.batch_per_device * self._global_device_count
+        self._grad_accum_steps = max(1, int(os.environ.get("CHEMTRAIN_GRAD_ACCUM_STEPS", "1")))
+        self._grad_accum_mode = str(
+            os.environ.get("CHEMTRAIN_GRAD_ACCUM_MODE", "stack_scan")
+        ).strip().lower()
+        self._force_loss_normalization = config.get_force_loss_normalization()
+        self._tile_rebuild_each_epoch = (
+            self._batch_mode == "tiled" and config.tile_rebuild_each_epoch_enabled()
+        )
+        self._tile_shuffle_structures = config.tile_shuffle_structures_enabled()
+        self._tile_sort_by_size = config.tile_sort_by_size_enabled()
+        self._tile_drop_incomplete = config.tile_drop_incomplete_enabled()
+        self._tile_target_beads = (
+            config.get_tile_target_beads() if self._batch_mode == "tiled" else None
+        )
+        self._tile_bucket_beads = (
+            config.get_tile_bucket_beads() if self._batch_mode == "tiled" else None
+        )
+        self._tiled_train_source = None
+        if tiled_train_source is not None:
+            self._tiled_train_source = {
+                key: np.asarray(value) for key, value in tiled_train_source.items()
+            }
 
         # Runtime precision + JIT buffer donation policy.
         self._mixed_precision_enabled = config.mixed_precision_enabled()
@@ -129,6 +179,29 @@ class Trainer:
         self._batch_profiler_enabled = bool(profiling_cfg.get("batch_profiler_enabled", False))
         self._batch_profiler_warmup = int(profiling_cfg.get("batch_profiler_warmup", 5))
         self._batch_profiler_samples = int(profiling_cfg.get("batch_profiler_samples", 50))
+        self._batch_stats_enabled = bool(profiling_cfg.get("batch_stats_enabled", False))
+        self._batch_stats_rank0_only = bool(profiling_cfg.get("batch_stats_rank0_only", True))
+        self._batch_stats_log_every = max(1, int(profiling_cfg.get("batch_stats_log_every", 1)))
+        self._loss_profile_enabled = bool(profiling_cfg.get("loss_profile_enabled", False))
+        self._loss_profile_steps = max(0, int(profiling_cfg.get("loss_profile_steps", 4)))
+        self._epoch_summary_enabled = bool(profiling_cfg.get("epoch_summary_enabled", False))
+        self._loader_timing_enabled = bool(
+            self._profiling_enabled
+            and (self._batch_profiler_enabled or self._batch_stats_enabled)
+        )
+        self._loader_timing_limit = max(
+            self._batch_profiler_samples,
+            self._loss_profile_steps,
+            self._batch_stats_log_every,
+            8,
+        )
+        self._host_breakdown_limit = min(self._loader_timing_limit, 8)
+        self._profile_step_records = []
+        self._dataset_profile = None
+        self._loader_setup_records = []
+        self._tile_build_records = []
+        self._batch_fetch_records = []
+        self._pending_batch_fetch_profiles = deque()
         env_true = ("1", "true", "yes", "on")
         self._edge_profiler_enabled = (
             self._batch_profiler_enabled
@@ -169,8 +242,24 @@ class Trainer:
             except Exception as e:
                 training_logger.warning(f"[Profiling] Could not enable jax_log_compiles: {e}")
 
+        if self._loader_timing_enabled:
+            os.environ["CHEMTRAIN_PROFILE_BATCH_BREAKDOWN"] = "1"
+            os.environ["CHEMTRAIN_PROFILE_UPDATE_BREAKDOWN"] = "1"
+            os.environ["CHEMTRAIN_PROFILE_TASK_TIMING"] = "1"
+            os.environ["CHEMTRAIN_PROFILE_RANK0_ONLY"] = "1"
+            os.environ[
+                "CHEMTRAIN_PROFILE_BATCH_BREAKDOWN_LIMIT"
+            ] = str(self._host_breakdown_limit)
+
         if self._profiling_enabled:
             self._profiling_trace_dir.mkdir(parents=True, exist_ok=True)
+            if self._loader_timing_enabled and self._should_batch_stats_this_rank():
+                training_logger.info(
+                    "[Profiling] Loader timing enabled (batch_breakdown_limit=%d, update_breakdown=%s, task_timing=%s)",
+                    self._host_breakdown_limit,
+                    True,
+                    True,
+                )
             if self._edge_profiler_enabled:
                 training_logger.info(
                     "[Profiling] EdgeProfiler enabled "
@@ -225,6 +314,21 @@ class Trainer:
                 training_logger.warning(f"Could not extract training data: {e}. Prior pre-training may not work.")
                 self._train_data = None
 
+        training_logger.info(
+            "[Training] Force loss normalization: %s",
+            self._force_loss_normalization,
+        )
+
+        if self._batch_stats_enabled and self._should_batch_stats_this_rank():
+            training_logger.info(
+                "[Profiling] Batch stats enabled (log_every=%d, loss_profile=%s, epoch_summary=%s)",
+                self._batch_stats_log_every,
+                self._loss_profile_enabled,
+                self._epoch_summary_enabled,
+            )
+
+        self._initialize_dataset_profile()
+
         # Initialize model parameters
         # Use provided seed or fall back to config seed
         if seed is not None:
@@ -233,6 +337,14 @@ class Trainer:
             self._seed = config.get_seed()
         self.params = model.initialize_params(jax.random.PRNGKey(self._seed))
         training_logger.info(f"Initialized model with seed={self._seed}")
+        if self._tile_rebuild_each_epoch:
+            training_logger.info(
+                "[Tiling] Epoch-wise tile rebuild enabled (shuffle=%s, sort_by_size=%s, target_beads=%s, bucket_beads=%s)",
+                self._tile_shuffle_structures,
+                self._tile_sort_by_size,
+                self._tile_target_beads,
+                self._tile_bucket_beads,
+            )
         self.best_params = None
 
         # Current trainer instance (will be set during training)
@@ -282,6 +394,478 @@ class Trainer:
         if self._profiling_trace_rank0_only and self._rank != 0:
             return False
         return True
+
+
+    def _should_batch_stats_this_rank(self) -> bool:
+        """Return True if batch/accounting diagnostics should run on this rank."""
+        if not self._batch_stats_enabled:
+            return False
+        if self._batch_stats_rank0_only and self._rank != 0:
+            return False
+        return True
+
+    @staticmethod
+    def _tree_l2_norm(tree: Any) -> float:
+        """Compute an L2 norm for numeric leaves of a pytree on the host."""
+        total = 0.0
+        for leaf in jax.tree_util.tree_leaves(tree):
+            try:
+                arr = np.asarray(jax.device_get(leaf))
+            except Exception:
+                continue
+            if not np.issubdtype(arr.dtype, np.number):
+                continue
+            total += float(np.sum(np.square(arr, dtype=np.float64), dtype=np.float64))
+        return float(np.sqrt(total))
+
+    def _batch_array_to_host(self, value: Any) -> Optional[np.ndarray]:
+        """Move a batch field to host and flatten stack-scan microbatches."""
+        if value is None:
+            return None
+        arr = np.asarray(jax.device_get(value))
+        if (
+            self._grad_accum_steps > 1
+            and self._grad_accum_mode == "stack_scan"
+            and arr.ndim >= 2
+            and arr.shape[0] <= self._grad_accum_steps
+            and arr.shape[1] == self._global_batch_size
+        ):
+            return arr.reshape((arr.shape[0] * arr.shape[1],) + arr.shape[2:])
+        return arr
+
+    def _profile_batch_to_host(self, batch: Any) -> Dict[str, np.ndarray]:
+        """Extract relevant batch fields to host arrays for diagnostics."""
+        keys = (
+            "R",
+            "F",
+            "mask",
+            "species",
+            "segment_id",
+            "n_valid",
+            "n_segments",
+            "meta_batch_item_id",
+            "meta_capacity",
+            "meta_fill_ratio",
+            "meta_n_force_components",
+            "meta_source_structure_ids",
+            "meta_source_structure_n_valid",
+            "meta_structure_size_min",
+            "meta_structure_size_mean",
+            "meta_structure_size_max",
+            "meta_structure_size_std",
+        )
+        out: Dict[str, np.ndarray] = {}
+        for key in keys:
+            value = self._get_batch_field(batch, key)
+            if value is not None:
+                out[key] = self._batch_array_to_host(value)
+        return out
+
+    def _set_dataset_profile(self, data: Optional[Dict[str, Any]], log: bool = False) -> None:
+        """Cache dataset-level counts used to contextualize per-step logs."""
+        if data is None:
+            return
+        item_ids = self._batch_array_to_host(data.get("meta_batch_item_id"))
+        n_valid = self._batch_array_to_host(data.get("n_valid"))
+        n_segments = self._batch_array_to_host(data.get("n_segments"))
+        fill_ratio = self._batch_array_to_host(data.get("meta_fill_ratio"))
+        n_force = self._batch_array_to_host(data.get("meta_n_force_components"))
+        source_ids = self._batch_array_to_host(data.get("meta_source_structure_ids"))
+        if item_ids is None or n_valid is None:
+            return
+
+        valid_source_ids = np.asarray([], dtype=np.int32)
+        if source_ids is not None:
+            valid_source_ids = np.asarray(source_ids, dtype=np.int32)
+            valid_source_ids = valid_source_ids[valid_source_ids >= 0]
+
+        self._dataset_profile = {
+            "n_items": int(item_ids.shape[0]),
+            "total_valid_beads": int(np.sum(n_valid, dtype=np.int64)),
+            "total_force_components": int(np.sum(n_force, dtype=np.int64)) if n_force is not None else int(np.sum(n_valid, dtype=np.int64) * 3),
+            "total_structures": int(np.unique(valid_source_ids).size) if valid_source_ids.size else int(item_ids.shape[0]),
+            "mean_fill_ratio": float(np.mean(fill_ratio)) if fill_ratio is not None else float("nan"),
+            "mean_segments": float(np.mean(n_segments)) if n_segments is not None else 1.0,
+        }
+        if log and self._should_batch_stats_this_rank():
+            training_logger.info(
+                "[Profiling][Dataset] mode=%s items=%d total_structures=%d total_valid_beads=%d total_force_components=%d mean_fill_ratio=%.3f mean_segments=%.2f",
+                self._batch_mode,
+                self._dataset_profile["n_items"],
+                self._dataset_profile["total_structures"],
+                self._dataset_profile["total_valid_beads"],
+                self._dataset_profile["total_force_components"],
+                self._dataset_profile["mean_fill_ratio"],
+                self._dataset_profile["mean_segments"],
+            )
+
+    def _initialize_dataset_profile(self) -> None:
+        self._set_dataset_profile(self._train_data, log=True)
+
+    def _device_slot_means(self, values: np.ndarray) -> Dict[int, float]:
+        """Summarize a per-sample metric by device slot within a global batch."""
+        if values.size == 0:
+            return {}
+        local_positions = np.arange(values.shape[0], dtype=np.int32) % max(
+            self._global_batch_size, 1
+        )
+        device_slots = local_positions // max(self.batch_per_device, 1)
+        slot_means: Dict[int, float] = {}
+        for slot in range(self._global_device_count):
+            slot_mask = device_slots == slot
+            if np.any(slot_mask):
+                slot_means[int(slot)] = float(np.mean(values[slot_mask]))
+        return slot_means
+
+    def _compute_manual_loss_views(
+        self, params: Dict[str, Any], batch_host: Dict[str, np.ndarray]
+    ) -> Optional[Dict[str, float]]:
+        """Recompute sampled force-loss views to expose weighting differences."""
+        required = ("R", "F", "mask", "species")
+        if any(key not in batch_host for key in required):
+            return None
+
+        if not hasattr(self, "_manual_force_profile_fn"):
+            def _single_force(params_, R_, mask_, species_, segment_id_):
+                species_safe = jnp.where(mask_ > 0, species_, 0).astype(jnp.int32)
+                def _energy_fn(R_eval):
+                    return self.model.compute_energy(
+                        params_, R_eval, mask_, species_safe, segment_id=segment_id_
+                    )
+                return -jax.grad(_energy_fn)(R_)
+
+            self._manual_force_profile_fn = jax.jit(
+                jax.vmap(_single_force, in_axes=(None, 0, 0, 0, 0))
+            )
+
+        R = jnp.asarray(batch_host["R"])
+        F_ref = jnp.asarray(batch_host["F"])
+        mask = jnp.asarray(batch_host["mask"])
+        species = jnp.asarray(batch_host["species"])
+        segment_id = batch_host.get("segment_id")
+        if segment_id is None:
+            segment_id = np.zeros_like(batch_host["mask"], dtype=np.int32)
+        segment_id = jnp.asarray(segment_id, dtype=jnp.int32)
+
+        F_pred = self._manual_force_profile_fn(params, R, mask, species, segment_id)
+        sq = np.asarray(jax.device_get(jnp.square(F_ref - F_pred)), dtype=np.float64)
+        mask_np = np.asarray(batch_host["mask"], dtype=np.float64)
+        mask3 = np.broadcast_to(mask_np[..., None], sq.shape)
+        legacy_component_mse = float(np.mean(sq))
+        valid_component_mse = float(
+            np.sum(sq * mask3, dtype=np.float64)
+            / max(np.sum(mask3, dtype=np.float64), 1.0)
+        )
+        if self._force_loss_normalization == "valid_components":
+            current_component_mse = valid_component_mse
+        elif self._force_loss_normalization == "per_structure_components":
+            current_component_mse = float("nan")
+        else:
+            current_component_mse = legacy_component_mse
+        valid_bead_vector_mse = float(
+            np.sum(sq * mask3, dtype=np.float64)
+            / max(np.sum(mask_np, dtype=np.float64), 1.0)
+        )
+        per_tile_component = np.mean(sq.reshape((sq.shape[0], -1)), axis=1)
+        per_tile_component_mse = float(np.mean(per_tile_component))
+        per_tile_valid_component = np.sum(sq * mask3, axis=(1, 2)) / np.maximum(
+            np.sum(mask3, axis=(1, 2)), 1.0
+        )
+        per_tile_valid_component_mse = float(np.mean(per_tile_valid_component))
+
+        n_segments = batch_host.get("n_segments")
+        if n_segments is None:
+            n_segments = np.ones((sq.shape[0],), dtype=np.int32)
+        n_segments = np.asarray(n_segments, dtype=np.int32)
+        per_structure_component = []
+        for batch_idx in range(sq.shape[0]):
+            if "segment_id" in batch_host:
+                seg = np.asarray(batch_host["segment_id"][batch_idx], dtype=np.int32)
+                for seg_id in range(int(n_segments[batch_idx])):
+                    seg_mask = seg == seg_id
+                    if np.any(seg_mask):
+                        per_structure_component.append(float(np.mean(sq[batch_idx][seg_mask])))
+            else:
+                valid = mask_np[batch_idx] > 0
+                if np.any(valid):
+                    per_structure_component.append(float(np.mean(sq[batch_idx][valid])))
+
+        per_structure_component_mse = (
+            float(np.mean(per_structure_component)) if per_structure_component else float("nan")
+        )
+        if self._force_loss_normalization == "per_structure_components":
+            current_component_mse = per_structure_component_mse
+
+        loss_views = {
+            "current_component_mse": current_component_mse,
+            "legacy_component_mse": legacy_component_mse,
+            "valid_component_mse": valid_component_mse,
+            "valid_bead_vector_mse": valid_bead_vector_mse,
+            "per_tile_component_mse": per_tile_component_mse,
+            "per_tile_valid_component_mse": per_tile_valid_component_mse,
+            "per_structure_component_mse": per_structure_component_mse,
+            "padding_dilution_ratio": legacy_component_mse / max(valid_component_mse, 1e-12),
+        }
+        fill_ratio = batch_host.get("meta_fill_ratio")
+        if fill_ratio is not None and fill_ratio.size > 1:
+            corr = np.corrcoef(
+                np.asarray(fill_ratio, dtype=np.float64),
+                np.asarray(per_tile_valid_component, dtype=np.float64),
+            )[0, 1]
+            if np.isfinite(corr):
+                loss_views["fill_ratio_vs_tile_loss_corr"] = float(corr)
+        return loss_views
+
+    def _record_profiled_step(
+        self,
+        trainer: Any,
+        batch: Any,
+        step_idx: int,
+        params_before: Dict[str, Any],
+        params_after: Dict[str, Any],
+        train_loss: Any,
+        curr_grad: Any,
+        dispatch_ms: Optional[float] = None,
+        barrier_ms: Optional[float] = None,
+    ) -> None:
+        """Capture optimizer-step accounting and optional loss re-evaluations."""
+        if not self._should_batch_stats_this_rank():
+            return
+
+        batch_host = self._profile_batch_to_host(batch)
+        batch_ids = batch_host.get("meta_batch_item_id")
+        if batch_ids is None:
+            return
+
+        epoch_idx = int(getattr(trainer, "_epoch", 0))
+        n_valid = np.asarray(batch_host.get("n_valid"), dtype=np.int32)
+        n_segments = np.asarray(batch_host.get("n_segments"), dtype=np.int32)
+        n_force = np.asarray(batch_host.get("meta_n_force_components"), dtype=np.int32)
+        fill_ratio = np.asarray(batch_host.get("meta_fill_ratio"), dtype=np.float64)
+        source_ids = np.asarray(batch_host.get("meta_source_structure_ids"), dtype=np.int32)
+        valid_source_ids = source_ids[source_ids >= 0] if source_ids.size else np.asarray([], dtype=np.int32)
+
+        param_norm = self._tree_l2_norm(params_before)
+        update_norm = self._tree_l2_norm(
+            jax.tree_util.tree_map(lambda new, old: new - old, params_after, params_before)
+        )
+        grad_norm = self._tree_l2_norm(curr_grad)
+        train_loss_value = float(np.asarray(jax.device_get(train_loss)))
+
+        fetch_record = self._pending_batch_fetch_profiles.popleft() if self._pending_batch_fetch_profiles else None
+
+        record = {
+            "epoch": epoch_idx,
+            "step": int(step_idx),
+            "item_ids": [int(x) for x in np.asarray(batch_ids).reshape(-1)],
+            "n_items": int(np.asarray(batch_ids).reshape(-1).shape[0]),
+            "n_structures": int(np.sum(n_segments, dtype=np.int64)),
+            "n_valid_beads": int(np.sum(n_valid, dtype=np.int64)),
+            "n_force_components": int(np.sum(n_force, dtype=np.int64)),
+            "unique_structures": int(np.unique(valid_source_ids).size) if valid_source_ids.size else int(np.sum(n_segments, dtype=np.int64)),
+            "mean_fill_ratio": float(np.mean(fill_ratio)) if fill_ratio.size else float("nan"),
+            "train_loss": train_loss_value,
+            "grad_norm": grad_norm,
+            "param_norm": param_norm,
+            "update_norm": update_norm,
+            "update_to_param_ratio": update_norm / max(param_norm, 1e-12),
+            "dispatch_ms": float(dispatch_ms) if dispatch_ms is not None else float("nan"),
+            "barrier_ms": float(barrier_ms) if barrier_ms is not None else float("nan"),
+            "device_valid_means": self._device_slot_means(n_valid.astype(np.float64)),
+            "device_fill_means": self._device_slot_means(fill_ratio.astype(np.float64)),
+            "device_segment_means": self._device_slot_means(n_segments.astype(np.float64)),
+        }
+
+        if fetch_record is not None:
+            record["fetch_ms"] = float(fetch_record["fetch_ms"])
+            record["fetch_refresh_before"] = bool(fetch_record["refresh_before"])
+            record["fetch_cache_count"] = int(fetch_record["cache_count"])
+            record["fetch_line_before"] = int(fetch_record["line_before"])
+            record["fetch_line_after"] = int(fetch_record["line_after"])
+
+        if self._dataset_profile is not None:
+            record["structure_fraction"] = (
+                record["unique_structures"]
+                / max(self._dataset_profile["total_structures"], 1)
+            )
+            record["bead_fraction"] = (
+                record["n_valid_beads"]
+                / max(self._dataset_profile["total_valid_beads"], 1)
+            )
+            record["force_component_fraction"] = (
+                record["n_force_components"]
+                / max(self._dataset_profile["total_force_components"], 1)
+            )
+
+        if self._loss_profile_enabled and step_idx < self._loss_profile_steps:
+            loss_views = self._compute_manual_loss_views(params_before, batch_host)
+            if loss_views is not None:
+                record.update(loss_views)
+
+        self._profile_step_records.append(record)
+
+        if step_idx % self._batch_stats_log_every == 0:
+            log_msg = (
+                "[BatchStats] epoch=%d step=%d mode=%s items=%d structures=%d unique_structures=%d "
+                "valid_beads=%d force_components=%d fill_mean=%.3f train_loss=%.6e grad_norm=%.3e "
+                "update_ratio=%.3e fetch_ms=%s refresh=%s item_ids=%s"
+            )
+            training_logger.info(
+                log_msg,
+                record["epoch"],
+                record["step"],
+                self._batch_mode,
+                record["n_items"],
+                record["n_structures"],
+                record["unique_structures"],
+                record["n_valid_beads"],
+                record["n_force_components"],
+                record["mean_fill_ratio"],
+                record["train_loss"],
+                record["grad_norm"],
+                record["update_to_param_ratio"],
+                f"{record['fetch_ms']:.3f}" if "fetch_ms" in record else "n/a",
+                record.get("fetch_refresh_before", False),
+                record["item_ids"][: min(8, len(record["item_ids"]))],
+            )
+            if "structure_fraction" in record:
+                training_logger.info(
+                    "[BatchStats] epoch=%d step=%d dataset_fraction structures=%.3f beads=%.3f force_components=%.3f device_valid=%s device_fill=%s",
+                    record["epoch"],
+                    record["step"],
+                    record["structure_fraction"],
+                    record["bead_fraction"],
+                    record["force_component_fraction"],
+                    record["device_valid_means"],
+                    record["device_fill_means"],
+                )
+            if "current_component_mse" in record:
+                training_logger.info(
+                    "[LossViews] epoch=%d step=%d current_component=%.6e valid_component=%.6e per_structure=%.6e valid_bead_vector=%.6e padding_ratio=%.3f",
+                    record["epoch"],
+                    record["step"],
+                    record["current_component_mse"],
+                    record["valid_component_mse"],
+                    record["per_structure_component_mse"],
+                    record["valid_bead_vector_mse"],
+                    record["padding_dilution_ratio"],
+                )
+
+    def _report_epoch_profiles(self) -> None:
+        """Emit aggregated epoch summaries from the collected step records."""
+        if (
+            not self._epoch_summary_enabled
+            or not self._should_batch_stats_this_rank()
+            or not self._profile_step_records
+        ):
+            return
+
+        by_epoch = defaultdict(list)
+        for record in self._profile_step_records:
+            by_epoch[int(record["epoch"])].append(record)
+
+        sorted_epochs = sorted(by_epoch)
+        for idx, epoch in enumerate(sorted_epochs):
+            records = by_epoch[epoch]
+            item_ids = []
+            for record in records:
+                item_ids.extend(record["item_ids"])
+            unique_items = len(set(item_ids))
+            mean_loss = float(np.mean([r["train_loss"] for r in records]))
+            mean_grad = float(np.mean([r["grad_norm"] for r in records]))
+            mean_update_ratio = float(np.mean([r["update_to_param_ratio"] for r in records]))
+            mean_fill = float(np.mean([r["mean_fill_ratio"] for r in records]))
+            total_structures = int(np.sum([r["n_structures"] for r in records], dtype=np.int64))
+            total_valid_beads = int(np.sum([r["n_valid_beads"] for r in records], dtype=np.int64))
+            total_force_components = int(np.sum([r["n_force_components"] for r in records], dtype=np.int64))
+            unique_structures_seen = int(max(r["unique_structures"] for r in records)) if records else 0
+            order_preview = item_ids[: min(24, len(item_ids))]
+            training_logger.info(
+                "[EpochProfile] epoch=%d steps=%d unique_items=%d total_structures=%d total_valid_beads=%d total_force_components=%d mean_fill=%.3f mean_train_loss=%.6e mean_grad_norm=%.3e mean_update_ratio=%.3e item_order_prefix=%s",
+                epoch,
+                len(records),
+                unique_items,
+                total_structures,
+                total_valid_beads,
+                total_force_components,
+                mean_fill,
+                mean_loss,
+                mean_grad,
+                mean_update_ratio,
+                order_preview,
+            )
+            if self._dataset_profile is not None:
+                training_logger.info(
+                    "[EpochProfile] epoch=%d dataset_coverage items=%.3f structures<=%.3f beads=%.3f force_components=%.3f",
+                    epoch,
+                    unique_items / max(self._dataset_profile["n_items"], 1),
+                    unique_structures_seen / max(self._dataset_profile["total_structures"], 1),
+                    total_valid_beads / max(self._dataset_profile["total_valid_beads"], 1),
+                    total_force_components / max(self._dataset_profile["total_force_components"], 1),
+                )
+
+            fetch_records = [r for r in records if "fetch_ms" in r]
+            if fetch_records:
+                fetch_values = np.asarray([r["fetch_ms"] for r in fetch_records], dtype=np.float64)
+                refresh_values = np.asarray([r["fetch_ms"] for r in fetch_records if r.get("fetch_refresh_before")], dtype=np.float64)
+                steady_values = np.asarray([r["fetch_ms"] for r in fetch_records if not r.get("fetch_refresh_before")], dtype=np.float64)
+                training_logger.info(
+                    "[EpochProfile] epoch=%d fetch_ms mean=%.3f p50=%.3f p95=%.3f refreshes=%d refresh_mean=%s steady_mean=%s",
+                    epoch,
+                    float(np.mean(fetch_values)),
+                    float(np.percentile(fetch_values, 50)),
+                    float(np.percentile(fetch_values, 95)),
+                    int(refresh_values.size),
+                    f"{float(np.mean(refresh_values)):.3f}" if refresh_values.size else "n/a",
+                    f"{float(np.mean(steady_values)):.3f}" if steady_values.size else "n/a",
+                )
+
+            device_valid = defaultdict(list)
+            device_fill = defaultdict(list)
+            for record in records:
+                for slot, value in record["device_valid_means"].items():
+                    device_valid[slot].append(value)
+                for slot, value in record["device_fill_means"].items():
+                    device_fill[slot].append(value)
+            if device_valid:
+                valid_summary = {
+                    slot: round(float(np.mean(values)), 2)
+                    for slot, values in sorted(device_valid.items())
+                }
+                fill_summary = {
+                    slot: round(float(np.mean(device_fill.get(slot, [float("nan")]))), 3)
+                    for slot in sorted(device_valid)
+                }
+                training_logger.info(
+                    "[EpochProfile] epoch=%d per_device_valid_beads=%s per_device_fill=%s",
+                    epoch,
+                    valid_summary,
+                    fill_summary,
+                )
+
+            sampled_loss_records = [r for r in records if "current_component_mse" in r]
+            if sampled_loss_records:
+                training_logger.info(
+                    "[EpochProfile] epoch=%d sampled_loss_views current_component=%.6e valid_component=%.6e per_structure=%.6e valid_bead_vector=%.6e padding_ratio=%.3f",
+                    epoch,
+                    float(np.mean([r["current_component_mse"] for r in sampled_loss_records])),
+                    float(np.mean([r["valid_component_mse"] for r in sampled_loss_records])),
+                    float(np.mean([r["per_structure_component_mse"] for r in sampled_loss_records])),
+                    float(np.mean([r["valid_bead_vector_mse"] for r in sampled_loss_records])),
+                    float(np.mean([r["padding_dilution_ratio"] for r in sampled_loss_records])),
+                )
+
+            if idx > 0:
+                prev_records = by_epoch[sorted_epochs[idx - 1]]
+                prev_items = set(item for record in prev_records for item in record["item_ids"])
+                curr_items = set(item_ids)
+                union = prev_items | curr_items
+                jaccard = len(prev_items & curr_items) / max(len(union), 1)
+                training_logger.info(
+                    "[EpochProfile] epoch=%d item_set_jaccard_vs_prev=%.3f",
+                    epoch,
+                    jaccard,
+                )
 
     def _build_trace_dir(
         self, optimizer_name: str, start_epoch: int, remaining_epochs: int
@@ -361,9 +945,23 @@ class Trainer:
         def _timed_update_fn(*args, **kwargs):
             idx = step[0]
             step[0] += 1
+            batch = kwargs.get("batch", args[2] if len(args) > 2 else None)
+            params_before = args[0] if len(args) > 0 else None
+            timed_window = n_warmup <= idx < n_warmup + n_samples
 
-            if idx < n_warmup or idx >= n_warmup + n_samples:
-                return original_fn(*args, **kwargs)
+            if not timed_window:
+                result = original_fn(*args, **kwargs)
+                if self._should_batch_stats_this_rank() and params_before is not None:
+                    self._record_profiled_step(
+                        trainer,
+                        batch,
+                        idx,
+                        params_before,
+                        result[0],
+                        result[2],
+                        result[3],
+                    )
+                return result
 
             t0 = time.perf_counter()
             result = original_fn(*args, **kwargs)
@@ -374,8 +972,19 @@ class Trainer:
             call_ts.append(t0)
             dispatch_ts.append(t1)
             barrier_ts.append(t2)
-            batch = kwargs.get("batch", args[2] if len(args) > 2 else None)
             self._log_edge_count_stats_for_batch(batch, idx)
+            if self._should_batch_stats_this_rank() and params_before is not None:
+                self._record_profiled_step(
+                    trainer,
+                    batch,
+                    idx,
+                    params_before,
+                    result[0],
+                    result[2],
+                    result[3],
+                    dispatch_ms=(t1 - t0) * 1e3,
+                    barrier_ms=(t2 - t1) * 1e3,
+                )
             return result
 
         trainer._update_fn = _timed_update_fn
@@ -783,6 +1392,198 @@ class Trainer:
             if hasattr(leaf, "block_until_ready"):
                 leaf.block_until_ready()
 
+    @staticmethod
+    def _to_int_scalar(value: Any, default: int = -1) -> int:
+        """Safely convert scalar-like arrays to Python ints for logging."""
+        try:
+            arr = np.asarray(value)
+            if arr.size == 0:
+                return default
+            return int(arr.reshape(-1)[0])
+        except Exception:
+            return default
+
+    def _record_loader_setup(self, stage: str, label: str, elapsed_ms: float, **extra: Any) -> None:
+        """Store and optionally log loader/tile setup timings."""
+        record = {"stage": stage, "label": label, "elapsed_ms": float(elapsed_ms)}
+        record.update(extra)
+        self._loader_setup_records.append(record)
+        if self._loader_timing_enabled and self._should_batch_stats_this_rank():
+            details = " ".join(f"{key}={value}" for key, value in extra.items())
+            training_logger.info(
+                "[LoaderSetup] stage=%s label=%s elapsed_ms=%.3f%s%s",
+                stage,
+                label,
+                float(elapsed_ms),
+                " " if details else "",
+                details,
+            )
+
+    def _install_batch_fetch_profiler(self, trainer: Any, stage: str = "training") -> None:
+        """Wrap chemtrain's host-side batch supplier to time batch fetches directly."""
+        if not self._loader_timing_enabled:
+            return
+        original = getattr(trainer, "_get_batch_fns", {}).get(stage)
+        if original is None or getattr(original, "_cameo_loader_profile_wrapped", False):
+            return
+
+        def _wrapped_batch_fn(state, information: bool = False):
+            line_before = self._to_int_scalar(getattr(state, "current_line", -1))
+            cache_count = self._to_int_scalar(getattr(state, "cached_batches_count", -1))
+            refresh_before = cache_count >= 0 and line_before == cache_count
+            t_start = time.perf_counter()
+            new_state, train_batch = original(state, information=information)
+            t_end = time.perf_counter()
+            fetch_record = {
+                "stage": stage,
+                "fetch_ms": (t_end - t_start) * 1e3,
+                "refresh_before": bool(refresh_before),
+                "line_before": int(line_before),
+                "cache_count": int(cache_count),
+                "line_after": self._to_int_scalar(getattr(new_state, "current_line", -1)),
+                "information": bool(information),
+            }
+            self._batch_fetch_records.append(fetch_record)
+            if stage == "training" and not information:
+                self._pending_batch_fetch_profiles.append(fetch_record)
+            return new_state, train_batch
+
+        _wrapped_batch_fn._cameo_loader_profile_wrapped = True
+        trainer._get_batch_fns[stage] = _wrapped_batch_fn
+        if self._should_batch_stats_this_rank():
+            training_logger.info("[Profiling] Wrapped host batch fetch for stage=%s", stage)
+
+    def _split_loader_kwargs(self, split: Dict[str, np.ndarray]) -> Dict[str, Any]:
+        """Build loader kwargs while preserving auxiliary metadata arrays."""
+        loader_kwargs = {"copy": False}
+        for key, value in split.items():
+            if key in (
+                "R",
+                "F",
+                "mask",
+                "species",
+                "segment_id",
+                "force_loss_mask",
+                "force_loss_weights",
+            ):
+                loader_kwargs[key] = value
+            elif key.startswith("meta_") or key in ("n_valid", "n_segments"):
+                loader_kwargs[key] = value
+        return loader_kwargs
+
+    def _build_epoch_tiled_split(self, epoch_idx: int) -> Dict[str, np.ndarray]:
+        """Rebuild tiled training data for a specific epoch using the untiled source."""
+        if self._tiled_train_source is None:
+            raise ValueError("Missing tiled_train_source for epoch-wise tile rebuilding.")
+
+        epoch_seed = int(self._seed + epoch_idx)
+        t_build_start = time.perf_counter()
+        tiled = build_tiled_dataset(
+            R=self._tiled_train_source["R"],
+            F=self._tiled_train_source["F"],
+            mask=self._tiled_train_source["mask"],
+            species=self._tiled_train_source["species"],
+            structure_ids=self._tiled_train_source.get("structure_ids"),
+            target_beads=int(self._tile_target_beads),
+            bucket_beads=self._tile_bucket_beads,
+            shuffle_structures=self._tile_shuffle_structures,
+            sort_by_size=self._tile_sort_by_size,
+            drop_incomplete=self._tile_drop_incomplete,
+            seed=epoch_seed,
+        )
+        t_build_end = time.perf_counter()
+        tiled = attach_batch_metadata(
+            tiled, np.arange(tiled["R"].shape[0], dtype=np.int32)
+        )
+        t_meta_end = time.perf_counter()
+        build_ms = (t_build_end - t_build_start) * 1e3
+        metadata_ms = (t_meta_end - t_build_end) * 1e3
+        total_ms = (t_meta_end - t_build_start) * 1e3
+        self._record_loader_setup(
+            "training",
+            "epoch_tile_rebuild",
+            total_ms,
+            epoch=epoch_idx,
+            build_ms=f"{build_ms:.3f}",
+            metadata_ms=f"{metadata_ms:.3f}",
+            tiles=int(tiled["R"].shape[0]),
+            sort_by_size=self._tile_sort_by_size,
+        )
+        training_logger.info(
+            "[Tiling][EpochBuild] epoch=%d seed=%d tiles=%d mean_structures_per_tile=%.2f mean_valid_beads=%.1f fill_ratio=%.3f sort_by_size=%s build_ms=%.3f metadata_ms=%.3f",
+            epoch_idx,
+            epoch_seed,
+            int(tiled["R"].shape[0]),
+            float(np.mean(tiled["n_segments"])),
+            float(np.mean(tiled["n_valid"])),
+            float(np.mean(tiled["meta_fill_ratio"])),
+            self._tile_sort_by_size,
+            build_ms,
+            metadata_ms,
+        )
+        return tiled
+
+    def _install_epochwise_tile_rebuild(self, trainer: Any, stage_start_epoch: int) -> None:
+        """Refresh tiled loader composition at each epoch boundary."""
+        if not self._tile_rebuild_each_epoch:
+            return
+        if self._tiled_train_source is None:
+            training_logger.warning(
+                "[Tiling] tile_rebuild_each_epoch=true but no untiled source split was provided; keeping static tiles."
+            )
+            return
+
+        def _refresh_tiles(chemtrain_trainer, *args, **kwargs):
+            epoch_idx = int(stage_start_epoch + getattr(chemtrain_trainer, "_epoch", 0))
+            train_split = self._build_epoch_tiled_split(epoch_idx)
+            train_loader = NumpyDataLoader(**self._split_loader_kwargs(train_split))
+            chemtrain_trainer.set_loader(train_loader, stage="training")
+            chemtrain_trainer.set_loader(train_loader, stage="validation")
+            self.train_loader = train_loader
+            self.val_loader = train_loader
+            self._set_dataset_profile(train_split, log=False)
+
+        trainer.add_task("pre_epoch", _refresh_tiles)
+
+    def _force_matching_error_fns(self) -> Optional[Dict[str, Callable]]:
+        """Return custom per-target error functions for chemtrain."""
+        if self._force_loss_normalization in ("valid_components", "per_structure_components"):
+            return {"F": valid_component_mse}
+        return None
+
+    def _force_matching_weights_keys(self) -> Optional[Dict[str, str]]:
+        """Return dataset weight-key mapping for custom chemtrain losses."""
+        if self._force_loss_normalization == "valid_components":
+            return {"F": "force_loss_mask"}
+        if self._force_loss_normalization == "per_structure_components":
+            return {"F": "force_loss_weights"}
+        return None
+
+    def _loader_reference_data(self, loader: Any) -> Dict[str, Any]:
+        """Extract loader arrays while preserving auxiliary batch metadata."""
+        if hasattr(loader, "reference_data"):
+            reference_data = getattr(loader, "reference_data")
+            if isinstance(reference_data, dict):
+                return {key: value for key, value in reference_data.items()}
+
+        n_samples = None
+        if hasattr(loader, "R"):
+            n_samples = int(np.asarray(loader.R).shape[0])
+        elif hasattr(loader, "n_frames"):
+            n_samples = int(loader.n_frames)
+        if n_samples is None:
+            raise ValueError("Could not infer sample count when converting loader to NumpyDataLoader.")
+
+        reference_data = {}
+        for key, value in vars(loader).items():
+            if key.startswith("_"):
+                continue
+            shape = getattr(value, "shape", None)
+            if shape is None or len(shape) == 0 or int(shape[0]) != n_samples:
+                continue
+            reference_data[key] = value
+        return reference_data
+
     def _create_chemtrain_loaders(self) -> DataLoaders:
         """
         Create chemtrain DataLoaders from our loaders.
@@ -794,11 +1595,8 @@ class Trainer:
         # DatasetLoader stores NumPy arrays, so no device transfer is required.
         if not isinstance(self.train_loader, NumpyDataLoader):
             train_np_loader = NumpyDataLoader(
-                R=self.train_loader.R,
-                F=self.train_loader.F,
-                mask=self.train_loader.mask,
-                species=self.train_loader.species,
-                copy=False
+                copy=False,
+                **self._loader_reference_data(self.train_loader),
             )
         else:
             train_np_loader = self.train_loader
@@ -806,11 +1604,8 @@ class Trainer:
         if self.val_loader is not None:
             if not isinstance(self.val_loader, NumpyDataLoader):
                 val_np_loader = NumpyDataLoader(
-                    R=self.val_loader.R,
-                    F=self.val_loader.F,
-                    mask=self.val_loader.mask,
-                    species=self.val_loader.species,
-                    copy=False
+                    copy=False,
+                    **self._loader_reference_data(self.val_loader),
                 )
             else:
                 val_np_loader = self.val_loader
@@ -855,26 +1650,65 @@ class Trainer:
         optimizer = create_optimizer_from_config(self.config, optimizer_name)
 
         # Create chemtrain loaders
+        t_loader_start = time.perf_counter()
         loaders = self._create_chemtrain_loaders()
+        t_loader_end = time.perf_counter()
+        self._record_loader_setup(
+            "training",
+            "create_chemtrain_loaders",
+            (t_loader_end - t_loader_start) * 1e3,
+            batch_mode=self._batch_mode,
+            batch_per_device=self.batch_per_device,
+        )
 
         # Create energy function template
         energy_fn_template = self.model.energy_fn_template
 
         # Create ForceMatching trainer
+        t_trainer_init_start = time.perf_counter()
         trainer = ForceMatching(
             init_params=self.params,
             optimizer=optimizer,
             energy_fn_template=energy_fn_template,
             nbrs_init=self.model.initial_neighbors,
             gammas=self.gammas,
+            error_fns=self._force_matching_error_fns(),
+            weights_keys=self._force_matching_weights_keys(),
             checkpoint_path=str(self.checkpoint_path),
             batch_per_device=self.batch_per_device,
+            batch_cache=self.batch_cache,
+            disable_shmap=False,
+        )
+        t_trainer_init_end = time.perf_counter()
+        self._record_loader_setup(
+            "training",
+            "force_matching_init",
+            (t_trainer_init_end - t_trainer_init_start) * 1e3,
+            global_batch_size=self._global_batch_size,
             batch_cache=self.batch_cache,
         )
 
         # Set loaders
+        t_set_train_loader_start = time.perf_counter()
         trainer.set_loader(loaders.train_loader, stage="training")
+        t_set_train_loader_end = time.perf_counter()
+        self._record_loader_setup(
+            "training",
+            "set_loader_training",
+            (t_set_train_loader_end - t_set_train_loader_start) * 1e3,
+            observations=int(loaders.train_loader.static_information["observation_count"]),
+        )
+        t_set_val_loader_start = time.perf_counter()
         trainer.set_loader(loaders.val_loader, stage="validation")
+        t_set_val_loader_end = time.perf_counter()
+        self._record_loader_setup(
+            "validation",
+            "set_loader_validation",
+            (t_set_val_loader_end - t_set_val_loader_start) * 1e3,
+            observations=int(loaders.val_loader.static_information["observation_count"]),
+        )
+        self._install_batch_fetch_profiler(trainer, stage="training")
+        self._install_epochwise_tile_rebuild(trainer, stage_start_epoch=start_epoch)
         self._log_neighbor_debug_once()
 
         # Restore optimizer state from checkpoint if available.
@@ -896,7 +1730,8 @@ class Trainer:
 
         # Attach per-batch timing profiler if requested (non-invasive monkey-patch).
         # Must be done BEFORE trainer.train() so it intercepts from step 0.
-        if self._should_batch_profile_this_rank():
+        self._profile_step_records = []
+        if self._should_batch_profile_this_rank() or self._should_batch_stats_this_rank():
             training_logger.info(
                 "[BatchProfiler] Attaching to _update_fn "
                 f"(warmup={self._batch_profiler_warmup}, "
@@ -930,6 +1765,8 @@ class Trainer:
             # Report batch profiler results even if training is interrupted mid-stage.
             if self._batch_profiler_enabled:
                 self._report_batch_profiler()
+            if self._batch_stats_enabled:
+                self._report_epoch_profiles()
         stage_wall_seconds = time.perf_counter() - stage_start_time
 
         # Update parameters

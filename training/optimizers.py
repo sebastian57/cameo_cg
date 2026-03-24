@@ -17,7 +17,8 @@ def create_optimizer(name: str, config: Dict[str, Any], global_grad_clip: float 
     Create an optax optimizer from configuration.
 
     Args:
-        name: Optimizer name ("adabelief", "yogi", "adam", "lion", "polyak_sgd", "fromage")
+        name: Optimizer name ("adabelief", "yogi", "adam", "adamw", "lamb",
+            "lion", "polyak_sgd", "fromage")
         config: Optimizer configuration dictionary with hyperparameters
         global_grad_clip: Global gradient clipping value (overrides config if provided)
 
@@ -91,6 +92,24 @@ def create_optimizer(name: str, config: Dict[str, Any], global_grad_clip: float 
             eps=config.get("eps", 1e-8)
         )
 
+    elif name.lower() == "adamw":
+        base_optimizer = optax.adamw(
+            learning_rate=schedule,
+            b1=config.get("beta1", 0.9),
+            b2=config.get("beta2", 0.999),
+            eps=config.get("eps", 1e-8),
+            weight_decay=config.get("weight_decay", 0.0)
+        )
+
+    elif name.lower() == "lamb":
+        base_optimizer = optax.lamb(
+            learning_rate=schedule,
+            b1=config.get("beta1", 0.9),
+            b2=config.get("beta2", 0.999),
+            eps=config.get("eps", 1e-6),
+            weight_decay=config.get("weight_decay", 0.0)
+        )
+
     elif name.lower() == "lion":
         base_optimizer = optax.lion(
             learning_rate=schedule,
@@ -119,15 +138,16 @@ def create_optimizer(name: str, config: Dict[str, Any], global_grad_clip: float 
     else:
         raise ValueError(
             f"Unknown optimizer: {name}. "
-            f"Supported: adabelief, yogi, adam, lion, sgd_nesterov, polyak_sgd, fromage"
+            f"Supported: adabelief, yogi, adam, adamw, lamb, lion, "
+            f"sgd_nesterov, polyak_sgd, fromage"
         )
 
     # Compose optimizer with gradient clipping and weight decay
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(grad_clip),
-        optax.add_decayed_weights(weight_decay=weight_decay),
-        base_optimizer
-    )
+    chain_ops = [optax.clip_by_global_norm(grad_clip)]
+    if name.lower() not in ("adamw", "lamb"):
+        chain_ops.append(optax.add_decayed_weights(weight_decay=weight_decay))
+    chain_ops.append(base_optimizer)
+    optimizer = optax.chain(*chain_ops)
 
     return optimizer
 
@@ -160,4 +180,14 @@ def get_available_optimizers() -> list:
     Returns:
         List of optimizer names
     """
-    return ["adabelief", "yogi", "adam", "lion", "sgd_nesterov", "polyak_sgd", "fromage"]
+    return [
+        "adabelief",
+        "yogi",
+        "adam",
+        "adamw",
+        "lamb",
+        "lion",
+        "sgd_nesterov",
+        "polyak_sgd",
+        "fromage",
+    ]

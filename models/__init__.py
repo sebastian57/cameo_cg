@@ -12,6 +12,7 @@ __all__ = [
     # Energy models
     "PriorEnergy",
     "AllegroModel",
+    "AllegroModelCuEq",
     "MACEModel",
     "PaiNNModel",
     "CombinedModel",
@@ -27,6 +28,7 @@ _LAZY_SYMBOLS = {
     # Models
     "PriorEnergy": ("models.prior_energy", "PriorEnergy"),
     "AllegroModel": ("models.allegro_model", "AllegroModel"),
+    "AllegroModelCuEq": ("models.allegro_cueq_model", "AllegroModelCuEq"),
     "MACEModel": ("models.mace_model", "MACEModel"),
     "PaiNNModel": ("models.painn_model", "PaiNNModel"),
     "CombinedModel": ("models.combined_model", "CombinedModel"),

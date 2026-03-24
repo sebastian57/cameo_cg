@@ -166,7 +166,8 @@ class PaiNNModel:
         R: jax.Array,
         mask: jax.Array,
         species: jax.Array,
-        neighbor: Optional[Any] = None
+        neighbor: Optional[Any] = None,
+        segment_id: Optional[jax.Array] = None,
     ) -> jax.Array:
         """
         Compute PaiNN energy for given coordinates.
@@ -213,7 +214,8 @@ class PaiNNModel:
         R: jax.Array,
         mask: jax.Array,
         species: jax.Array,
-        neighbor: Optional[Any] = None
+        neighbor: Optional[Any] = None,
+        segment_id: Optional[jax.Array] = None,
     ) -> Tuple[jax.Array, jax.Array]:
         """
         Compute energy and forces via automatic differentiation.
@@ -230,7 +232,9 @@ class PaiNNModel:
             forces: Forces, shape (n_atoms, 3)
         """
         def energy_fn(R_):
-            return self.compute_energy(params, R_, mask, species, neighbor)
+            return self.compute_energy(
+                params, R_, mask, species, neighbor, segment_id=segment_id
+            )
 
         E = energy_fn(R)
         F = -jax.grad(energy_fn)(R)

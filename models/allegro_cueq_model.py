@@ -6,7 +6,7 @@ backend (allegro_cueq_v2.py).  Spherical harmonics and tensor products are
 computed by cuequivariance_jax; everything else (neighbor lists, masking,
 parameter initialisation) is identical to AllegroModel.
 
-Two new config keys are recognised under model.allegro (or model.allegro_cueq):
+Two new config keys are recognised under model.allegro (or model.allegro_cuEq / model.allegro_cueq):
   mlp_dtype:  "bfloat16" | "float32"  (default "float32")
               Use bfloat16 inside every MLP; inputs and outputs remain float32.
   logging:    true | false             (default true)
@@ -17,6 +17,7 @@ import jax
 import jax.numpy as jnp
 from jax_md import space, partition
 from typing import Optional, Tuple, Any
+from jax_md_mod import custom_partition
 
 from .allegro_model import _resolve_compute_dtype, _resolve_mlp_activation
 from .neighborlist_utils import resolve_neighbor_list_format, compute_avg_num_neighbors
@@ -37,17 +38,17 @@ class AllegroModelCuEq:
     """
     Allegro equivariant neural network backed by cuEquivariance.
 
-    Interface is identical to AllegroModel.  Pass ``ml_model: allegro_cueq``
-    in your config to select this backend.
+    Interface is identical to AllegroModel.  Pass ``ml_model: allegro_cuEq``
+    (or ``allegro_cueq``) in your config to select this backend.
 
-    New config keys under model.allegro (or model.allegro_cueq):
+    New config keys under model.allegro (or model.allegro_cuEq / model.allegro_cueq):
       mlp_dtype: "bfloat16" | "float32"   - MLP layer precision (default float32)
       logging:   true | false              - debug prints inside JIT (default true)
 
     Example::
 
         model:
-          ml_model: "allegro_cueq"
+          ml_model: "allegro_cuEq"
           allegro:
             max_ell: 2
             num_layers: 3
@@ -115,21 +116,20 @@ class AllegroModelCuEq:
             "mlp_hidden_activation",
             self.allegro_config.get("mlp_activation", "mish"),
         )
-        output_raw = self.allegro_config.pop("mlp_output_activation", "linear")
+        output_raw = self.allegro_config.get("mlp_output_activation", "linear")
         self.mlp_hidden_activation_name, self.mlp_hidden_activation = (
             _resolve_mlp_activation(hidden_raw)
         )
-        self.mlp_output_activation_name, _ = _resolve_mlp_activation(
+        self.mlp_output_activation_name, self.mlp_output_activation = _resolve_mlp_activation(
             output_raw, allow_linear=True
         )
-        # Write the resolved callable back so the factory receives a function
+        # Write resolved callables back so the factory receives functions.
         self.allegro_config["mlp_activation"] = self.mlp_hidden_activation
-        # mlp_output_activation is not supported by the cueq Allegro class;
-        # it has been popped above.
+        self.allegro_config["mlp_output_activation"] = self.mlp_output_activation
 
         # Graph-cap controls
         self.max_edge_multiplier = float(
-            self.allegro_config.pop("max_edge_multiplier", 1.25)
+            self.allegro_config.pop("max_edge_multiplier", 1.1)
         )
         max_edges_cfg = self.allegro_config.pop("max_edges", None)
         self.max_edges = None if max_edges_cfg is None else int(max_edges_cfg)
@@ -175,7 +175,15 @@ class AllegroModelCuEq:
             jnp.asarray(R0, dtype=self.compute_dtype), init_padded_mask
         )
 
-        self.nbrs_init = self.nneigh_fn.allocate(R0_safe, extra_capacity=64)
+        self._neighbor_extra_capacity = int(
+            self.allegro_config.pop("neighbor_extra_capacity", 10)
+        )
+        self.nbrs_init = self.nneigh_fn.allocate(
+            R0_safe, extra_capacity=self._neighbor_extra_capacity
+        )
+        model_logger.info(
+            f"  neighbor extra_capacity = {self._neighbor_extra_capacity}"
+        )
 
         # Compute avg_num_neighbors from actual data (overrides config value)
         n_atoms = int(R0_safe.shape[0])
@@ -215,7 +223,17 @@ class AllegroModelCuEq:
 
         # mlp_dtype flows to Allegro.__init__ via **allegro_kwargs;
         # logging is an explicit param of the factory (not forwarded to Allegro).
-        from .allegro_cueq_v2 import allegro_neighborlist_pp  # lazy cuequivariance import
+        ml_model_type = config.get_ml_model_type()
+        if ml_model_type == "allegro_cueq_fast":
+            from .allegro_cueq_fast_1103 import (
+                allegro_neighborlist_pp,  # lazy cuequivariance import
+            )
+            model_logger.info("  backend         = allegro_cueq_fast_1103")
+        else:
+            from .allegro_cueq_v2 import (
+                allegro_neighborlist_pp,  # lazy cuequivariance import
+            )
+            model_logger.info("  backend         = allegro_cueq_v2")
         self.init_allegro, self.apply_allegro = allegro_neighborlist_pp(
             displacement=self.displacement,
             r_cutoff=self.cutoff,
@@ -283,6 +301,7 @@ class AllegroModelCuEq:
         mask: jax.Array,
         species: jax.Array,
         neighbor: Optional[Any] = None,
+        segment_id: Optional[jax.Array] = None,
     ) -> jax.Array:
         """Compute cuEq Allegro energy for given coordinates."""
         valid_mask = mask > 0
@@ -309,6 +328,13 @@ class AllegroModelCuEq:
                     jnp.asarray(R_masked, dtype=target_dtype), neighbor
                 )
 
+        if segment_id is not None:
+            nbrs = custom_partition.mask_neighbor_list(
+                nbrs,
+                mask=valid_mask.astype(jnp.bool_),
+                segment_id=jnp.asarray(segment_id, dtype=jnp.int32),
+            )
+
         species_masked = jnp.where(valid_mask, species, 0).astype(jnp.int32)
         R_model = jnp.asarray(R_masked, dtype=self.compute_dtype)
 
@@ -325,10 +351,13 @@ class AllegroModelCuEq:
         mask: jax.Array,
         species: jax.Array,
         neighbor: Optional[Any] = None,
+        segment_id: Optional[jax.Array] = None,
     ) -> Tuple[jax.Array, jax.Array]:
         """Compute energy and forces via automatic differentiation."""
         def energy_fn(R_):
-            return self.compute_energy(params, R_, mask, species, neighbor)
+            return self.compute_energy(
+                params, R_, mask, species, neighbor, segment_id=segment_id
+            )
 
         E = energy_fn(R)
         F = -jax.grad(energy_fn)(R)

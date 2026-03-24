@@ -16,6 +16,7 @@ import jax.numpy as jnp
 from jax_md import space, partition
 from chemutils.models.allegro.model import allegro_neighborlist_pp
 from typing import Optional, Tuple, Any
+from jax_md_mod import custom_partition
 
 from .neighborlist_utils import resolve_neighbor_list_format, compute_avg_num_neighbors
 from utils.logging import model_logger
@@ -55,6 +56,7 @@ def _resolve_mlp_activation(value, allow_linear: bool = False) -> tuple[str, Any
         "gelu": jax.nn.gelu,
         "elu": jax.nn.elu,
         "tanh": jnp.tanh,
+        "softplus": jax.nn.softplus,
     }
     if raw not in options:
         extra = ", linear" if allow_linear else ""
@@ -167,7 +169,10 @@ class AllegroModel:
         )
 
         # Allocate initial neighbor list
-        self._neighbor_extra_capacity = 10
+        self.allegro_config = dict(self.allegro_config)
+        self._neighbor_extra_capacity = int(
+            self.allegro_config.pop("neighbor_extra_capacity", 10)
+        )
         self.nbrs_init = self.nneigh_fn.allocate(
             R0_safe, extra_capacity=self._neighbor_extra_capacity
         )
@@ -176,8 +181,7 @@ class AllegroModel:
         # Compute actual average number of neighbors from the initial neighbor list
         # and use it instead of the hardcoded config value. The config value is often
         # wrong (copy-pasted from other models/cutoffs), which mis-scales Allegro's
-        # many-body interaction output. Make a mutable copy of the dict first.
-        self.allegro_config = dict(self.allegro_config)
+        # many-body interaction output.
         hidden_raw = self.allegro_config.get(
             "mlp_hidden_activation",
             self.allegro_config.get("mlp_activation", "mish"),
@@ -316,7 +320,8 @@ class AllegroModel:
         R: jax.Array,
         mask: jax.Array,
         species: jax.Array,
-        neighbor: Optional[Any] = None
+        neighbor: Optional[Any] = None,
+        segment_id: Optional[jax.Array] = None,
     ) -> jax.Array:
         """
         Compute Allegro energy for given coordinates.
@@ -327,6 +332,8 @@ class AllegroModel:
             mask: Validity mask, shape (n_atoms,)
             species: Species IDs, shape (n_atoms,)
             neighbor: Neighbor list (optional, will compute if None)
+            segment_id: Optional segment IDs used to keep packed structures
+                disconnected (same segment only).
 
         Returns:
             Total energy (scalar)
@@ -356,6 +363,13 @@ class AllegroModel:
                 ref_position = getattr(neighbor, "reference_position", None)
                 target_dtype = getattr(ref_position, "dtype", self.compute_dtype)
                 nbrs = self.nneigh_fn.update(jnp.asarray(R_masked, dtype=target_dtype), neighbor)
+
+        if segment_id is not None:
+            nbrs = custom_partition.mask_neighbor_list(
+                nbrs,
+                mask=valid_mask.astype(jnp.bool_),
+                segment_id=jnp.asarray(segment_id, dtype=jnp.int32),
+            )
 
         # Ensure species are valid (masked atoms -> species 0)
         species_masked = jnp.where(valid_mask, species, 0).astype(jnp.int32)
@@ -406,7 +420,8 @@ class AllegroModel:
         R: jax.Array,
         mask: jax.Array,
         species: jax.Array,
-        neighbor: Optional[Any] = None
+        neighbor: Optional[Any] = None,
+        segment_id: Optional[jax.Array] = None,
     ) -> Tuple[jax.Array, jax.Array]:
         """
         Compute energy and forces via automatic differentiation.
@@ -423,7 +438,9 @@ class AllegroModel:
             forces: Forces, shape (n_atoms, 3)
         """
         def energy_fn(R_):
-            return self.compute_energy(params, R_, mask, species, neighbor)
+            return self.compute_energy(
+                params, R_, mask, species, neighbor, segment_id=segment_id
+            )
 
         E = energy_fn(R)
         F = -jax.grad(energy_fn)(R)

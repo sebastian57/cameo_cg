@@ -1,0 +1,58 @@
+model:
+  priors:
+    r0: 2.2466426185087003
+    kr: 0.014045131173977474
+    a:
+    - 0.23564869852131895
+    - 0.12431758937210971
+    - -0.5367592634615864
+    - -0.11028861640370469
+    - 0.36792825514134714
+    - -0.15911532424408417
+    - 0.21460867441622677
+    - -0.6525594289031321
+    - 1.0059195879082627
+    - 0.20997010526895568
+    b:
+    - 0.17483694646455536
+    - 0.45246155738941696
+    - 0.32667845528190276
+    - -0.4849212482540725
+    - 0.2753547819009611
+    - 0.0894131106171544
+    - 0.44921372502511764
+    - -0.1785811528173034
+    - -0.10827535559482866
+    - -1.254142994604482
+    k_dihedral:
+    - 0.4505338579508631
+    - 0.6711770455868561
+    gamma_dihedral:
+    - 0.7257079219535043
+    - 1.6552792776590477
+    k_dih:
+    - 0.4505338579508631
+    - 0.6711770455868561
+    gamma_dih:
+    - 0.7257079219535043
+    - 1.6552792776590477
+    epsilon: 1.0
+    sigma: 3.0
+meta:
+  datasets_used:
+  - data_prep/datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz
+  T: 320.0
+  kB: 0.0019872041
+  angle_terms: 10
+  angle_bins: 400
+  dih_bins: 360
+  min_count: 50
+  ridge: 0.01
+  pseudocount: 1.0
+  spline_enabled: true
+  spline_out: data_prep/datasets/fitted_priors_spline_2g4q4z5k_i4.npz
+  residue_specific_angles: true
+  angle_min_samples: 500
+  kde_bandwidth_factor: 1.0
+  spline_grid_points: 500
+  bond_radial_jacobian_correction: true
