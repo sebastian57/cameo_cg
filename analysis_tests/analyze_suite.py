@@ -110,6 +110,18 @@ FIELDNAMES = [
     'detailed_mean_cosine_similarity',
     'detailed_r2_explained_variance',
     'detailed_variance_ratio_pred_to_ref',
+    'complete_eval_dir',
+    'complete_eval_metrics_json_path',
+    'complete_eval_arrays_npz_path',
+    'complete_eval_error',
+    'complete_eval_n_val_frames',
+    'complete_eval_n_valid_beads',
+    'complete_eval_calibration_slope',
+    'complete_eval_calibration_intercept',
+    'complete_eval_calibration_pearson',
+    'complete_eval_smoothness_mean',
+    'complete_eval_smoothness_p95',
+    'complete_eval_smoothness_max',
 ]
 
 
@@ -718,6 +730,57 @@ def _run_detailed_force_eval_subprocess(
         return json.load(f)
 
 
+def _run_complete_eval_subprocess(
+    config_path: Path,
+    params_path: Path,
+    output_dir: Path,
+    *,
+    devices_per_run: int,
+    max_val_frames: Optional[int],
+    batch_size: Optional[int],
+    smoothness_frames: int = 5,
+    smoothness_perturbations: int = 20,
+    smoothness_sigma: float = 0.01,
+) -> Dict[str, Any]:
+    import json as _json
+
+    script_path = ANALYSIS_DIR / 'complete_eval.py'
+    metrics_json_path = output_dir / 'complete_eval_metrics.json'
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        sys.executable,
+        str(script_path),
+        str(config_path),
+        str(params_path),
+        str(output_dir),
+        '--devices-per-run', str(devices_per_run),
+        '--smoothness-frames', str(smoothness_frames),
+        '--smoothness-perturbations', str(smoothness_perturbations),
+        '--smoothness-sigma', str(smoothness_sigma),
+    ]
+    if max_val_frames is not None:
+        cmd.extend(['--max-val-frames', str(max_val_frames)])
+    if batch_size is not None:
+        cmd.extend(['--batch-size', str(batch_size)])
+
+    proc = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True)
+    if proc.returncode != 0:
+        signal_suffix = f' (signal {-proc.returncode})' if proc.returncode < 0 else ''
+        stderr_tail = proc.stderr.strip()[-1500:]
+        stdout_tail = proc.stdout.strip()[-1500:]
+        details = '\n'.join(part for part in [stderr_tail, stdout_tail] if part)
+        raise RuntimeError(
+            f'complete_eval subprocess failed with exit code {proc.returncode}{signal_suffix}'
+            + (f':\n{details}' if details else '')
+        )
+    if not metrics_json_path.exists():
+        raise FileNotFoundError(f'Complete eval completed but did not write {metrics_json_path}')
+
+    with metrics_json_path.open() as f:
+        return _json.load(f)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description='Summarize ML training testing-suite runs into a CSV and analysis plots.')
     parser.add_argument('input_dir', type=str, help='Single run directory or a directory containing multiple run directories.')
@@ -731,6 +794,12 @@ def main() -> None:
     parser.add_argument('--detailed-max-val-frames', type=int, default=None, help='Optional cap on held-out validation frames for detailed force evaluation.')
     parser.add_argument('--detailed-batch-size', type=int, default=None, help='Frames per vmap chunk for detailed force evaluation. Defaults to all val frames at once.')
     parser.add_argument('--include-incomplete', action='store_true', help='Include runs that did not finish training (skips Complete! marker and checkpoint checks). Requires params.pkl to have been manually extracted from a checkpoint.')
+    parser.add_argument('--complete-eval', action='store_true', help='Run the complete offline diagnostic suite (7 modules: force magnitude, calibration, strain, environment, bead type, top-k, smoothness).')
+    parser.add_argument('--complete-eval-max-val-frames', type=int, default=None, help='Cap on held-out val frames for complete eval.')
+    parser.add_argument('--complete-eval-batch-size', type=int, default=None, help='Frames per vmap chunk for complete eval.')
+    parser.add_argument('--smoothness-frames', type=int, default=5, help='Frames for smoothness test in complete eval.')
+    parser.add_argument('--smoothness-perturbations', type=int, default=20, help='Perturbations per frame for smoothness test.')
+    parser.add_argument('--smoothness-sigma', type=float, default=0.01, help='Gaussian noise std for smoothness test.')
     args = parser.parse_args()
 
     input_path = Path(args.input_dir).resolve()
@@ -750,11 +819,14 @@ def main() -> None:
     tail_plots_dir = analysis_root / 'tail_loss_plots'
     force_eval_plots_dir = analysis_root / 'force_eval_plots'
     detailed_force_eval_root = analysis_root / 'detailed_force_eval'
+    complete_eval_root = analysis_root / 'complete_eval'
     analysis_root.mkdir(parents=True, exist_ok=True)
     tail_plots_dir.mkdir(parents=True, exist_ok=True)
     force_eval_plots_dir.mkdir(parents=True, exist_ok=True)
     if args.detailed_force_eval:
         detailed_force_eval_root.mkdir(parents=True, exist_ok=True)
+    if args.complete_eval:
+        complete_eval_root.mkdir(parents=True, exist_ok=True)
 
     output_csv = Path(args.output_csv).resolve() if args.output_csv else analysis_root / 'summary.csv'
 
@@ -830,6 +902,18 @@ def main() -> None:
             'detailed_r2_explained_variance': float('nan'),
             'detailed_variance_ratio_pred_to_ref': float('nan'),
             'tail_loss_intercept_last_third': float('nan'),
+            'complete_eval_dir': '',
+            'complete_eval_metrics_json_path': '',
+            'complete_eval_arrays_npz_path': '',
+            'complete_eval_error': '',
+            'complete_eval_n_val_frames': float('nan'),
+            'complete_eval_n_valid_beads': float('nan'),
+            'complete_eval_calibration_slope': float('nan'),
+            'complete_eval_calibration_intercept': float('nan'),
+            'complete_eval_calibration_pearson': float('nan'),
+            'complete_eval_smoothness_mean': float('nan'),
+            'complete_eval_smoothness_p95': float('nan'),
+            'complete_eval_smoothness_max': float('nan'),
         }
 
         row.update(_estimate_optimizer_steps_per_epoch(config, devices_per_run=int(args.devices_per_run)))
@@ -963,6 +1047,35 @@ def main() -> None:
                 row['detailed_variance_ratio_pred_to_ref'] = float(detailed_metrics.get('variance_ratio_pred_to_ref', float('nan')))
             except Exception as exc:
                 row['detailed_eval_error'] = str(exc)
+
+        if args.complete_eval and params_path.exists():
+            try:
+                ce_output_dir = complete_eval_root / plot_prefix
+                row['complete_eval_dir'] = str(ce_output_dir)
+                ce_metrics = _run_complete_eval_subprocess(
+                    config_path=config_path,
+                    params_path=params_path,
+                    output_dir=ce_output_dir,
+                    devices_per_run=int(args.devices_per_run),
+                    max_val_frames=args.complete_eval_max_val_frames,
+                    batch_size=args.complete_eval_batch_size,
+                    smoothness_frames=int(args.smoothness_frames),
+                    smoothness_perturbations=int(args.smoothness_perturbations),
+                    smoothness_sigma=float(args.smoothness_sigma),
+                )
+                row['complete_eval_metrics_json_path'] = str(ce_metrics.get('metrics_json_path', ''))
+                row['complete_eval_arrays_npz_path'] = str(ce_metrics.get('arrays_npz_path', ''))
+                row['complete_eval_n_val_frames'] = float(ce_metrics.get('n_val_frames', float('nan')))
+                row['complete_eval_n_valid_beads'] = float(ce_metrics.get('n_valid_beads', float('nan')))
+                row['complete_eval_calibration_slope'] = float(ce_metrics.get('calibration_slope', float('nan')))
+                row['complete_eval_calibration_intercept'] = float(ce_metrics.get('calibration_intercept', float('nan')))
+                row['complete_eval_calibration_pearson'] = float(ce_metrics.get('calibration_pearson', float('nan')))
+                row['complete_eval_smoothness_mean'] = float(ce_metrics.get('smoothness_mean_sensitivity', float('nan')))
+                row['complete_eval_smoothness_p95'] = float(ce_metrics.get('smoothness_p95_sensitivity', float('nan')))
+                row['complete_eval_smoothness_max'] = float(ce_metrics.get('smoothness_max_sensitivity', float('nan')))
+            except Exception as exc:
+                row['complete_eval_error'] = str(exc)
+
         rows.append(row)
 
     _write_csv(rows, output_csv)
