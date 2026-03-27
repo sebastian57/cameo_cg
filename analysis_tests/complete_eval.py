@@ -697,7 +697,18 @@ def compute_complete_eval(
     config.set("model", "train_priors", False)
 
     with open(params_path, "rb") as f:
-        params = pickle.load(f)
+        payload = pickle.load(f)
+
+    params = payload
+    if isinstance(payload, dict):
+        if isinstance(payload.get("params"), dict):
+            params = payload["params"]
+        elif isinstance(payload.get("trainer_state"), dict) and isinstance(payload["trainer_state"].get("params"), dict):
+            params = payload["trainer_state"]["params"]
+
+    if isinstance(params, dict) and "ml" not in params and "allegro" in params:
+        params = dict(params)
+        params["ml"] = params["allegro"]
 
     ref_idx = train_idx[0] if train_idx.size else val_idx[0]
     model = CombinedModel(

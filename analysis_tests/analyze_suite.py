@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import os
 import pickle
 import re
 import subprocess
@@ -220,6 +221,27 @@ def _mean_epoch_time_from_results(results: Dict[str, Any]) -> float:
     return float(np.mean(epoch_times))
 
 
+def _select_eval_venv(config_path: Path) -> tuple[Path, str]:
+    config = ConfigManager(str(config_path))
+    ml_model = config.get_ml_model_type()
+    if ml_model.startswith('allegro_cueq'):
+        venv_dir = Path('/p/project1/cameo/schmidt36/env_cueq_allegro_opt')
+        venv_name = 'env_cueq_allegro_opt'
+    else:
+        venv_dir = Path('/p/project1/cameo/schmidt36/clean_booster_env')
+        venv_name = 'clean_booster_env'
+    python_bin = venv_dir / 'bin' / 'python'
+    return python_bin, venv_name
+
+
+def _subprocess_env_for_config(config_path: Path) -> tuple[Path, str, Dict[str, str]]:
+    python_bin, venv_name = _select_eval_venv(config_path)
+    env = os.environ.copy()
+    env['VIRTUAL_ENV'] = str(python_bin.parent.parent)
+    env['PATH'] = f"{python_bin.parent}:{env.get('PATH', '')}" if env.get('PATH') else str(python_bin.parent)
+    return python_bin, venv_name, env
+
+
 def _resolve_data_path(config: ConfigManager) -> Path:
     data_path = Path(config.get_data_path())
     if not data_path.is_absolute():
@@ -341,7 +363,19 @@ def _estimate_optimizer_steps_per_epoch(config: ConfigManager, devices_per_run: 
 
 def _load_params(params_path: Path) -> Dict[str, Any]:
     with open(params_path, 'rb') as f:
-        return pickle.load(f)
+        payload = pickle.load(f)
+
+    params = payload
+    if isinstance(payload, dict):
+        if isinstance(payload.get('params'), dict):
+            params = payload['params']
+        elif isinstance(payload.get('trainer_state'), dict) and isinstance(payload['trainer_state'].get('params'), dict):
+            params = payload['trainer_state']['params']
+
+    if isinstance(params, dict) and 'ml' not in params and 'allegro' in params:
+        params = dict(params)
+        params['ml'] = params['allegro']
+    return params
 
 
 def _resolve_spline_path_if_needed(config: ConfigManager) -> None:
@@ -606,7 +640,7 @@ def _write_csv(rows: List[Dict[str, Any]], output_csv: Path) -> None:
             writer.writerow(row)
 
 
-def _save_tail_fit_plot(train_losses: List[float], output_path: Path, *, title: str) -> str:
+def _save_tail_fit_plot(train_losses: List[float], val_losses: Optional[List[float]], output_path: Path, *, title: str) -> str:
     fit = _fit_tail_line(train_losses)
     if fit is None:
         return 'Not enough finite training-loss points for a linear tail fit.'
@@ -627,11 +661,20 @@ def _save_tail_fit_plot(train_losses: List[float], output_path: Path, *, title: 
 
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.plot(x_all, y_all, color='tab:blue', linewidth=1.8, label='Train loss')
+    if val_losses:
+        y_val = np.asarray(val_losses, dtype=np.float64)
+        if y_val.size > 0:
+            n_val = min(y_val.size, x_all.size)
+            x_val = x_all[:n_val]
+            y_val = y_val[:n_val]
+            mask = np.isfinite(y_val)
+            if np.any(mask):
+                ax.plot(x_val[mask], y_val[mask], color='tab:green', linewidth=1.6, label='Val loss')
     ax.plot(x_tail, fit['y_tail'], color='tab:orange', linewidth=2.2, label='Tail segment')
     ax.plot(x_tail, y_fit, color='tab:red', linestyle='--', linewidth=2.0, label=f"Linear fit (slope={fit['slope']:.4g})")
     ax.axvline(float(fit['tail_start']), color='gray', linestyle=':', linewidth=1.2, label='Tail start')
     ax.set_xlabel('Logged epoch index')
-    ax.set_ylabel('Training loss')
+    ax.set_ylabel('Loss')
     ax.set_title(title)
     ax.grid(True, alpha=0.3)
     ax.legend(loc='best')
@@ -673,6 +716,59 @@ def _save_force_eval_plots(force_eval_data: Dict[str, Any], plot_prefix: str, fo
     }
 
 
+def _run_basic_force_eval_subprocess(
+    config_path: Path,
+    params_path: Path,
+    force_eval_plots_dir: Path,
+    *,
+    plot_prefix: str,
+    devices_per_run: int,
+    n_frames: int,
+    seed: int,
+) -> Dict[str, Any]:
+    import json
+
+    script_path = ANALYSIS_DIR / 'basic_force_eval.py'
+    metrics_json_path = force_eval_plots_dir / f'{plot_prefix}_force_eval_metrics.json'
+    force_eval_plots_dir.mkdir(parents=True, exist_ok=True)
+
+    python_bin, venv_name, env = _subprocess_env_for_config(config_path)
+    print(f'[analyze_suite] basic_force_eval: using {venv_name} for {config_path.name}', flush=True)
+    cmd = [
+        str(python_bin),
+        str(script_path),
+        str(config_path),
+        str(params_path),
+        str(force_eval_plots_dir),
+        '--plot-prefix', str(plot_prefix),
+        '--devices-per-run', str(devices_per_run),
+        '--frames', str(n_frames),
+        '--seed', str(seed),
+    ]
+
+    proc = subprocess.run(
+        cmd,
+        cwd=str(PROJECT_ROOT),
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    if proc.returncode != 0:
+        signal_suffix = f' (signal {-proc.returncode})' if proc.returncode < 0 else ''
+        stderr_tail = proc.stderr.strip()[-1500:]
+        stdout_tail = proc.stdout.strip()[-1500:]
+        details = '\n'.join(part for part in [stderr_tail, stdout_tail] if part)
+        raise RuntimeError(
+            f'basic_force_eval subprocess failed with exit code {proc.returncode}{signal_suffix}'
+            + (f':\n{details}' if details else '')
+        )
+    if not metrics_json_path.exists():
+        raise FileNotFoundError(f'Basic force evaluation completed but did not write {metrics_json_path}')
+
+    with metrics_json_path.open() as f:
+        return json.load(f)
+
+
 def _run_detailed_force_eval_subprocess(
     config_path: Path,
     params_path: Path,
@@ -690,8 +786,10 @@ def _run_detailed_force_eval_subprocess(
     metrics_json_path = output_dir / 'metrics.json'
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    python_bin, venv_name, env = _subprocess_env_for_config(config_path)
+    print(f'[analyze_suite] detailed_force_eval: using {venv_name} for {config_path.name}', flush=True)
     cmd = [
-        sys.executable,
+        str(python_bin),
         str(script_path),
         str(config_path),
         str(params_path),
@@ -713,6 +811,7 @@ def _run_detailed_force_eval_subprocess(
         cwd=str(PROJECT_ROOT),
         capture_output=True,
         text=True,
+        env=env,
     )
     if proc.returncode != 0:
         signal_suffix = f' (signal {-proc.returncode})' if proc.returncode < 0 else ''
@@ -748,8 +847,10 @@ def _run_complete_eval_subprocess(
     metrics_json_path = output_dir / 'complete_eval_metrics.json'
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    python_bin, venv_name, env = _subprocess_env_for_config(config_path)
+    print(f'[analyze_suite] complete_eval: using {venv_name} for {config_path.name}', flush=True)
     cmd = [
-        sys.executable,
+        str(python_bin),
         str(script_path),
         str(config_path),
         str(params_path),
@@ -764,7 +865,7 @@ def _run_complete_eval_subprocess(
     if batch_size is not None:
         cmd.extend(['--batch-size', str(batch_size)])
 
-    proc = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True)
+    proc = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True, env=env)
     if proc.returncode != 0:
         signal_suffix = f' (signal {-proc.returncode})' if proc.returncode < 0 else ''
         stderr_tail = proc.stderr.strip()[-1500:]
@@ -931,7 +1032,7 @@ def main() -> None:
             row['tail_loss_intercept_last_third'] = float(tail_fit['intercept']) if tail_fit is not None else float('nan')
             row['n_logged_epochs'] = len(train_losses)
             row['final_val_loss'] = _safe_float(val_losses[-1]) if val_losses else float('nan')
-            tail_plot_error = _save_tail_fit_plot(train_losses, tail_plot_path, title=f'{run_dir.name}: tail loss linear fit')
+            tail_plot_error = _save_tail_fit_plot(train_losses, val_losses, tail_plot_path, title=f'{run_dir.name}: tail loss linear fit')
             if tail_plot_error:
                 row['tail_fit_plot_error'] = tail_plot_error
             else:
@@ -962,12 +1063,14 @@ def main() -> None:
 
         if not args.skip_force_eval and params_path.exists():
             try:
-                force_eval_data = _collect_force_eval_data(
+                force_eval_metrics = _run_basic_force_eval_subprocess(
                     config_path=config_path,
                     params_path=params_path,
+                    force_eval_plots_dir=force_eval_plots_dir,
+                    plot_prefix=plot_prefix,
+                    devices_per_run=int(args.devices_per_run),
                     n_frames=int(args.force_eval_frames),
                     seed=int(args.force_eval_seed),
-                    devices_per_run=int(args.devices_per_run),
                 )
                 for metric_key in (
                     'force_eval_frames',
@@ -979,8 +1082,15 @@ def main() -> None:
                     'force_magnitude_diff_std',
                     'force_magnitude_abs_diff_mean',
                 ):
-                    row[metric_key] = force_eval_data[metric_key]
-                row.update(_save_force_eval_plots(force_eval_data, plot_prefix, force_eval_plots_dir))
+                    row[metric_key] = force_eval_metrics[metric_key]
+                row.update({
+                    'force_components_plot_path': force_eval_metrics['force_components_plot_path'],
+                    'force_distribution_plot_path': force_eval_metrics['force_distribution_plot_path'],
+                    'force_magnitude_plot_path': force_eval_metrics['force_magnitude_plot_path'],
+                    'force_vs_position_plot_path': force_eval_metrics['force_vs_position_plot_path'],
+                    'force_gaussian_plot_path': force_eval_metrics['force_gaussian_plot_path'],
+                    'force_gaussian_csv_path': force_eval_metrics['force_gaussian_csv_path'],
+                })
             except Exception as exc:
                 for key in (
                     'force_eval_frames',
