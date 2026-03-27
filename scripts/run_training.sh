@@ -53,8 +53,13 @@ run_training_err_trap() {
 }
 trap run_training_err_trap ERR
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+if [[ -n "${CAMEO_CG_PROJECT_ROOT:-}" ]]; then
+    PROJECT_ROOT="${CAMEO_CG_PROJECT_ROOT}"
+    SCRIPT_DIR="${PROJECT_ROOT}/scripts"
+else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+    PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+fi
 
 is_truthy() {
     case "${1,,}" in

@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-task=4
-#SBATCH --time=04:00:00
+#SBATCH --time=02:00:00
 #SBATCH --partition=develbooster
 #SBATCH --output=outputs/slurm-analysis-%j.out
 
@@ -23,8 +23,13 @@
 
 set -Eeuo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+    PROJECT_ROOT="${SLURM_SUBMIT_DIR}"
+    SCRIPT_DIR="${PROJECT_ROOT}/scripts"
+else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+    PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+fi
 
 # --- Parse named arguments ---
 INPUT_DIR=""
@@ -60,7 +65,18 @@ fi
 INPUT_DIR="$(cd "${INPUT_DIR}" && pwd -P)"
 
 # --- Environment setup (shared with training scripts) ---
-export CONFIG_FILE="${INPUT_DIR}/config.yaml"
+# INPUT_DIR may be a suite dir or an aggregate dir with symlinked runs.
+# Find a config to decide which venv to activate.
+_found_config="$(find -L "${INPUT_DIR}" -maxdepth 4 -name "config_runtime.yaml" | sort | head -1)"
+if [[ -z "${_found_config}" ]]; then
+    _found_config="$(find -L "${INPUT_DIR}" -maxdepth 4 -name "config_input.yaml" | sort | head -1)"
+fi
+if [[ -z "${_found_config}" ]]; then
+    echo "ERROR: Could not find config_runtime.yaml or config_input.yaml under ${INPUT_DIR}" >&2
+    exit 1
+fi
+export CONFIG_FILE="${_found_config}"
+unset _found_config
 source "${SCRIPT_DIR}/slurm_env.sh"
 
 export CUDA_VISIBLE_DEVICES=0

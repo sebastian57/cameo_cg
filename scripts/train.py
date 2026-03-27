@@ -366,7 +366,7 @@ def _validate_tiled_mode_constraints(config: ConfigManager) -> None:
     if not config.tile_train_only_enabled():
         raise ValueError(
             "data.tile_train_only=false is not supported yet. "
-            "Phase 1 tiled mode is training-only."
+            "Tiled runs currently assume training tiles are built only from the training split."
         )
 
 
@@ -493,6 +493,111 @@ def _compute_force_loss_weights(split: dict) -> np.ndarray:
     return np.asarray(weights, dtype=np.float32)
 
 
+def _estimate_avg_num_neighbors(
+    *,
+    R: np.ndarray,
+    mask: np.ndarray,
+    cutoff: float,
+    segment_id: Optional[np.ndarray] = None,
+    max_samples: int = 32,
+    seed: int = 0,
+) -> float:
+    """
+    Estimate the average number of neighbors from a representative sample.
+
+    This avoids seeding Allegro normalization from a single initialization
+    frame or tile.
+    """
+    n_items = int(R.shape[0])
+    if n_items <= 0:
+        return 0.0
+
+    n_pick = min(n_items, max(1, int(max_samples)))
+    if n_pick == n_items:
+        sample_indices = np.arange(n_items, dtype=np.int32)
+    else:
+        rng = np.random.RandomState(seed)
+        sample_indices = np.sort(rng.choice(n_items, size=n_pick, replace=False).astype(np.int32))
+
+    cutoff_sq = float(cutoff) ** 2
+    total_neighbors = 0.0
+    total_valid_nodes = 0
+
+    for idx in sample_indices:
+        valid = np.asarray(mask[idx] > 0, dtype=bool)
+        if not np.any(valid):
+            continue
+
+        coords = np.asarray(R[idx][valid], dtype=np.float32)
+        if coords.shape[0] <= 1:
+            total_valid_nodes += int(coords.shape[0])
+            continue
+
+        diffs = coords[:, None, :] - coords[None, :, :]
+        dist_sq = np.sum(diffs * diffs, axis=-1, dtype=np.float32)
+        within_cutoff = (dist_sq < cutoff_sq) & (dist_sq > 0.0)
+
+        if segment_id is not None:
+            seg = np.asarray(segment_id[idx][valid], dtype=np.int32)
+            within_cutoff &= seg[:, None] == seg[None, :]
+
+        total_neighbors += float(np.sum(within_cutoff, dtype=np.float64))
+        total_valid_nodes += int(coords.shape[0])
+
+    if total_valid_nodes <= 0:
+        return 0.0
+    return float(total_neighbors / float(total_valid_nodes))
+
+
+def _get_runtime_allegro_config_section(config: ConfigManager) -> dict:
+    """Return the config section that the active Allegro backend will read."""
+    model_cfg = config._config.setdefault("model", {})
+    ml_model_type = str(config.get_ml_model_type()).strip().lower()
+
+    if ml_model_type in ("allegro_cueq", "allegro_cueq_fast"):
+        for key in ("allegro_cueq", "allegro_cuEq"):
+            section = model_cfg.get(key)
+            if isinstance(section, dict):
+                return section
+
+    return model_cfg.setdefault("allegro", {})
+
+
+def _configure_runtime_avg_num_neighbors(
+    config: ConfigManager,
+    train_split: dict,
+    seed: int,
+) -> None:
+    """Estimate avg_num_neighbors from sampled training structures/tiles and pin it in config."""
+    ml_model_type = str(config.get_ml_model_type()).strip().lower()
+    if not ml_model_type.startswith("allegro"):
+        return
+
+    estimate = _estimate_avg_num_neighbors(
+        R=np.asarray(train_split["R"], dtype=np.float32),
+        mask=np.asarray(train_split["mask"], dtype=np.float32),
+        cutoff=float(config.get_cutoff()),
+        segment_id=np.asarray(train_split["segment_id"], dtype=np.int32)
+        if "segment_id" in train_split
+        else None,
+        max_samples=32,
+        seed=seed,
+    )
+
+    allegro_cfg = _get_runtime_allegro_config_section(config)
+    previous = allegro_cfg.get("avg_num_neighbors")
+    allegro_cfg["avg_num_neighbors"] = float(estimate)
+    allegro_cfg["avg_num_neighbors_source"] = "dataset_sample"
+    batch_mode = config.get_batch_mode()
+    training_logger.info(
+        "[RuntimeConfig] avg_num_neighbors set from sampled training %s: %.3f "
+        "(previous config value: %s, samples<=32).",
+        "tiles" if batch_mode == "tiled" else "structures",
+        float(estimate),
+        previous,
+    )
+
+
 def _attach_batch_metadata(split: dict, sample_ids: np.ndarray) -> dict:
     """Attach uniform profiling metadata to a training split."""
     annotated = dict(split)
@@ -539,6 +644,49 @@ def _build_validation_split(dataset: dict, start: int, stop: int) -> dict:
     }
     sample_ids = np.arange(start, stop, dtype=np.int32)
     return _attach_batch_metadata(val_split, sample_ids)
+
+
+def _build_tiled_validation_split(
+    dataset: dict,
+    start: int,
+    stop: int,
+    config: ConfigManager,
+    seed: int,
+) -> dict:
+    """Build a held-out tiled validation split with real validation structures."""
+    val_R = np.asarray(dataset["R"][start:stop], dtype=np.float32)
+    val_F = np.asarray(dataset["F"][start:stop], dtype=np.float32)
+    val_mask = np.asarray(dataset["mask"][start:stop], dtype=np.float32)
+    val_species = np.asarray(dataset["species"][start:stop], dtype=np.int32)
+
+    if val_R.shape[0] == 0:
+        raise ValueError("Validation split is empty; cannot build tiled validation dataset.")
+
+    structure_ids = np.arange(start, stop, dtype=np.int32)
+    tiled = build_tiled_dataset(
+        R=val_R,
+        F=val_F,
+        mask=val_mask,
+        species=val_species,
+        structure_ids=structure_ids,
+        target_beads=config.get_tile_target_beads(),
+        bucket_beads=config.get_tile_bucket_beads(),
+        shuffle_structures=False,
+        sort_by_size=config.tile_sort_by_size_enabled(),
+        drop_incomplete=False,
+        seed=seed,
+    )
+    tiled = _attach_batch_metadata(tiled, np.arange(tiled["R"].shape[0], dtype=np.int32))
+    data_logger.info(
+        "[Tiling][Validation] Built %d validation tiles from %d held-out structures "
+        "(target_beads=%d, bucket_beads=%s, sort_by_size=%s).",
+        int(tiled["R"].shape[0]),
+        int(val_R.shape[0]),
+        int(config.get_tile_target_beads()),
+        config.get_tile_bucket_beads(),
+        bool(config.tile_sort_by_size_enabled()),
+    )
+    return tiled
 
 
 def _build_tiled_train_source(dataset: dict, n_train: int) -> dict:
@@ -851,6 +999,9 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         config=config,
         seed=split_seed,
     )
+    _configure_runtime_avg_num_neighbors(config, train_split, split_seed)
+    config.save(config_path)
+    training_logger.info(f"[Config] Updated runtime config saved to: {config_path}")
 
     # ===== Initialize model =====
     # Important for tiled mode: initialize neighbor list state with the same
@@ -887,16 +1038,24 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     train_loader_kwargs = _build_loader_kwargs(train_split)
     train_loader = NumpyDataLoader(**train_loader_kwargs)
 
-    # Use training data for validation if validation set is too small/disabled.
-    # In tiled mode, validation currently reuses tiled batches to keep the
-    # particle axis fixed and avoid neighbor-list reference shape mismatches.
+    # Use training data for validation only when the held-out split is disabled
+    # or too small for batching. Tiled mode now builds a separate packed
+    # validation set so model selection sees held-out structures.
     if config.get_batch_mode() == "tiled":
-        data_logger.warning(
-            "[Tiling] Validation currently reuses tiled training loader "
-            "(particle axis N=%d). Untiled validation is disabled in Phase 1.",
-            int(train_split["R"].shape[1]),
-        )
-        val_loader = train_loader
+        if N_val == 0 or val_fraction == 0.0:
+            data_logger.warning(
+                "[Tiling] No held-out validation structures available; using training loader for validation."
+            )
+            val_loader = train_loader
+        else:
+            val_split = _build_tiled_validation_split(
+                dataset=dataset,
+                start=N_train,
+                stop=N_train + N_val,
+                config=config,
+                seed=split_seed,
+            )
+            val_loader = NumpyDataLoader(**_build_loader_kwargs(val_split))
     elif N_val == 0 or val_fraction == 0.0:
         val_loader = train_loader
     else:
@@ -1182,6 +1341,13 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
             config=config,
             seed=split_seed,
         )
+        _configure_runtime_avg_num_neighbors(config, train_split, split_seed)
+        config.save(config_path)
+        training_logger.info(
+            "[Config][Bucket %d] Updated runtime config saved to: %s",
+            bucket_idx,
+            config_path,
+        )
 
         if config.get_batch_mode() == "tiled":
             R0 = train_split["R"][0]
@@ -1208,13 +1374,21 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
         train_loader_kwargs = _build_loader_kwargs(train_split)
         train_loader = NumpyDataLoader(**train_loader_kwargs)
         if config.get_batch_mode() == "tiled":
-            val_loader = train_loader
-            data_logger.warning(
-                "[Tiling][Bucket %d] Validation reuses tiled training loader "
-                "(particle axis N=%d).",
-                bucket_idx,
-                int(train_split["R"].shape[1]),
-            )
+            if N_val == 0 or val_fraction == 0.0:
+                val_loader = train_loader
+                data_logger.warning(
+                    "[Tiling][Bucket %d] No held-out validation structures available; using training loader for validation.",
+                    bucket_idx,
+                )
+            else:
+                val_split = _build_tiled_validation_split(
+                    dataset=dataset,
+                    start=N_train,
+                    stop=N_train + N_val,
+                    config=config,
+                    seed=split_seed,
+                )
+                val_loader = NumpyDataLoader(**_build_loader_kwargs(val_split))
         else:
             val_loader = (
                 NumpyDataLoader(
