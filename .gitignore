@@ -10,6 +10,9 @@ force_matching.log
 configs_testing/
 tiling_testing/
 test_configs/
+configs_cleanup_val/
+full_eval/
+saved_models/
 # --- crash dumps / core files ---
 core.*
 
