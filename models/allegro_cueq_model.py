@@ -184,19 +184,42 @@ class AllegroModelCuEq(BaseMLModel):
             f"  neighbor extra_capacity = {self._neighbor_extra_capacity}"
         )
 
-        # Compute avg_num_neighbors from actual data (overrides config value)
+        # Resolve avg_num_neighbors without letting a single initialization
+        # tile override a dataset-sampled runtime calibration.
         n_atoms = int(R0_safe.shape[0])
         actual_avg = compute_avg_num_neighbors(self.nbrs_init, n_atoms)
-        config_avg = self.allegro_config.get("avg_num_neighbors", 12)
-        if abs(actual_avg - config_avg) > 2.0:
-            model_logger.warning(
-                f"avg_num_neighbors: config={config_avg}, "
-                f"computed from data={actual_avg:.1f}. Using computed value."
+        config_avg = float(self.allegro_config.get("avg_num_neighbors", 12))
+        avg_source = str(self.allegro_config.pop("avg_num_neighbors_source", "auto")).strip().lower()
+        if avg_source in ("dataset_sample", "config"):
+            effective_avg = config_avg
+            if abs(actual_avg - config_avg) > 2.0:
+                model_logger.info(
+                    "avg_num_neighbors: honoring configured %.1f from %s; "
+                    "initial neighbor list estimate was %.1f.",
+                    config_avg,
+                    avg_source,
+                    actual_avg,
+                )
+            else:
+                model_logger.info(
+                    "avg_num_neighbors = %.1f (configured from %s; initial estimate %.1f)",
+                    config_avg,
+                    avg_source,
+                    actual_avg,
+                )
+        else:
+            effective_avg = actual_avg
+            if abs(actual_avg - config_avg) > 2.0:
+                model_logger.warning(
+                    "avg_num_neighbors: config=%s, computed from data=%.1f. Using computed value.",
+                    config_avg,
+                    actual_avg,
+                )
+            model_logger.info(
+                "avg_num_neighbors = %.1f (computed from initial neighbor list)",
+                actual_avg,
             )
-        self.allegro_config["avg_num_neighbors"] = actual_avg
-        model_logger.info(
-            f"avg_num_neighbors = {actual_avg:.1f} (computed from initial neighbor list)"
-        )
+        self.allegro_config["avg_num_neighbors"] = float(effective_avg)
 
         if self.max_edges is not None:
             model_logger.info(
