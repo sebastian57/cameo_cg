@@ -108,6 +108,40 @@ Loss curves are also auto-plotted at the end of training.
 
 ---
 
+## Export
+
+### Post-hoc MLIR Export from Saved Params
+
+Use this when training was pure ML (`model.use_priors: false`) but you want
+to reattach fixed priors only for deployment.
+
+```bash
+python export/reexport_mlir.py \
+    /path/to/model_params.pkl \
+    /path/to/model_config.yaml \
+    --mode combined \
+    --prior-source config \
+    --output-name model_with_priors
+```
+
+This writes:
+- `model_with_priors.mlir`
+- `model_with_priors_params.pkl`
+- `model_with_priors_config.yaml`
+
+Use `--mode ml-only` to force an ML-only re-export. Use
+`--prior-source params` if the input pickle already contains a prior block and
+you want to preserve it instead of replacing it with the fixed config priors.
+
+Submit to a GPU node with:
+
+```bash
+sbatch export/run_reexport.sh /path/to/model_params.pkl /path/to/export_priors_minimal.yaml \
+    --mode combined --prior-source config --output-name model_with_priors
+```
+
+---
+
 ## Data Preparation
 
 ### Coarse-Graining
