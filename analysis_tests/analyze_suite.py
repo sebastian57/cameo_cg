@@ -553,6 +553,118 @@ def _latest_file(directory: Path, pattern: str) -> Path | None:
     return matches[-1] if matches else None
 
 
+def _job_tag_from_log_path(log_path: Optional[Path]) -> str:
+    if log_path is None:
+        return ''
+    match = re.match(r'^train_(.+)\.log$', log_path.name)
+    return match.group(1) if match else ''
+
+
+def _resolve_slurm_path(run_dir: Path, *, include_incomplete: bool = False) -> Path | None:
+    slurm_path = _latest_file(run_dir, 'slurm-*.out')
+    if slurm_path is not None and slurm_path.exists():
+        return slurm_path
+    if not include_incomplete:
+        return None
+
+    log_path = _latest_file(run_dir, 'train_*.log')
+    job_tag = _job_tag_from_log_path(log_path)
+    if not job_tag:
+        return None
+
+    bootstrap_path = run_dir.parent / f'slurm-bootstrap-{job_tag}.out'
+    if bootstrap_path.exists():
+        return bootstrap_path
+    return None
+
+
+def _find_latest_checkpoint(checkpoint_dir: Path) -> Path | None:
+    if not checkpoint_dir.exists():
+        return None
+
+    checkpoints = list(checkpoint_dir.glob('epoch*.pkl')) + list(checkpoint_dir.glob('stage_*.pkl'))
+    checkpoints = [p for p in checkpoints if not p.name.endswith('.meta.pkl')]
+    if not checkpoints:
+        return None
+
+    return max(checkpoints, key=lambda p: p.stat().st_mtime)
+
+
+def _extract_params_from_checkpoint_payload(payload: Any) -> Any:
+    if isinstance(payload, dict):
+        if 'best_params' in payload:
+            return payload['best_params']
+        if 'trainer_state' in payload and 'params' in payload['trainer_state']:
+            return payload['trainer_state']['params']
+        if 'params' in payload:
+            return payload['params']
+        raise ValueError(f'unexpected checkpoint structure. Keys: {list(payload.keys())}')
+
+    if hasattr(payload, 'best_inference_params'):
+        return payload.best_inference_params
+    if hasattr(payload, 'params'):
+        return payload.params
+
+    raise TypeError(f'cannot extract params from checkpoint of type {type(payload)}')
+
+
+def _write_params_from_checkpoint(checkpoint_path: Path, params_path: Path) -> None:
+    with open(checkpoint_path, 'rb') as f:
+        payload = pickle.load(f)
+
+    params = _extract_params_from_checkpoint_payload(payload)
+    params_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = params_path.with_suffix(params_path.suffix + '.tmp')
+    with open(tmp_path, 'wb') as f:
+        pickle.dump(params, f)
+    os.replace(tmp_path, params_path)
+
+
+def _resolve_checkpoint_path(
+    config: ConfigManager,
+    run_dir: Path,
+    *,
+    include_incomplete: bool = False,
+) -> Path | None:
+    model_name = f'{config.get_model_context()}_{config.get_model_id()}'
+    export_checkpoint = run_dir / 'exports' / f'{model_name}_checkpoint.pkl'
+    if export_checkpoint.exists():
+        return export_checkpoint
+    if not include_incomplete:
+        return export_checkpoint
+
+    checkpoint_dir = Path(config.get_checkpoint_path())
+    latest_checkpoint = _find_latest_checkpoint(checkpoint_dir)
+    if latest_checkpoint is not None:
+        return latest_checkpoint
+    return export_checkpoint
+
+
+def _ensure_params_path(
+    config: ConfigManager,
+    run_dir: Path,
+    *,
+    include_incomplete: bool = False,
+) -> tuple[Path, Optional[str]]:
+    model_name = f'{config.get_model_context()}_{config.get_model_id()}'
+    params_path = run_dir / 'exports' / f'{model_name}_params.pkl'
+    if params_path.exists():
+        return params_path, None
+    if not include_incomplete:
+        return params_path, None
+
+    checkpoint_path = _resolve_checkpoint_path(config, run_dir, include_incomplete=True)
+    if checkpoint_path is None or not checkpoint_path.exists():
+        return params_path, 'missing checkpoint for automatic params extraction'
+
+    try:
+        _write_params_from_checkpoint(checkpoint_path, params_path)
+    except Exception as exc:
+        return params_path, f'auto-extract failed from {checkpoint_path.name}: {exc}'
+
+    return params_path, None
+
+
 def _resolve_input_run_dirs(input_path: Path) -> List[Path]:
     if _is_run_dir(input_path):
         return [input_path]
@@ -583,7 +695,7 @@ def _read_text_if_exists(path: Optional[Path]) -> str:
 
 def _completed_run_reason(run_dir: Path, include_incomplete: bool = False) -> tuple[bool, str]:
     log_path = _latest_file(run_dir, 'train_*.log')
-    slurm_path = _latest_file(run_dir, 'slurm-*.out')
+    slurm_path = _resolve_slurm_path(run_dir, include_incomplete=include_incomplete)
     runtime_config = run_dir / 'config_runtime.yaml'
     input_config = run_dir / 'config_input.yaml'
     config_path = runtime_config if runtime_config.exists() else input_config
@@ -592,7 +704,7 @@ def _completed_run_reason(run_dir: Path, include_incomplete: bool = False) -> tu
         return False, 'missing config_runtime.yaml/config_input.yaml'
     if log_path is None or not log_path.exists():
         return False, 'missing train log'
-    if slurm_path is None or not slurm_path.exists():
+    if (slurm_path is None or not slurm_path.exists()) and not include_incomplete:
         return False, 'missing slurm copy'
 
     if not include_incomplete:
@@ -610,9 +722,9 @@ def _completed_run_reason(run_dir: Path, include_incomplete: bool = False) -> tu
             return False, 'run does not show final Complete! marker'
 
     config = ConfigManager(str(config_path))
-    model_name = f'{config.get_model_context()}_{config.get_model_id()}'
-    export_dir = run_dir / 'exports'
-    params_path = export_dir / f'{model_name}_params.pkl'
+    params_path, params_error = _ensure_params_path(config, run_dir, include_incomplete=include_incomplete)
+    if params_error is not None:
+        return False, params_error
     if not params_path.exists():
         return False, f'missing params export: {params_path.name}'
 
@@ -894,7 +1006,7 @@ def main() -> None:
     parser.add_argument('--detailed-shuffle-repeats', type=int, default=8, help='Number of shuffled-baseline repeats for detailed force evaluation.')
     parser.add_argument('--detailed-max-val-frames', type=int, default=None, help='Optional cap on held-out validation frames for detailed force evaluation.')
     parser.add_argument('--detailed-batch-size', type=int, default=None, help='Frames per vmap chunk for detailed force evaluation. Defaults to all val frames at once.')
-    parser.add_argument('--include-incomplete', action='store_true', help='Include runs that did not finish training (skips Complete! marker and checkpoint checks). Requires params.pkl to have been manually extracted from a checkpoint.')
+    parser.add_argument('--include-incomplete', action='store_true', help='Include runs that did not finish training. Auto-extracts params from the latest checkpoint when needed and accepts suite-level bootstrap slurm logs for active runs.')
     parser.add_argument('--complete-eval', action='store_true', help='Run the complete offline diagnostic suite (7 modules: force magnitude, calibration, strain, environment, bead type, top-k, smoothness).')
     parser.add_argument('--complete-eval-max-val-frames', type=int, default=None, help='Cap on held-out val frames for complete eval.')
     parser.add_argument('--complete-eval-batch-size', type=int, default=None, help='Frames per vmap chunk for complete eval.')
@@ -942,10 +1054,10 @@ def main() -> None:
         config = ConfigManager(str(config_path))
         model_name = f'{config.get_model_context()}_{config.get_model_id()}'
         export_dir = run_dir / 'exports'
-        params_path = export_dir / f'{model_name}_params.pkl'
-        checkpoint_path = export_dir / f'{model_name}_checkpoint.pkl'
+        params_path, params_error = _ensure_params_path(config, run_dir, include_incomplete=args.include_incomplete)
+        checkpoint_path = _resolve_checkpoint_path(config, run_dir, include_incomplete=args.include_incomplete)
         log_path = _latest_file(run_dir, 'train_*.log')
-        slurm_path = _latest_file(run_dir, 'slurm-*.out')
+        slurm_path = _resolve_slurm_path(run_dir, include_incomplete=args.include_incomplete)
         run_date, run_name = _parse_run_dir_name(run_dir.name)
         plot_prefix = run_dir.name
         tail_plot_path = tail_plots_dir / f'{plot_prefix}_tail_loss_linear_fit.png'
@@ -979,7 +1091,7 @@ def main() -> None:
             'log_path': str(log_path) if log_path is not None else '',
             'slurm_path': str(slurm_path) if slurm_path is not None else '',
             'params_path': str(params_path),
-            'checkpoint_path': str(checkpoint_path),
+            'checkpoint_path': str(checkpoint_path) if checkpoint_path is not None else '',
             'force_eval_error': '',
             'detailed_force_eval_dir': '',
             'detailed_metrics_json_path': '',
@@ -1019,6 +1131,11 @@ def main() -> None:
 
         row.update(_estimate_optimizer_steps_per_epoch(config, devices_per_run=int(args.devices_per_run)))
 
+        if params_error and row['status'] == 'ok':
+            row['status'] = 'missing_params'
+            row['force_eval_error'] = params_error
+            row['force_eval_plot_error'] = params_error
+
         train_losses: List[float] = []
         val_losses: List[float] = []
         if log_path is not None and log_path.exists():
@@ -1046,7 +1163,7 @@ def main() -> None:
             row['status'] = 'missing_log'
             row['tail_fit_plot_error'] = 'Training log missing or no parseable training-loss history found.'
 
-        if checkpoint_path.exists():
+        if checkpoint_path is not None and checkpoint_path.exists():
             metadata = _load_checkpoint_metadata(checkpoint_path)
             row['job_id'] = metadata.get('job_id', '')
             row['epoch_wall_seconds'] = _mean_epoch_time_from_results(metadata.get('results', {}))
