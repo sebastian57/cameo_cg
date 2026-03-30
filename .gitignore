@@ -11,6 +11,7 @@ configs_testing/
 tiling_testing/
 test_configs/
 configs_cleanup_val/
+configs_further_tests/
 full_eval/
 saved_models/
 # --- crash dumps / core files ---
@@ -30,6 +31,11 @@ rand_plots/
 ml_training_testing_suite/outputs/
 training_exp_configs/
 checkpoints_configs_testing/
+config/__pycache__/
+models/__pycache__/
+utils__pycache__/
+data/__pycache__/
+training/__pycache__/
 
 # --- pycache / python artifacts ---
 models/__pycache__/
