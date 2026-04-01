@@ -35,6 +35,16 @@ def _resolve_mlp_dtype(cfg_value) -> tuple[str, jnp.dtype]:
     return "float32", jnp.float32
 
 
+def _normalize_export_tp_token(value: Any, *, mode_token: bool = False) -> str:
+    """Normalize tp_method / tp_mode aliases used by export logic."""
+    token = str(value).strip().lower().replace("-", "_")
+    aliases = {
+        "linear_1d": "uniform_1d",
+        "block_linear_1d": "block_uniform_1d" if mode_token else "uniform_1d",
+    }
+    return aliases.get(token, token)
+
+
 @register_ml_model("allegro_cueq", "allegro_cueq_fast")
 class AllegroModelCuEq(BaseMLModel):
     """
@@ -248,6 +258,20 @@ class AllegroModelCuEq(BaseMLModel):
         ml_model_type = config.get_ml_model_type()
         self.ml_model_type = ml_model_type
         self._enable_logging = bool(enable_logging)
+        layer_methods = self.allegro_config.get("tp_method_by_layer")
+        if isinstance(layer_methods, (list, tuple)):
+            self._export_tp_methods = tuple(
+                _normalize_export_tp_token(method) for method in layer_methods
+            )
+        else:
+            self._export_tp_methods = (
+                _normalize_export_tp_token(self.allegro_config.get("tp_method", "naive")),
+            )
+        self._export_tp_mode = _normalize_export_tp_token(
+            self.allegro_config.get("tp_mode", "mixed_naive"),
+            mode_token=True,
+        )
+        self._export_apply_cache: dict[str, Any] = {}
         if ml_model_type == "allegro_cueq_fast":
             from .allegro_cueq_fast_1103 import (
                 allegro_neighborlist_pp,  # lazy cuequivariance import
@@ -258,6 +282,7 @@ class AllegroModelCuEq(BaseMLModel):
                 allegro_neighborlist_pp,  # lazy cuequivariance import
             )
             model_logger.info("  backend         = allegro_cueq_v2")
+        self._export_factory = allegro_neighborlist_pp
         self.init_allegro, self.apply_allegro = allegro_neighborlist_pp(
             displacement=self.displacement,
             r_cutoff=self.cutoff,
@@ -275,7 +300,7 @@ class AllegroModelCuEq(BaseMLModel):
         self._apply_allegro_for_training = self.apply_allegro
         if self.remat_level > 0:
             self._apply_allegro_for_training = jax.checkpoint(self.apply_allegro)
-        self._apply_allegro_for_export = None
+        self._export_apply_cache["current"] = self.apply_allegro
 
         self._R0 = R0_safe
         self._species0 = species_safe
@@ -370,69 +395,6 @@ class AllegroModelCuEq(BaseMLModel):
         )
         return jnp.asarray(E, dtype=jnp.float32)
 
-    def _build_export_apply_allegro(self):
-        """Build an export-safe apply function when the fast backend needs it."""
-        if self.ml_model_type != "allegro_cueq_fast":
-            return self.apply_allegro
-
-        export_allegro_config = dict(self.allegro_config)
-        requested_method = str(export_allegro_config.get("tp_method", "naive"))
-        requested_method = requested_method.strip().lower().replace("-", "_")
-        layer_methods = export_allegro_config.get("tp_method_by_layer")
-
-        layer_requires_override = isinstance(layer_methods, (list, tuple)) and any(
-            str(method).strip().lower().replace("-", "_") in ("uniform_1d", "linear_1d")
-            for method in layer_methods
-        )
-        method_requires_override = requested_method in ("uniform_1d", "linear_1d")
-
-        if not method_requires_override and not layer_requires_override:
-            return self.apply_allegro
-
-        export_allegro_config["tp_method"] = "naive"
-        if layer_requires_override:
-            export_allegro_config["tp_method_by_layer"] = [
-                "naive"
-                if str(method).strip().lower().replace("-", "_") in ("uniform_1d", "linear_1d")
-                else method
-                for method in layer_methods
-            ]
-
-        tp_mode = export_allegro_config.get("tp_mode")
-        normalized_mode = (
-            str(tp_mode).strip().lower().replace("-", "_")
-            if tp_mode is not None
-            else None
-        )
-        if normalized_mode in ("block_uniform_1d", "block_linear_1d"):
-            export_allegro_config["tp_mode"] = "block_naive"
-
-        from .allegro_cueq_fast_1103 import allegro_neighborlist_pp
-
-        model_logger.info(
-            "Export fallback for allegro_cueq_fast: rebuilding apply_fn with "
-            "tp_method='naive' to avoid cuEq uniform_1d export failures."
-        )
-        _, export_apply = allegro_neighborlist_pp(
-            displacement=self.displacement,
-            r_cutoff=self.cutoff,
-            n_species=self.n_species,
-            positions_test=self._R0,
-            neighbor_test=self.nbrs_init,
-            max_edge_multiplier=self.max_edge_multiplier,
-            max_edges=self.max_edges,
-            mode="energy",
-            logging=self._enable_logging,
-            mlp_dtype=self.mlp_dtype,
-            **export_allegro_config,
-        )
-        return export_apply
-
-    def _get_export_apply_allegro(self):
-        if self._apply_allegro_for_export is None:
-            self._apply_allegro_for_export = self._build_export_apply_allegro()
-        return self._apply_allegro_for_export
-
     def compute_energy(
         self,
         params: Any,
@@ -453,26 +415,72 @@ class AllegroModelCuEq(BaseMLModel):
             segment_id=segment_id,
         )
 
-    def compute_energy_for_export(
-        self,
-        params: Any,
-        R: jax.Array,
-        mask: jax.Array,
-        species: jax.Array,
-        neighbor: Optional[Any] = None,
-        segment_id: Optional[jax.Array] = None,
-    ) -> jax.Array:
-        """Compute energy through an export-safe cuEq path when needed."""
-        return self._compute_energy_with_apply(
-            self._get_export_apply_allegro(),
-            params,
-            R,
-            mask,
-            species,
-            neighbor,
-            segment_id=segment_id,
-        )
+    @property
+    def export_tp_methods(self):
+        methods = list(self._export_tp_methods)
+        if self._export_tp_mode == "block_uniform_1d":
+            methods.append("uniform_1d")
+        return tuple(methods)
 
+    def build_export_apply_fn(self, *, tp_method_override: Optional[str] = None):
+        """Rebuild the raw apply_fn for export-time backend overrides."""
+        if tp_method_override is None:
+            return self.apply_allegro
+
+        normalized_override = _normalize_export_tp_token(tp_method_override)
+        if normalized_override != "naive":
+            raise ValueError(
+                f"Unsupported export tp_method_override={tp_method_override!r}; expected 'naive'."
+            )
+        if self.ml_model_type != "allegro_cueq_fast":
+            raise ValueError(
+                "Cross-backend export overrides are only supported for allegro_cueq_fast."
+            )
+        cached = self._export_apply_cache.get(normalized_override)
+        if cached is not None:
+            return cached
+
+        export_allegro_config = dict(self.allegro_config)
+        layer_methods = export_allegro_config.get("tp_method_by_layer")
+        if isinstance(layer_methods, (list, tuple)):
+            mapped_methods = [
+                "uniform_1d_naive"
+                if _normalize_export_tp_token(method) == "uniform_1d"
+                else "naive"
+                for method in layer_methods
+            ]
+            export_allegro_config["tp_method_by_layer"] = mapped_methods
+            export_allegro_config["tp_method"] = mapped_methods[0] if mapped_methods else "naive"
+        else:
+            current_method = _normalize_export_tp_token(
+                export_allegro_config.get("tp_method", "naive")
+            )
+            export_allegro_config["tp_method"] = (
+                "uniform_1d_naive" if current_method == "uniform_1d" else "naive"
+            )
+
+        if self._export_tp_mode == "block_uniform_1d":
+            export_allegro_config["tp_mode"] = "block_naive"
+
+        model_logger.info(
+            "Export override for allegro_cueq_fast: rebuilding apply_fn with export-compatible "
+            "naive TP execution while preserving the trained layout."
+        )
+        _, export_apply = self._export_factory(
+            displacement=self.displacement,
+            r_cutoff=self.cutoff,
+            n_species=self.n_species,
+            positions_test=self._R0,
+            neighbor_test=self.nbrs_init,
+            max_edge_multiplier=self.max_edge_multiplier,
+            max_edges=self.max_edges,
+            mode="energy",
+            logging=self._enable_logging,
+            mlp_dtype=self.mlp_dtype,
+            **export_allegro_config,
+        )
+        self._export_apply_cache[normalized_override] = export_apply
+        return export_apply
     @property
     def model_apply_fn(self):
         return self.apply_allegro

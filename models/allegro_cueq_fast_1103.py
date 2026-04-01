@@ -681,6 +681,9 @@ class AllegroLayer(hk.Module):
                     V_filtered,
                     irreps3_filter=cue.Irreps("O3", f"{mul}x{l}{'e' if p == 1 else 'o'}"),
                 )
+                output_dim = getattr(tp_desc.outputs[0], "dim", 0)
+                if output_dim == 0:
+                    continue
                 irrep_descriptors[(l, p)] = tp_desc
             except Exception:
                 continue
@@ -695,6 +698,8 @@ class AllegroLayer(hk.Module):
         V_red_irreps: cue.Irreps,
         n_edges: int,
         mul_gcd: int,
+        *,
+        method: str,
     ) -> Tuple[jnp.ndarray, cue.Irreps]:
         """Apply TP using per-irrep descriptors with uniform_1d method.
         
@@ -702,8 +707,17 @@ class AllegroLayer(hk.Module):
         each of which is eligible for the fast uniform_1d kernel.
         """
         irrep_descriptors = self._build_per_irrep_tp_descriptors(Y_irreps, V_red_irreps)
+        if hk.running_init():
+            model_logger.info(
+                f"[{self.name}] per-irrep descriptor count={len(irrep_descriptors)} n_edges={n_edges} mul_gcd={mul_gcd} "
+                f"wY_axis_shape={tuple(wY_axis.shape)} V_axis_shape={tuple(V_axis.shape)}"
+            )
         
         if not irrep_descriptors:
+            if hk.running_init():
+                model_logger.warning(
+                    f"[{self.name}] per-irrep TP built no descriptors; returning zero-width output."
+                )
             return jnp.zeros((n_edges, mul_gcd, 0)), cue.Irreps("O3", "0x0e")
         
         results = []
@@ -715,6 +729,13 @@ class AllegroLayer(hk.Module):
             try:
                 wY_dim = tp_desc.inputs[0].dim
                 V_dim = tp_desc.inputs[1].dim
+                out_dim = getattr(tp_desc.outputs[0], "dim", 0)
+                if out_dim == 0:
+                    if hk.running_init():
+                        model_logger.info(
+                            f"[{self.name}] skipping zero-width uniform_1d descriptor for ({l},{p})."
+                        )
+                    continue
                 
                 wY_flat = wY_axis.reshape(Eg, -1)
                 V_flat = V_axis.reshape(Eg, -1)
@@ -724,8 +745,14 @@ class AllegroLayer(hk.Module):
                 
                 wY_rep = cuex.RepArray(tp_desc.inputs[0], wY_slice)
                 V_rep = cuex.RepArray(tp_desc.inputs[1], V_slice)
+                if hk.running_init():
+                    model_logger.info(
+                        f"[{self.name}] uniform_1d debug ({l},{p}): Eg={Eg} n_edges={n_edges} mul_gcd={mul_gcd} "
+                        f"wY_dim={wY_dim} V_dim={V_dim} out_dim={out_dim} "
+                        f"wY_slice_shape={tuple(wY_slice.shape)} V_slice_shape={tuple(V_slice.shape)}"
+                    )
                 
-                out = cuex.equivariant_polynomial(tp_desc, [wY_rep, V_rep], method="uniform_1d")
+                out = cuex.equivariant_polynomial(tp_desc, [wY_rep, V_rep], method=method)
                 
                 if isinstance(out, list):
                     out = out[0]
@@ -972,9 +999,16 @@ class AllegroLayer(hk.Module):
                     f"tp_left_norm={self.tp_left_norm!r}"
                 )
 
-            if self.tp_method == "uniform_1d":
+            if self.tp_method in ("uniform_1d", "uniform_1d_naive"):
+                per_irrep_method = "uniform_1d" if self.tp_method == "uniform_1d" else "naive"
                 out_axis, tp_output_irreps = self._tensor_product_per_irrep(
-                    wY_axis, V_axis, Y_irreps, V_red_irreps, n_edges, mul_gcd
+                    wY_axis,
+                    V_axis,
+                    Y_irreps,
+                    V_red_irreps,
+                    n_edges,
+                    mul_gcd,
+                    method=per_irrep_method,
                 )
             elif self.tp_backend == "fused_sp":
                 if self.tp_mode != "mixed_naive":

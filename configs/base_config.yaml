@@ -179,6 +179,13 @@ model:
     gamma_dih: []
 
 # -----------------------------------------------------------------------------
+# Export
+# -----------------------------------------------------------------------------
+export:
+  mode: auto                    # auto | symbolic | fixed_size
+  also_export_naive: false      # for uniform_1d cueq: also emit <model>_symbolic.mlir via tp_method=naive
+
+# -----------------------------------------------------------------------------
 # Optimizer
 # Only include the blocks actually referenced in training.stages.
 # -----------------------------------------------------------------------------

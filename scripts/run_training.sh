@@ -6,7 +6,8 @@
 #SBATCH --gpus-per-task=4
 #SBATCH --time=01:00:00
 #SBATCH --partition=booster
-#SBATCH --output=outputs/slurm-%j.out
+#SBATCH --output=/dev/null
+#SBATCH --error=/dev/null
 
 # =============================================================================
 # Unified SLURM script for training (single run or array suite)
@@ -53,12 +54,10 @@ run_training_err_trap() {
 }
 trap run_training_err_trap ERR
 
+SCRIPT_DIR=""
+PROJECT_ROOT="${CAMEO_CG_PROJECT_ROOT:-${SLURM_SUBMIT_DIR:-$(pwd -P)}}"
 if [[ -n "${CAMEO_CG_PROJECT_ROOT:-}" ]]; then
-    PROJECT_ROOT="${CAMEO_CG_PROJECT_ROOT}"
     SCRIPT_DIR="${PROJECT_ROOT}/scripts"
-else
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-    PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 fi
 
 is_truthy() {
@@ -66,6 +65,30 @@ is_truthy() {
         1|true|yes|on) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+resolve_repo_root() {
+    local hint=""
+    local cand=""
+    for hint in "$@"; do
+        [[ -z "${hint}" ]] && continue
+        if [[ -f "${hint}/scripts/slurm_env.sh" && -f "${hint}/scripts/train.py" ]]; then
+            printf '%s\n' "$(cd "${hint}" && pwd -P)"
+            return 0
+        fi
+        cand="${hint}"
+        if [[ -f "${cand}" ]]; then
+            cand="$(dirname "${cand}")"
+        fi
+        while [[ "${cand}" != "/" ]]; do
+            if [[ -f "${cand}/scripts/slurm_env.sh" && -f "${cand}/scripts/train.py" ]]; then
+                printf '%s\n' "$(cd "${cand}" && pwd -P)"
+                return 0
+            fi
+            cand="$(dirname "${cand}")"
+        done
+    done
+    return 1
 }
 
 # =============================================================================
@@ -127,15 +150,16 @@ if [[ ! -f "${CONFIG_FILE}" ]]; then
 fi
 CONFIG_DIR="$(cd "$(dirname "${CONFIG_FILE}")" && pwd -P)"
 
+PROJECT_ROOT="$(resolve_repo_root "${CONFIG_DIR}" "${SLURM_SUBMIT_DIR:-}" "${PROJECT_ROOT:-}" "$(pwd -P)" "$(dirname "${BASH_SOURCE[0]}")")" || {
+    echo "ERROR: Could not locate project root containing scripts/slurm_env.sh and scripts/train.py"
+    exit 1
+}
+SCRIPT_DIR="${PROJECT_ROOT}/scripts"
+
 # Resolve multi-protein dir
 if [[ -n "$MULTI_PROTEIN_DIR" && "${MULTI_PROTEIN_DIR}" != /* ]]; then
     MULTI_PROTEIN_DIR="${PROJECT_ROOT}/${MULTI_PROTEIN_DIR}"
 fi
-
-# =============================================================================
-# Environment setup (shared helper)
-# =============================================================================
-source "${SCRIPT_DIR}/slurm_env.sh"
 
 # =============================================================================
 # Output directory setup
@@ -166,12 +190,18 @@ RUN_PROFILE_DIR="${RUN_OUTPUT_DIR}/profiles"
 mkdir -p "${RUN_EXPORT_DIR}" "${RUN_CHECKPOINT_DIR}" "${RUN_PROFILE_DIR}"
 
 RUN_SLURM_LOG="${RUN_OUTPUT_DIR}/slurm-${JOB_TAG}.out"
-if [[ -n "${SLURM_JOB_ID:-}" && -z "${PARENT_OUTPUT_DIR:-}" ]]; then
-    BOOTSTRAP_SLURM_LOG="${SLURM_SUBMIT_DIR:-$(pwd -P)}/outputs/slurm-${SLURM_JOB_ID}.out"
-    if [[ -f "${BOOTSTRAP_SLURM_LOG}" && "${BOOTSTRAP_SLURM_LOG}" != "${RUN_SLURM_LOG}" ]]; then
-        mv "${BOOTSTRAP_SLURM_LOG}" "${RUN_SLURM_LOG}" 2>/dev/null || true
-    fi
-fi
+touch "${RUN_SLURM_LOG}"
+exec > >(tee -a "${RUN_SLURM_LOG}") 2>&1
+
+echo "[run_training.sh] Project root: ${PROJECT_ROOT}"
+echo "[run_training.sh] Script dir:   ${SCRIPT_DIR}"
+echo "[run_training.sh] Config file:  ${CONFIG_FILE}"
+echo "[run_training.sh] Run dir:      ${RUN_OUTPUT_DIR}"
+
+# =============================================================================
+# Environment setup (shared helper)
+# =============================================================================
+source "${SCRIPT_DIR}/slurm_env.sh"
 
 # Runtime config: inject resolved output paths into a copy of the config
 INPUT_CONFIG_COPY="${RUN_OUTPUT_DIR}/config_input.yaml"
@@ -364,11 +394,6 @@ fi
 cleanup_background_jobs() {
     local rc=$?
     [[ -n "${GPU_TELEMETRY_SRUN_PID}" ]] && kill "${GPU_TELEMETRY_SRUN_PID}" >/dev/null 2>&1 || true
-    # In suite mode, copy the bootstrap slurm output into the run directory
-    if [[ -n "${PARENT_OUTPUT_DIR:-}" ]]; then
-        BOOTSTRAP_SLURM_OUT="${OUTPUTS_ROOT}/slurm-bootstrap-${JOB_TAG}.out"
-        [[ -f "${BOOTSTRAP_SLURM_OUT}" ]] && cp -f "${BOOTSTRAP_SLURM_OUT}" "${RUN_OUTPUT_DIR}/slurm-${JOB_TAG}.out" 2>/dev/null || true
-    fi
     echo "[run_training.sh] EXIT rc=${rc}" >&2
 }
 trap cleanup_background_jobs EXIT

@@ -50,7 +50,7 @@ Environment and deployment setup is documented in:
 - `env_setup/SETUP_ENV.md`
 - `env_setup/interactive_job.md`
 - `env_setup/LAMMPS_build.md`
-- `CONNECTOR_REBUILD.md`
+- `env_setup/CONNECTOR_REBUILD.md`
 
 ### chemtrain Layout
 

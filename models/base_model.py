@@ -118,20 +118,6 @@ class BaseMLModel(ABC):
         F = -jax.grad(energy_fn)(R)
         return E, F
 
-    def compute_energy_for_export(
-        self,
-        params: Any,
-        R: jax.Array,
-        mask: jax.Array,
-        species: jax.Array,
-        neighbor: Optional[Any] = None,
-        segment_id: Optional[jax.Array] = None,
-    ) -> jax.Array:
-        """Export-time energy hook; defaults to the runtime energy path."""
-        return self.compute_energy(
-            params, R, mask, species, neighbor, segment_id=segment_id
-        )
-
     @property
     @abstractmethod
     def model_apply_fn(self):

@@ -90,7 +90,7 @@ From the `chemtrain-deploy` directory:
 ```bash
 cd /path/to/chemtrain-deploy
 
-pip install -e "external/chemtrain[all]"
+pip install -e "external/chemtrain_cameo[all]"
 pip install -e "external/chemutils"
 ```
 
