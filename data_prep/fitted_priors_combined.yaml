@@ -1,0 +1,59 @@
+model:
+  priors:
+    r0: 9.394391819707943
+    kr: 0.053435874272991526
+    a:
+    - 0.1141071333846882
+    - 0.37390849070061577
+    - -0.3713806874382958
+    - 0.04343584524420523
+    - 0.5531675838591845
+    - 0.015092225000133352
+    - 0.5875550390199901
+    - -0.5281353980215044
+    - 1.545238197978365
+    - 0.738667662281199
+    b:
+    - 0.12608195855188234
+    - 0.21515177217091955
+    - 0.4489313037182899
+    - -0.5833488547918881
+    - 0.4131685462936212
+    - -0.02096199834132282
+    - 0.7447956857928497
+    - -0.1208801383327492
+    - 0.4785600934639806
+    - -1.474734426589196
+    k_dihedral:
+    - 0.48251000438330216
+    - 0.9176116149178752
+    gamma_dihedral:
+    - 1.448372597066298
+    - 1.6319272910361864
+    k_dih:
+    - 0.48251000438330216
+    - 0.9176116149178752
+    gamma_dih:
+    - 1.448372597066298
+    - 1.6319272910361864
+    epsilon: 1.0
+    sigma: 3.0
+meta:
+  datasets_used:
+  - datasets/combined_320K_2500_aggforce.npz
+  T: 320.0
+  kB: 0.0019872041
+  angle_terms: 10
+  angle_bins: 400
+  dih_bins: 360
+  min_count: 50
+  ridge: 0.01
+  pseudocount: 1.0
+  spline_enabled: true
+  spline_out: datasets/fitted_priors_combined_spline.npz
+  residue_specific_angles: false
+  angle_min_samples: 500
+  kde_bandwidth_factor: 1.0
+  spline_grid_points: 500
+  bond_radial_jacobian_correction: true
+  lj_radial_jacobian_correction: true

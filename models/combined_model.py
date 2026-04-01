@@ -250,6 +250,7 @@ class CombinedModel:
                 "E_dh": prior_components.get("E_dh", 0.0),
                 "E_stickiness": prior_components.get("E_stickiness", 0.0),
                 "E_salt_bridge": prior_components.get("E_salt_bridge", 0.0),
+                "E_lj": prior_components.get("E_lj", 0.0),
                 "E_prior_total": prior_components["E_total"],
             })
             components["E_total"] = E_ml + prior_components["E_total"]
@@ -283,7 +284,8 @@ class CombinedModel:
             Dictionary with force components:
                 - F_total: Total forces
                 - F_ml: ML forces
-                - F_bond, F_angle, F_repulsive, F_dihedral, F_excluded_volume (if use_priors)
+                - F_bond, F_angle, F_repulsive, F_dihedral, F_excluded_volume,
+                  F_dh, F_stickiness, F_salt_bridge, F_lj (if use_priors)
         """
         if self.use_priors:
             def all_energies(R_):
@@ -296,13 +298,17 @@ class CombinedModel:
                     comps["E_repulsive"],
                     comps["E_dihedral"],
                     comps["E_excluded_volume"],
+                    comps["E_dh"],
+                    comps["E_stickiness"],
+                    comps["E_salt_bridge"],
+                    comps["E_lj"],
                 )
 
             # Single forward pass; vjp_fn holds stored residuals for backward.
             _, vjp_fn = jax.vjp(all_energies, R)
 
             # Each vjp_fn call is a backward-only pass (no re-forward).
-            def _force(idx, n=7):
+            def _force(idx, n=11):
                 ct = tuple(1.0 if i == idx else 0.0 for i in range(n))
                 return -vjp_fn(ct)[0]
 
@@ -314,6 +320,10 @@ class CombinedModel:
                 "F_repulsive":       _force(4),
                 "F_dihedral":        _force(5),
                 "F_excluded_volume": _force(6),
+                "F_dh":              _force(7),
+                "F_stickiness":      _force(8),
+                "F_salt_bridge":     _force(9),
+                "F_lj":              _force(10),
             }
         else:
             def all_energies(R_):

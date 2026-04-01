@@ -12,6 +12,7 @@ tiling_testing/
 test_configs/
 configs_cleanup_val/
 configs_further_tests/
+configs_train_md/
 full_eval/
 saved_models/
 # --- crash dumps / core files ---

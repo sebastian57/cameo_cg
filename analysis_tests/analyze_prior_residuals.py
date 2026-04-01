@@ -77,6 +77,7 @@ TERM_ORDER = [
     "E_dh",
     "E_stickiness",
     "E_salt_bridge",
+    "E_lj",
 ]
 
 METRIC_ORDER = [

@@ -125,6 +125,7 @@ model:
       dh: 0.0
       stickiness: 0.0
       salt_bridge: 0.0
+      lj: 0.0
 
     aa_typing:
       source: dataset_map       # dataset_map
@@ -154,6 +155,9 @@ model:
       r0: 3.8
       sigma: 0.3
 
+    lj:
+      enabled: false
+
     # Bond parameters (from Boltzmann inversion)
     r0: 3.8375
     kr: 154.5
@@ -166,9 +170,13 @@ model:
     theta0: 1.834
     k_theta: 8.27
 
-    # Repulsive LJ-like
+    # Repulsive soft-sphere
     epsilon: 1.0
     sigma: 3.0
+
+    # Parametric fallback for the long-range LJ prior (used when spline NPZ has no lj_* arrays)
+    lj_epsilon: 1.0
+    lj_sigma: 3.8
 
     # Excluded volume (short-range, sequence separation 2-5)
     epsilon_ex: 1.0

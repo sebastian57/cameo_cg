@@ -76,6 +76,7 @@ model:
       dh: 0.0
       stickiness: 0.0
       salt_bridge: 0.0
+      lj: 0.0
     aa_typing:
       source: dataset_map
       his_charge: 0.0
@@ -108,6 +109,10 @@ model:
     k_theta: 8.271271714604836
     epsilon: 5.0
     sigma: 3.0
+
+    # Parametric fallback for the long-range LJ prior (used when spline NPZ has no lj_* arrays)
+    lj_epsilon: 1.0
+    lj_sigma: 3.8
     epsilon_ex: 6.0
     sigma_ex: 3.5
     k_dih: [0.47037187851535034, 0.9495107825945361]

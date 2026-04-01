@@ -64,8 +64,32 @@ def build_bonds_angles_dihedrals(resid):
     )
 
 
+def build_nonbonded_pairs(resid, min_sep=6):
+    order = order_from_resid(resid)
+    N = len(order)
+    if N <= min_sep:
+        return jnp.zeros((0, 2), dtype=jnp.int32)
+
+    pairs = []
+    for sep in range(int(min_sep), N):
+        pairs.append(np.stack([order[:-sep], order[sep:]], axis=1).astype(np.int32))
+
+    if not pairs:
+        return jnp.zeros((0, 2), dtype=jnp.int32)
+    return jnp.asarray(np.concatenate(pairs, axis=0), dtype=jnp.int32)
+
+
 def bond_distances_single_frame(R, bonds, displacement):
     i, j = bonds[:, 0], bonds[:, 1]
+    Ri, Rj = R[i], R[j]
+    dR = jax.vmap(displacement)(Ri, Rj)
+    return jnp.linalg.norm(dR, axis=-1)
+
+
+def pair_distances_single_frame(R, pairs, displacement):
+    if pairs.shape[0] == 0:
+        return jnp.zeros((0,), dtype=R.dtype)
+    i, j = pairs[:, 0], pairs[:, 1]
     Ri, Rj = R[i], R[j]
     dR = jax.vmap(displacement)(Ri, Rj)
     return jnp.linalg.norm(dR, axis=-1)
@@ -163,6 +187,16 @@ def fit_bond_harmonic(
 
     r0 = float(-b / (2.0 * a))
     kr = float(2.0 * a)
+
+    # Guard against clearly unphysical extrapolated fits on broad/non-harmonic data.
+    x_lo = float(np.percentile(x, 0.5))
+    x_hi = float(np.percentile(x, 99.5))
+    if (not np.isfinite(r0)) or (not np.isfinite(kr)) or kr <= 0.0 or r0 < x_lo or r0 > x_hi:
+        r0 = float(np.mean(x))
+        var = float(np.mean((x - r0) ** 2))
+        kBT = kB * T
+        kr = float(kBT / max(var, 1e-12))
+
     return r0, kr
 
 def fit_fourier_angles_stable(
@@ -231,7 +265,7 @@ def prior_pdf_from_U_theta(theta, U, T=320.0, kB=0.0019872041):
     beta = 1.0 / (kB * T)
     U_shift = U - np.min(U)
     w = np.sin(theta) * np.exp(-beta * U_shift)
-    Z = np.trapz(w, theta)
+    Z = _trapz_compat(w, theta)
     return w / Z
 
 
@@ -288,7 +322,7 @@ def prior_pdf_from_U_phi(phi, U, T=320.0, kB=0.0019872041):
     beta = 1.0 / (kB * T)
     U_shift = U - np.min(U)
     w = np.exp(-beta * U_shift)
-    Z = np.trapz(w, phi)
+    Z = _trapz_compat(w, phi)
     return w / Z
 
 
@@ -331,6 +365,13 @@ def _safe_probability_to_pmf(prob, T, kB, floor_rel=1e-8):
     return U
 
 
+def _trapz_compat(y, x):
+    """NumPy 1.x/2.x compatible trapezoidal integration helper."""
+    if hasattr(np, "trapezoid"):
+        return np.trapezoid(y, x)
+    return np.trapz(y, x)
+
+
 def _apply_radial_jacobian_correction(prob, r, power=2):
     """Convert observed radial density P(r) to intrinsic density by dividing by r^power."""
     p = np.asarray(prob, dtype=np.float64)
@@ -369,6 +410,25 @@ def fit_bond_spline(all_bonds, T, kB, n_grid, bw_factor):
     span = max(p99 - p1, 1e-3)
     xmin = max(1e-6, p1 - 0.05 * span)
     xmax = p99 + 0.05 * span
+    grid = np.linspace(xmin, xmax, int(n_grid), dtype=np.float64)
+
+    dens = _kde_on_grid(x, grid, bw_factor=bw_factor)
+    dens_corr = _apply_radial_jacobian_correction(dens, grid, power=2)
+    U = _safe_probability_to_pmf(dens_corr, T=T, kB=kB)
+    cs = CubicSpline(grid, U, bc_type="natural")
+    knots, coeffs = _extract_spline_coeffs(cs)
+    return knots, coeffs, grid, dens, U, cs
+
+
+def fit_lj_spline(all_distances, T, kB, n_grid, bw_factor):
+    """Fit long-range nonbonded PMF for the LJ prior using a radial spline."""
+    CubicSpline, _ = _require_scipy_for_splines()
+
+    x = np.asarray(all_distances, dtype=np.float64)
+    p_low, p_high = np.percentile(x, [0.5, 99.5])
+    span = max(p_high - p_low, 1e-3)
+    xmin = max(1e-6, p_low - 0.05 * span)
+    xmax = p_high + 0.10 * span
     grid = np.linspace(xmin, xmax, int(n_grid), dtype=np.float64)
 
     dens = _kde_on_grid(x, grid, bw_factor=bw_factor)
@@ -567,7 +627,7 @@ def main():
     all_dihedrals = []
     all_angle_central_species = []
 
-    all_rep_dists = []
+    all_lj_dists = []
     inferred_n_species = 0
 
     for path in dataset_paths:
@@ -631,23 +691,21 @@ def main():
             central_sp = central_sp[a_fin]
             all_angle_central_species.append(np.asarray(central_sp, dtype=np.int32))
 
-        order = order_from_resid(resid)
-        if N > 6:
-            ii = order[:-6]
-            jj = order[6:]
+        rep_pairs = build_nonbonded_pairs(resid, min_sep=6)
+        if rep_pairs.shape[0] > 0:
             sample_frames = np.linspace(0, Tframes - 1, num=min(Tframes, 200), dtype=int)
-            Rsub = R[sample_frames]
+            Rsub = R_jax[sample_frames]
             Msub = mask[sample_frames]
-            rep_valid = (Msub[:, ii] * Msub[:, jj]) > 0
-            dr = Rsub[:, ii, :] - Rsub[:, jj, :]
-            rep_d = np.linalg.norm(dr, axis=-1)[rep_valid]
+            rep_all = jax.vmap(pair_distances_single_frame, in_axes=(0, None, None))(Rsub, rep_pairs, displacement)
+            rep_valid = (Msub[:, rep_pairs[:, 0]] * Msub[:, rep_pairs[:, 1]]) > 0
+            rep_d = np.asarray(rep_all)[rep_valid]
             rep_d = rep_d[np.isfinite(rep_d)]
-            all_rep_dists.append(rep_d)
+            all_lj_dists.append(rep_d)
 
     all_bonds = np.concatenate(all_bonds, axis=0)
     all_angles = np.concatenate(all_angles, axis=0)
     all_dihedrals = np.concatenate(all_dihedrals, axis=0)
-    all_rep_dists = np.concatenate(all_rep_dists, axis=0) if len(all_rep_dists) else None
+    all_lj_dists = np.concatenate(all_lj_dists, axis=0) if len(all_lj_dists) else None
     all_angle_central_species = (
         np.concatenate(all_angle_central_species, axis=0)
         if len(all_angle_central_species) else None
@@ -680,12 +738,12 @@ def main():
         plt.title("Dihedral histogram (all datasets)")
         savefig(Path(args.plots_dir) / "dihedral_hist.png")
 
-        if all_rep_dists is not None and all_rep_dists.size > 0:
+        if all_lj_dists is not None and all_lj_dists.size > 0:
             plt.figure()
-            plt.hist(all_rep_dists, bins=120)
-            plt.xlabel("Rep pair distance r (Å) (i,i+6 sampled)")
+            plt.hist(all_lj_dists, bins=120)
+            plt.xlabel("Long-range nonbonded pair distance r (Å)")
             plt.ylabel("Count")
-            plt.title("Repulsion-pair distance histogram (sampled)")
+            plt.title("Long-range nonbonded distance histogram")
             savefig(Path(args.plots_dir) / "repulsion_pair_distance_hist.png")
 
     # --- Bond fit ---
@@ -699,7 +757,7 @@ def main():
         beta = 1.0 / (args.kB * args.T)
         # Observed radial density includes r^2 Jacobian.
         pdf_bond = (r_grid ** 2) * np.exp(-beta * U_bond)
-        pdf_bond /= np.trapz(pdf_bond, r_grid)
+        pdf_bond /= _trapz_compat(pdf_bond, r_grid)
 
         hist_r, edges_r = np.histogram(all_bonds, bins=120, density=True)
         cent_r = 0.5 * (edges_r[:-1] + edges_r[1:])
@@ -826,6 +884,9 @@ def main():
         dih_knots, dih_coeffs, grid_dih, dens_dih, U_dih_kde, _ = fit_dihedral_spline(
             all_dihedrals, T=args.T, kB=args.kB, n_grid=args.spline_grid_points, bw_factor=args.kde_bandwidth_factor
         )
+        lj_knots, lj_coeffs, grid_lj, dens_lj, U_lj_kde, _ = fit_lj_spline(
+            all_lj_dists, T=args.T, kB=args.kB, n_grid=args.spline_grid_points, bw_factor=args.kde_bandwidth_factor
+        )
 
         residue_specific_used = False
         angle_type_knots = None
@@ -880,6 +941,8 @@ def main():
             "angle_coeffs": np.asarray(angle_coeffs, dtype=np.float32),
             "dih_knots": np.asarray(dih_knots, dtype=np.float32),
             "dih_coeffs": np.asarray(dih_coeffs, dtype=np.float32),
+            "lj_knots": np.asarray(lj_knots, dtype=np.float32),
+            "lj_coeffs": np.asarray(lj_coeffs, dtype=np.float32),
             "temperature": np.asarray(float(args.T), dtype=np.float32),
             "kB": np.asarray(float(args.kB), dtype=np.float32),
             "grid_points": np.asarray(int(args.spline_grid_points), dtype=np.int32),
@@ -950,10 +1013,29 @@ def main():
             plt.legend()
             savefig(Path(args.plots_dir) / "spline_dihedral_pmf_overlay.png")
 
+            grid_eval_lj = np.linspace(grid_lj[0], grid_lj[-1], 1400)
+            U_lj_spline = eval_piecewise_spline_numpy(grid_eval_lj, lj_knots, lj_coeffs)
+            hist_lj, edges_lj = np.histogram(all_lj_dists, bins=120, range=(grid_lj[0], grid_lj[-1]), density=True)
+            cent_lj = 0.5 * (edges_lj[:-1] + edges_lj[1:])
+            U_lj_hist = _safe_probability_to_pmf(
+                _apply_radial_jacobian_correction(hist_lj, cent_lj, power=2),
+                T=args.T,
+                kB=args.kB,
+            )
+            plt.figure()
+            plt.plot(cent_lj, U_lj_hist, color="0.6", linewidth=1.2, label="Histogram PMF")
+            plt.plot(grid_lj, U_lj_kde, color="C0", linewidth=2.0, label="KDE PMF")
+            plt.plot(grid_eval_lj, U_lj_spline, "r--", linewidth=1.6, label="Spline PMF")
+            plt.xlabel("r (Å)")
+            plt.ylabel("U(r) [kcal/mol, shifted]")
+            plt.title("LJ PMF: histogram vs KDE vs spline")
+            plt.legend()
+            savefig(Path(args.plots_dir) / "spline_lj_pmf_overlay.png")
+
             # Implied distributions
             # Convert intrinsic potential back to observed radial density with r^2 factor.
             p_bond = (grid_eval_bond ** 2) * np.exp(-beta * (U_bond_spline - np.min(U_bond_spline)))
-            p_bond /= np.trapz(p_bond, grid_eval_bond)
+            p_bond /= _trapz_compat(p_bond, grid_eval_bond)
             plt.figure()
             plt.plot(cent_bond, hist_bond, color="0.6", linewidth=1.2, label="Empirical P(r)")
             plt.plot(grid_eval_bond, p_bond, "r-", linewidth=2.0, label="Spline-implied P(r)")
@@ -964,7 +1046,7 @@ def main():
             savefig(Path(args.plots_dir) / "spline_bond_implied_distribution.png")
 
             p_ang = np.sin(grid_eval_ang) * np.exp(-beta * (U_ang_spline - np.min(U_ang_spline)))
-            p_ang /= np.trapz(p_ang, grid_eval_ang)
+            p_ang /= _trapz_compat(p_ang, grid_eval_ang)
             plt.figure()
             plt.plot(cent_ang, hist_ang, color="0.6", linewidth=1.2, label="Empirical P(θ)")
             plt.plot(grid_eval_ang, p_ang, "r-", linewidth=2.0, label="Spline-implied P(θ)")
@@ -975,7 +1057,7 @@ def main():
             savefig(Path(args.plots_dir) / "spline_angle_implied_distribution.png")
 
             p_dih = np.exp(-beta * (U_dih_spline - np.min(U_dih_spline)))
-            p_dih /= np.trapz(p_dih, grid_eval_dih)
+            p_dih /= _trapz_compat(p_dih, grid_eval_dih)
             plt.figure()
             plt.plot(cent_dih, hist_dih, color="0.6", linewidth=1.2, label="Empirical P(φ)")
             plt.plot(grid_eval_dih, p_dih, "r-", linewidth=2.0, label="Spline-implied P(φ)")
@@ -984,6 +1066,17 @@ def main():
             plt.title("Dihedral implied distribution")
             plt.legend()
             savefig(Path(args.plots_dir) / "spline_dihedral_implied_distribution.png")
+
+            p_lj = (grid_eval_lj ** 2) * np.exp(-beta * (U_lj_spline - np.min(U_lj_spline)))
+            p_lj /= _trapz_compat(p_lj, grid_eval_lj)
+            plt.figure()
+            plt.plot(cent_lj, hist_lj, color="0.6", linewidth=1.2, label="Empirical P(r)")
+            plt.plot(grid_eval_lj, p_lj, "r-", linewidth=2.0, label="Spline-implied P(r)")
+            plt.xlabel("r (Å)")
+            plt.ylabel("density")
+            plt.title("LJ implied distribution")
+            plt.legend()
+            savefig(Path(args.plots_dir) / "spline_lj_implied_distribution.png")
 
             # Derivative sanity checks (numeric vs analytic from coeffs)
             dU_num_bond = np.gradient(U_bond_spline, grid_eval_bond)
@@ -1019,6 +1112,17 @@ def main():
             plt.legend()
             savefig(Path(args.plots_dir) / "spline_dihedral_force_sanity.png")
 
+            dU_num_lj = np.gradient(U_lj_spline, grid_eval_lj)
+            dU_ana_lj = eval_piecewise_spline_derivative_numpy(grid_eval_lj, lj_knots, lj_coeffs)
+            plt.figure()
+            plt.plot(grid_eval_lj, dU_num_lj, label="Numeric dU/dr")
+            plt.plot(grid_eval_lj, dU_ana_lj, "--", label="Analytic dU/dr")
+            plt.xlabel("r (Å)")
+            plt.ylabel("dU/dr")
+            plt.title("LJ spline derivative sanity check")
+            plt.legend()
+            savefig(Path(args.plots_dir) / "spline_lj_force_sanity.png")
+
             if residue_specific_used:
                 ncols = 4
                 nrows = int(np.ceil(angle_n_types / ncols))
@@ -1050,8 +1154,8 @@ def main():
 
     # --- Repulsion plots (verification only, no fit) ---
     if not args.skip_plots:
-        if all_rep_dists is not None and all_rep_dists.size > 0:
-            r = np.linspace(max(1e-3, np.min(all_rep_dists)), np.percentile(all_rep_dists, 99.5), 2000)
+        if all_lj_dists is not None and all_lj_dists.size > 0:
+            r = np.linspace(max(1e-3, np.min(all_lj_dists)), np.percentile(all_lj_dists, 99.5), 2000)
             rep = args.epsilon * (args.sigma / np.maximum(r, 1e-6)) ** args.rep_power
 
             plt.figure()
@@ -1063,10 +1167,10 @@ def main():
 
             # Show implied weights (just for intuition)
             beta = 1.0 / (args.kB * args.T)
-            w = np.exp(-beta * (args.epsilon * (args.sigma / np.maximum(all_rep_dists, 1e-6)) ** args.rep_power))
+            w = np.exp(-beta * (args.epsilon * (args.sigma / np.maximum(all_lj_dists, 1e-6)) ** args.rep_power))
             plt.figure()
-            plt.scatter(all_rep_dists[:5000], w[:5000], s=3, alpha=0.3)
-            plt.xlabel("r (Å) (sampled rep pairs)")
+            plt.scatter(all_lj_dists[:5000], w[:5000], s=3, alpha=0.3)
+            plt.xlabel("r (Å) (sampled long-range pairs)")
             plt.ylabel("exp(-beta E_rep)")
             plt.title("Repulsion weight vs distance (intuition)")
             savefig(Path(args.plots_dir) / "repulsion_weight_vs_distance.png")
@@ -1107,6 +1211,7 @@ def main():
             "kde_bandwidth_factor": float(args.kde_bandwidth_factor),
             "spline_grid_points": int(args.spline_grid_points),
             "bond_radial_jacobian_correction": True,
+            "lj_radial_jacobian_correction": True,
         }
     }
 

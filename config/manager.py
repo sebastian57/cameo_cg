@@ -278,6 +278,7 @@ class ConfigManager:
         "dh": 0.0,
         "stickiness": 0.0,
         "salt_bridge": 0.0,
+        "lj": 0.0,
     }
 
     def get_prior_weights(self) -> Dict[str, float]:

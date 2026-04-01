@@ -233,16 +233,21 @@ def compute_detailed_force_eval(
     mean_force_train = np.mean(Y_train, axis=0, keepdims=True) if Y_train.size else np.zeros((1, Y_ref.shape[1]), dtype=np.float32)
     Y_zero = np.zeros_like(Y_ref)
     Y_mean = np.repeat(mean_force_train, Y_ref.shape[0], axis=0)
+    y_zero_valid = Y_zero[valid_components]
+    y_mean_valid = Y_mean[valid_components]
 
-    rmse_model = _rmse(Y_ref, Y_pred)
-    rmse_zero = _rmse(Y_ref, Y_zero)
-    rmse_mean = _rmse(Y_ref, Y_mean)
+    # Baseline RMSEs should ignore padded components just like training loss and
+    # the lightweight force eval do; otherwise matching zeros in padded slots
+    # artificially deflate the reported RMSE.
+    rmse_model = _rmse(y_ref_valid, y_pred_valid)
+    rmse_zero = _rmse(y_ref_valid, y_zero_valid)
+    rmse_mean = _rmse(y_ref_valid, y_mean_valid)
 
     rng = np.random.RandomState(shuffle_seed)
     shuffle_rmses = []
     for _ in range(int(shuffle_repeats)):
         perm = rng.permutation(Y_pred.shape[0])
-        shuffle_rmses.append(_rmse(Y_ref, Y_pred[perm]))
+        shuffle_rmses.append(_rmse(y_ref_valid, Y_pred[perm][valid_components]))
     shuffle_rmses = np.asarray(shuffle_rmses, dtype=np.float64)
 
     metrics: Dict[str, Any] = {

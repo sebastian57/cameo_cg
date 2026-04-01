@@ -10,6 +10,7 @@ from models.prior_energy import (
     _build_charge_and_group_by_species,
     _stickiness_alpha_from_free,
     compute_dh_energy,
+    compute_lj_energy,
     compute_salt_bridge_energy,
 )
 from models.topology import TopologyBuilder
@@ -47,6 +48,7 @@ def _base_prior_cfg():
                     "dh": 0.0,
                     "stickiness": 0.0,
                     "salt_bridge": 0.0,
+                    "lj": 0.0,
                 },
                 "r0": 3.8,
                 "kr": 120.0,
@@ -86,6 +88,11 @@ def _base_prior_cfg():
                     "r0": 3.8,
                     "sigma": 0.3,
                 },
+                "lj": {
+                    "enabled": False,
+                },
+                "lj_epsilon": 1.0,
+                "lj_sigma": 3.8,
             }
         }
     }
@@ -201,6 +208,40 @@ def test_salt_bridge_only_opposite_charges_contribute():
     assert float(e) < 0.0
 
 
+def test_parametric_lj_has_repulsive_wall_and_attractive_well():
+    mask = jnp.ones((2,), dtype=jnp.float32)
+    pairs = jnp.array([[0, 1]], dtype=jnp.int32)
+    epsilon = jnp.array(1.0, dtype=jnp.float32)
+    sigma = jnp.array(3.8, dtype=jnp.float32)
+
+    e_close = compute_lj_energy(
+        R=jnp.array([[0.0, 0.0, 0.0], [3.0, 0.0, 0.0]], dtype=jnp.float32),
+        mask=mask,
+        pairs=pairs,
+        epsilon_lj=epsilon,
+        sigma_lj=sigma,
+    )
+    e_well = compute_lj_energy(
+        R=jnp.array([[0.0, 0.0, 0.0], [4.2, 0.0, 0.0]], dtype=jnp.float32),
+        mask=mask,
+        pairs=pairs,
+        epsilon_lj=epsilon,
+        sigma_lj=sigma,
+    )
+    e_far = compute_lj_energy(
+        R=jnp.array([[0.0, 0.0, 0.0], [7.0, 0.0, 0.0]], dtype=jnp.float32),
+        mask=mask,
+        pairs=pairs,
+        epsilon_lj=epsilon,
+        sigma_lj=sigma,
+    )
+
+    assert float(e_close) > 0.0
+    assert float(e_well) < 0.0
+    assert float(e_far) < 0.0
+    assert abs(float(e_far)) < abs(float(e_well))
+
+
 def test_mask_safety_with_typed_terms_finite_gradients():
     id_to_aa = {0: "LYS", 1: "ASP", 2: "ALA"}
     prior = _make_prior(
@@ -216,10 +257,12 @@ def test_mask_safety_with_typed_terms_finite_gradients():
                         "dh": 1.0,
                         "stickiness": 1.0,
                         "salt_bridge": 1.0,
+                        "lj": 1.0,
                     },
                     "dh": {"enabled": True},
                     "stickiness": {"enabled": True},
                     "salt_bridge": {"enabled": True},
+                    "lj": {"enabled": True},
                 }
             }
         },
@@ -263,11 +306,13 @@ def test_disabled_new_terms_regression_matches_old_component_sum():
         + comps["E_repulsive"]
         + comps["E_dihedral"]
         + comps["E_excluded_volume"]
+        + comps["E_lj"]
     )
     np.testing.assert_allclose(np.asarray(comps["E_total"]), np.asarray(old_sum), rtol=1e-7, atol=1e-7)
     np.testing.assert_allclose(np.asarray(comps["E_dh"]), 0.0, rtol=0.0, atol=0.0)
     np.testing.assert_allclose(np.asarray(comps["E_stickiness"]), 0.0, rtol=0.0, atol=0.0)
     np.testing.assert_allclose(np.asarray(comps["E_salt_bridge"]), 0.0, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(np.asarray(comps["E_lj"]), 0.0, rtol=0.0, atol=0.0)
 
 
 def test_typed_terms_enabled_without_mapping_raises():

@@ -81,6 +81,7 @@ class EnergyComponents(TypedDict, total=False):
     E_dh: Optional[float]
     E_stickiness: Optional[float]
     E_salt_bridge: Optional[float]
+    E_lj: Optional[float]
 
 
 class ForceComponents(TypedDict):
@@ -158,6 +159,8 @@ class PriorParams(TypedDict, total=False):
     salt_delta: float
     salt_r0: float
     salt_sigma: float
+    lj_epsilon: float
+    lj_sigma: float
 
 
 class SplineArrays(TypedDict, total=False):
@@ -168,6 +171,8 @@ class SplineArrays(TypedDict, total=False):
     angle_coeffs: jax.Array
     dih_knots: jax.Array
     dih_coeffs: jax.Array
+    lj_knots: Optional[jax.Array]
+    lj_coeffs: Optional[jax.Array]
     angle_n_types: Optional[int]
     angle_type_knots: Optional[jax.Array]
     angle_type_coeffs: Optional[jax.Array]

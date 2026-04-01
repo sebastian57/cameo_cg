@@ -349,6 +349,46 @@ def compute_salt_bridge_energy(
     return jnp.sum(jnp.where(keep, term, 0.0))
 
 
+def compute_lj_energy(
+    R: jax.Array,
+    mask: jax.Array,
+    pairs: jax.Array,
+    epsilon_lj: jax.Array,
+    sigma_lj: jax.Array,
+    *,
+    knots: Optional[jax.Array] = None,
+    coeffs: Optional[jax.Array] = None,
+) -> jax.Array:
+    """Lennard-Jones-like nonbonded energy over a pair set.
+
+    When spline coefficients are provided, evaluate the nonbonded PMF directly
+    from the fitted spline. Otherwise use a standard 12-6 LJ form:
+
+        U(r) = 4 * epsilon * [ (sigma / r)^12 - (sigma / r)^6 ]
+    """
+    if pairs.shape[0] == 0:
+        return jnp.array(0.0, dtype=R.dtype)
+
+    pi, pj = pairs[:, 0], pairs[:, 1]
+    valid = (mask[pi] * mask[pj]) > 0
+
+    dR = R[pi] - R[pj]
+    r = _safe_norm(dR)
+    r = jnp.where(valid, r, jax.lax.stop_gradient(r))
+    r_eval = jnp.where(valid, r, 1e6)
+
+    if knots is not None and coeffs is not None:
+        term = evaluate_cubic_spline(r_eval, knots, coeffs)
+    else:
+        epsilon_lj = jnp.asarray(epsilon_lj, dtype=R.dtype)
+        sigma_lj = jnp.asarray(sigma_lj, dtype=R.dtype)
+        r_safe = jnp.maximum(r_eval, jnp.array(1e-3, dtype=R.dtype))
+        sr6 = (sigma_lj / r_safe) ** 6
+        term = 4.0 * epsilon_lj * (sr6 * sr6 - sr6)
+
+    return jnp.sum(jnp.where(valid, term, 0.0))
+
+
 def _angular_fourier_energy(theta: jax.Array, a: jax.Array, b: jax.Array) -> jax.Array:
     """
     Compute Fourier series energy for angles.
@@ -606,6 +646,11 @@ class PriorEnergy:
         self.salt_bridge_enabled = bool(sb_cfg.get("enabled", False))
         self.salt_bridge_min_seq_sep = max(1, int(sb_cfg.get("min_seq_sep", 3)))
 
+        lj_cfg = prior_cfg.get("lj", {})
+        if not isinstance(lj_cfg, dict):
+            lj_cfg = {}
+        self.lj_enabled = bool(lj_cfg.get("enabled", False))
+
         self.dh_local_pairs = _build_local_sequence_pairs(
             self.topology.N_max, max_sep=self.dh_K, min_sep=1
         )
@@ -684,6 +729,8 @@ class PriorEnergy:
             "salt_delta": jnp.asarray(sb_cfg.get("delta", -0.5), dtype=jnp.float32),
             "salt_r0": jnp.asarray(sb_cfg.get("r0", 3.8), dtype=jnp.float32),
             "salt_sigma": jnp.asarray(sb_cfg.get("sigma", 0.3), dtype=jnp.float32),
+            "lj_epsilon": jnp.asarray(prior_params.get("lj_epsilon", 1.0), dtype=jnp.float32),
+            "lj_sigma": jnp.asarray(prior_params.get("lj_sigma", 3.8), dtype=jnp.float32),
         }
 
     def _init_spline_priors(self, spline_path: str, config):
@@ -748,7 +795,16 @@ class PriorEnergy:
         self.dih_knots = jnp.asarray(spline_data["dih_knots"], dtype=jnp.float32)
         self.dih_coeffs = jnp.asarray(spline_data["dih_coeffs"], dtype=jnp.float32)
 
-        # Only repulsive params from YAML (still parametric)
+        self.has_lj_spline = bool("lj_knots" in spline_data and "lj_coeffs" in spline_data)
+        if self.has_lj_spline:
+            self.lj_knots = jnp.asarray(spline_data["lj_knots"], dtype=jnp.float32)
+            self.lj_coeffs = jnp.asarray(spline_data["lj_coeffs"], dtype=jnp.float32)
+        else:
+            model_logger.info(
+                "Spline prior file has no LJ arrays; falling back to parametric LJ when enabled."
+            )
+
+        # Non-spline fallback parameters still come from YAML.
         prior_params = config.get_prior_params()
         self.params = {
             "epsilon": jnp.asarray(prior_params.get("epsilon", 1.0), dtype=jnp.float32),
@@ -759,12 +815,13 @@ class PriorEnergy:
         }
         self.params.update(self._init_new_term_params(prior_params))
 
-        model_logger.info("Spline priors loaded: bond, angle, dihedral (repulsive stays parametric)")
+        model_logger.info("Spline priors loaded: bond, angle, dihedral, LJ (repulsive stays parametric)")
 
     def _init_parametric_priors(self, config):
         """Initialize parametric priors from config YAML."""
         self.uses_splines = False
         self.residue_specific_angles = False
+        self.has_lj_spline = False
 
         prior_params = config.get_prior_params()
         self.params = {
@@ -1117,6 +1174,31 @@ class PriorEnergy:
 
         return E_dih
 
+    def compute_lj_energy(
+        self,
+        R: jax.Array,
+        mask: jax.Array,
+        species: Optional[jax.Array] = None,
+        params: Optional[Dict[str, jax.Array]] = None,
+    ) -> jax.Array:
+        """Compute long-range LJ-style nonbonded energy on the repulsive pair set."""
+        del species  # Unused for the current LJ term.
+        if not self.lj_enabled and self.weights.get("lj", 0.0) == 0.0:
+            return jnp.array(0.0, dtype=R.dtype)
+
+        p = params if params is not None else self.params
+        knots = self.lj_knots if self.has_lj_spline else None
+        coeffs = self.lj_coeffs if self.has_lj_spline else None
+        return compute_lj_energy(
+            R=R,
+            mask=mask,
+            pairs=self.rep_pairs,
+            epsilon_lj=p["lj_epsilon"],
+            sigma_lj=p["lj_sigma"],
+            knots=knots,
+            coeffs=coeffs,
+        )
+
     def compute_energy(
         self,
         R: jax.Array,
@@ -1143,6 +1225,7 @@ class PriorEnergy:
                 - E_dh: Debye-Huckel term (WEIGHTED)
                 - E_stickiness: Typed stickiness term (WEIGHTED)
                 - E_salt_bridge: Salt-bridge correction term (WEIGHTED)
+                - E_lj: LJ-style nonbonded term (WEIGHTED)
                 - E_total: Sum of all weighted components
         """
         # Compute raw energies
@@ -1155,6 +1238,7 @@ class PriorEnergy:
         E_dh_raw = self.compute_dh_energy(R, mask, species=species, params=p)
         E_stick_raw = self.compute_stickiness_energy(R, mask, species=species, params=p)
         E_sb_raw = self.compute_salt_bridge_energy(R, mask, species=species, params=p)
+        E_lj_raw = self.compute_lj_energy(R, mask, species=species, params=p)
 
         # Apply weights
         E_bond = self.weights["bond"] * E_bond_raw
@@ -1165,8 +1249,9 @@ class PriorEnergy:
         E_dh = self.weights.get("dh", 0.0) * E_dh_raw
         E_stick = self.weights.get("stickiness", 0.0) * E_stick_raw
         E_sb = self.weights.get("salt_bridge", 0.0) * E_sb_raw
+        E_lj = self.weights.get("lj", 0.0) * E_lj_raw
 
-        E_total = E_bond + E_angle + E_rep + E_dih + E_ex + E_dh + E_stick + E_sb
+        E_total = E_bond + E_angle + E_rep + E_dih + E_ex + E_dh + E_stick + E_sb + E_lj
 
         return {
             "E_bond": E_bond,
@@ -1177,6 +1262,7 @@ class PriorEnergy:
             "E_dh": E_dh,
             "E_stickiness": E_stick,
             "E_salt_bridge": E_sb,
+            "E_lj": E_lj,
             "E_total": E_total,
         }
 
