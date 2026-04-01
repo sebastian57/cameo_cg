@@ -1,12 +1,71 @@
-#! /bin/bash
+#!/bin/bash
 
-export PATH=/p/project1/cameo/schmidt36/lammps/build:$PATH
-export LAMMPS_PLUGIN_PATH=/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain-deploy/build
+# Discover LAMMPS / chemtrain-deploy runtime paths from the active environment.
+#
+# Expected usage:
+#   1. activate the desired Python environment first
+#   2. source this script
+#
+# Optional overrides:
+#   CAMEO_LAMMPS_BUILD_DIR  - explicit LAMMPS build/bin directory to prepend to PATH
+#   LAMMPS_PLUGIN_PATH      - explicit plugin build directory
+#   JCN_PJRT_PATH           - explicit PJRT plugin library directory
+#
+# This script intentionally derives the chemtrain-deploy paths from the
+# installed chemtrain package location so editable installs keep working after
+# cloning repos into a different filesystem layout.
 
-export JCN_PJRT_PATH=/p/project1/cameo/schmidt36/chemtrain-deploy/external/chemtrain/chemtrain-deploy/lib
-export LD_LIBRARY_PATH=$JCN_PJRT_PATH:$LD_LIBRARY_PATH
+_python_bin="${PYTHON_BIN:-$(command -v python 2>/dev/null || true)}"
+if [[ -z "${_python_bin}" ]]; then
+    echo "ERROR: Could not find python while setting LAMMPS paths." >&2
+    return 1 2>/dev/null || exit 1
+fi
 
-#export PJRT_PLUGIN_LIBRARY_PATH=$JCN_PJRT_PATH/pjrt_plugin.xla_cuda12.so
-#export LD_LIBRARY_PATH=$(python3 -c "import os, jaxlib; print(os.path.dirname(jaxlib.__file__))"):$LD_LIBRARY_PATH
+if [[ -n "${CAMEO_LAMMPS_BUILD_DIR:-}" ]]; then
+    _lammps_build_dir="${CAMEO_LAMMPS_BUILD_DIR}"
+elif command -v lmp >/dev/null 2>&1; then
+    _lammps_build_dir=""
+elif [[ -d "/p/project1/cameo/schmidt36/lammps/build" ]]; then
+    _lammps_build_dir="/p/project1/cameo/schmidt36/lammps/build"
+else
+    _lammps_build_dir=""
+fi
 
+if [[ -n "${_lammps_build_dir}" ]]; then
+    export PATH="${_lammps_build_dir}:${PATH}"
+fi
 
+_chemtrain_repo_root="$(${_python_bin} - <<'PYIN'
+from pathlib import Path
+import chemtrain
+print(Path(chemtrain.__file__).resolve().parents[1])
+PYIN
+)"
+
+if [[ -z "${_chemtrain_repo_root}" ]]; then
+    echo "ERROR: Failed to resolve chemtrain install root from Python." >&2
+    return 1 2>/dev/null || exit 1
+fi
+
+_deploy_root="${_chemtrain_repo_root}/chemtrain-deploy"
+_default_plugin_path="${_deploy_root}/build"
+_default_pjrt_path="${_deploy_root}/lib"
+
+export CHEMTRAIN_REPO_ROOT="${CHEMTRAIN_REPO_ROOT:-${_chemtrain_repo_root}}"
+export CHEMTRAIN_DEPLOY_ROOT="${CHEMTRAIN_DEPLOY_ROOT:-${_deploy_root}}"
+export LAMMPS_PLUGIN_PATH="${LAMMPS_PLUGIN_PATH:-${_default_plugin_path}}"
+export JCN_PJRT_PATH="${JCN_PJRT_PATH:-${_default_pjrt_path}}"
+
+if [[ -d "${JCN_PJRT_PATH}" ]]; then
+    export LD_LIBRARY_PATH="${JCN_PJRT_PATH}:${LD_LIBRARY_PATH:-}"
+fi
+
+if [[ ! -d "${CHEMTRAIN_DEPLOY_ROOT}" ]]; then
+    echo "WARNING: chemtrain-deploy directory not found next to chemtrain install: ${CHEMTRAIN_DEPLOY_ROOT}" >&2
+fi
+if [[ ! -d "${LAMMPS_PLUGIN_PATH}" ]]; then
+    echo "WARNING: LAMMPS_PLUGIN_PATH does not exist: ${LAMMPS_PLUGIN_PATH}" >&2
+fi
+if [[ ! -d "${JCN_PJRT_PATH}" ]]; then
+    echo "WARNING: JCN_PJRT_PATH does not exist: ${JCN_PJRT_PATH}" >&2
+fi

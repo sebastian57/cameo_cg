@@ -1,87 +1,102 @@
-# cameo_cg
+# cameo_cg_pkgflow
 
-**Coarse-Grained Protein ML Force Field Framework**
+`cameo_cg_pkgflow` contains the training, prior-energy, export, and analysis code used for the CAMEO coarse-grained protein force-field workflow. It is the main working repository for training Allegro, Allegro-cuEq, MACE, and PaiNN-based coarse-grained models and exporting them for downstream MD use.
 
-Hybrid ML + physics force field for 1-bead-per-residue coarse-grained protein simulations, combining Allegro/MACE/PaiNN equivariant neural networks with physics-based priors.
+## Recommended Workflow
+
+Use the repository root for shared code, scripts, and documentation.
+Use `local_work/` for everything experiment-specific.
+
+That means:
+- run shell launchers from the repository root
+- keep training configs in `local_work/<experiment>/`
+- let training outputs be created under that same local workspace
+- keep temporary notes, copied checkpoints, debug artifacts, and one-off analysis products in `local_work/`
+- only create files outside `local_work/` if they are intended to be shared and potentially committed
+
+`local_work/` is ignored by git by default.
 
 ## Quick Start
 
+Create a local workspace, copy the shared base config into it, edit that config there, and submit from the repository root.
+
 ```bash
-# Training
-sbatch scripts/run_training.sh config.yaml
+mkdir -p local_work/example_run
+cp configs/base_config.yaml local_work/example_run/example_config.yaml
 
-# Evaluation
-python scripts/evaluate_forces.py exported_models/params.pkl config.yaml
-
-# Monitoring
-tail -f outputs/train_allegro_<JOB_ID>.log
+sbatch ./scripts/run_training.sh local_work/example_run/example_config.yaml
 ```
 
-## Features
+For a single run, outputs are written to:
 
-- **Hybrid architecture**: ML (Allegro/MACE/PaiNN) + physics-based priors (bonds, angles, dihedrals, repulsion)
-- **Force matching**: Direct prediction of CG forces from CG positions
-- **Multi-node training**: JAX distributed + chemtrain for multi-GPU/multi-node parallelism
-- **Three prior types**: Parametric (histogram-fitted), spline (KDE-based), or trained (optimized)
-- **Three evaluation modes**: Full model, prior-only, or ML-only analysis
-- **LAMMPS deployment**: MLIR export for production MD simulations
-
-## Pipeline
-
-```
-H5 trajectories → NPZ extraction → CG mapping → Prior fitting → Training → MLIR export → LAMMPS
+```text
+local_work/example_run/outputs/YYYYMMDD_example_config/
 ```
 
-See [data_prep/run_pipeline.py](data_prep/run_pipeline.py) for the complete offline preprocessing pipeline.
+That run directory contains the copied input config, the resolved runtime config, training logs, checkpoints, exports, profiles, and the SLURM log for the run.
 
-## Documentation
+## Important Path Behavior
 
-- **[UPDATED_PROJECT_CONTEXT.md](UPDATED_PROJECT_CONTEXT.md)**: Comprehensive technical reference (primary documentation)
-- **[COMMANDS.md](COMMANDS.md)**: Quick reference for common operations
-- **[CONTEXT_MD_FILES/](CONTEXT_MD_FILES/)**: Additional context files (bug fixes, plans, scientific notes)
+The launchers are designed so that:
+- the submitted config can live in `local_work/`
+- single-run outputs are written next to that config under `outputs/`
+- suite outputs are written under the submitted config directory as well
+- relative dataset and spline-prior paths can be resolved relative to either the config directory or the repository root
+- launchers should still be invoked from the repository root, for example `sbatch ./scripts/run_training.sh ...`
 
-## Directory Structure
+## Environment Setup
 
-```
-cameo_cg/
-├── scripts/          # Training, evaluation, SLURM submission
-├── models/           # CombinedModel, Allegro/MACE/PaiNN wrappers, priors
-├── training/         # Multi-stage trainer, optimizer factory
-├── data_prep/        # H5→NPZ→CG→priors pipeline
-├── evaluation/       # Metrics, visualizations, scaling analysis
-├── outputs/          # Training logs and SLURM outputs (auto-generated)
-├── checkpoints_allegro/  # Training checkpoints
-└── exported_models/  # MLIR + params.pkl
-```
+Environment and deployment setup is documented in:
+- `env_setup/SETUP_ENV.md`
+- `env_setup/interactive_job.md`
+- `env_setup/LAMMPS_build.md`
+- `CONNECTOR_REBUILD.md`
 
-## Recent Updates (2026-02-12)
+### chemtrain Layout
 
-### New Features
-- **outputs/ directory**: Organized logs (SLURM + training) with git-ignore
-- **Prior-only evaluation**: Measure prior contribution independently
-- **Checkpoint loading**: Auto-detection of trainer state format
-- **Enhanced JAX init**: Try/except error handling + diagnostics
-- **Pipeline refactoring**: Framework-consistent logging + type hints
+The expected local layout is:
+- `chemtrain-deploy/` cloned from the upstream online source
+- `chemtrain_cameo/` cloned from your own source
+- `chemtrain_cameo/` placed at `chemtrain-deploy/external/chemtrain/chemtrain_cameo`
 
-### Improvements
-- Unbuffered output (`-u`) + rank labeling (`-l`) for multi-node debugging
-- Spline prior support (KDE → Bayesian interpolation → cubic splines)
-- Prior-only mode skips ML computation (5-10x faster)
-- Comprehensive type hints across data_prep
-- Enhanced docstrings with Args/Returns/Examples
+This repository expects the active Python environment to import `chemtrain` from that local editable `chemtrain_cameo` checkout.
 
-## Environment
+### Environment Variables For Training
 
-Requires JUWELS Booster modules:
+The launchers no longer fall back to hard-coded old venv paths. Before training, set the environment variables explicitly:
+- `CAMEO_CG_PROJECT_ROOT`: repository root for this checkout
+- `CAMEO_ACTIVE_VENV`: optional explicit override for any model type
+- `CAMEO_CUEQ_VENV`: required for `allegro_cueq*` models when `CAMEO_ACTIVE_VENV` is not set
+- `CAMEO_STANDARD_VENV`: required for non-cueq models when `CAMEO_ACTIVE_VENV` is not set
+- `CAMEO_LAMMPS_BUILD_DIR`: optional override for a local LAMMPS build location
+
+A typical setup looks like:
+
 ```bash
-source /p/project1/cameo/schmidt36/load_modules.sh
-source /p/project1/cameo/schmidt36/clean_booster_env/bin/activate
+export CAMEO_CG_PROJECT_ROOT=/path/to/cameo_cg_pkgflow
+export CAMEO_CUEQ_VENV=/path/to/your/cueq_venv
+export CAMEO_STANDARD_VENV=/path/to/your/standard_venv
 ```
 
-## Citation
+Or force one specific environment for a run:
 
-Part of the CAMEO project. Based on modified chemtrain framework with Allegro/MACE/PaiNN from chemutils.
+```bash
+export CAMEO_ACTIVE_VENV=/path/to/your/venv
+```
 
----
+If the required variable is missing, `scripts/slurm_env.sh` now exits with a short `Python Venv not set at ...` error.
 
-**Last updated**: 2026-02-12
+## Repository Structure
+
+The most important directories are:
+- `scripts/`: SLURM launchers and top-level training/export entry points
+- `config/`: config loading and path helper logic
+- `configs/`: shared reference configs, especially `configs/base_config.yaml`
+- `models/`: ML backbones, combined model, prior energy, and topology code
+- `training/`: trainer wrappers, optimizers, and prior-residual support
+- `export/`: MLIR export and re-export tooling
+- `analysis_tests/`: evaluation and post-training analysis scripts
+- `data/`: runtime dataset loading and preprocessing helpers
+- `data_prep/`: offline dataset generation, coarse-graining, and prior fitting
+- `env_setup/`: environment, module, and deployment setup helpers
+- `local_work/`: ignored local workspace for configs, outputs, and temporary work

@@ -17,6 +17,16 @@ if [[ -z "${CONFIG_FILE:-}" ]]; then
     return 1 2>/dev/null || exit 1
 fi
 
+if [[ -n "${CAMEO_CG_PROJECT_ROOT:-}" ]]; then
+    PROJECT_ROOT="${CAMEO_CG_PROJECT_ROOT}"
+elif [[ -n "${PROJECT_ROOT:-}" ]]; then
+    PROJECT_ROOT="${PROJECT_ROOT}"
+else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+    PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+fi
+export PROJECT_ROOT
+
 # ---------------------------------------------------------------------------
 # Parse ml_model from YAML without Python (awk-based, fast)
 # ---------------------------------------------------------------------------
@@ -46,28 +56,42 @@ export MODEL_TYPE_CANON
 # ---------------------------------------------------------------------------
 # Select virtual environment based on model type
 # ---------------------------------------------------------------------------
-if [[ "${MODEL_TYPE_CANON}" == "allegro_cueq"* ]]; then
-    SELECTED_VENV="/p/project1/cameo/schmidt36/env_cueq_allegro_opt"
-    SELECTED_VENV_NAME="env_cueq_allegro_opt"
+SELECTED_VENV_SOURCE="CAMEO_ACTIVE_VENV"
+if [[ -n "${CAMEO_ACTIVE_VENV:-}" ]]; then
+    SELECTED_VENV="${CAMEO_ACTIVE_VENV}"
+elif [[ "${MODEL_TYPE_CANON}" == allegro_cueq* ]]; then
+    SELECTED_VENV_SOURCE="CAMEO_CUEQ_VENV"
+    SELECTED_VENV="${CAMEO_CUEQ_VENV:-}"
 else
-    SELECTED_VENV="/p/project1/cameo/schmidt36/clean_booster_env"
-    SELECTED_VENV_NAME="clean_booster_env"
+    SELECTED_VENV_SOURCE="CAMEO_STANDARD_VENV"
+    SELECTED_VENV="${CAMEO_STANDARD_VENV:-}"
 fi
+
+if [[ -z "${SELECTED_VENV:-}" ]]; then
+    echo "Python Venv not set at ${SELECTED_VENV_SOURCE}" >&2
+    return 1 2>/dev/null || exit 1
+fi
+
+if [[ ! -d "${SELECTED_VENV}" || ! -f "${SELECTED_VENV}/bin/activate" ]]; then
+    echo "Python Venv not set at ${SELECTED_VENV}" >&2
+    return 1 2>/dev/null || exit 1
+fi
+
+SELECTED_VENV_NAME="$(basename "${SELECTED_VENV}")"
 export SELECTED_VENV
 
 # ---------------------------------------------------------------------------
 # Load modules and activate environment
 # ---------------------------------------------------------------------------
-source /p/project1/cameo/schmidt36/load_modules.sh
+source "${PROJECT_ROOT}/env_setup/load_modules.sh"
 source "${SELECTED_VENV}/bin/activate"
-source /p/project1/cameo/schmidt36/set_lammps_paths.sh
-
 PYTHON_BIN="$(command -v python)"
 if [[ -z "${PYTHON_BIN}" ]]; then
     echo "ERROR: No python found after activating ${SELECTED_VENV_NAME}" >&2
     return 1 2>/dev/null || exit 1
 fi
 export PYTHON_BIN
+source "${PROJECT_ROOT}/env_setup/set_lammps_paths.sh"
 
 echo "Selected ml_model: ${MODEL_TYPE_CANON} -> activated ${SELECTED_VENV_NAME}"
 
@@ -78,8 +102,8 @@ export CC="$(which gcc)"
 export CXX="$(which g++)"
 export CLANG_CUDA_COMPILER_PATH="$(which gcc)"
 
-CUDA_ROOT="$("${PYTHON_BIN}" -c 'import os; from jax_plugins import xla_cuda12; print(os.path.dirname(xla_cuda12.__file__))')"
-SITE_PACKAGES="$("${PYTHON_BIN}" -c 'import site; print(site.getsitepackages()[0])')"
+CUDA_ROOT="$(${PYTHON_BIN} -c 'import os; from jax_plugins import xla_cuda12; print(os.path.dirname(xla_cuda12.__file__))')"
+SITE_PACKAGES="$(${PYTHON_BIN} -c 'import site; print(site.getsitepackages()[0])')"
 export LD_LIBRARY_PATH="${CUDA_ROOT}:${SITE_PACKAGES}/nvidia/cudnn/lib:${SITE_PACKAGES}/nvidia/cuda_runtime/lib:${SITE_PACKAGES}/nvidia/cublas/lib:${SITE_PACKAGES}/nvidia/cusolver/lib:${LD_LIBRARY_PATH:-}"
 
 export CUDA_HOME=/p/software/juwelsbooster/stages/2025/software/CUDA/12

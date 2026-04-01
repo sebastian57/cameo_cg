@@ -1,7 +1,7 @@
 # =============================================================================
 # cameo_cg — Base Configuration Reference
 # =============================================================================
-# All available options with defaults.  Copy this file and modify for your run.
+# All available options with defaults.  Copy this file into local_work/<run>/ and modify it there.
 # Options showing alternatives use the format:  key: value  # alt1 | alt2
 # =============================================================================
 
@@ -23,7 +23,7 @@ debug:
 # null entries default to {output_dir}/{subdir}.
 # -----------------------------------------------------------------------------
 paths:
-  output_dir: ./outputs/default
+  output_dir: ./local_work/default_run   # launcher overrides this to <config_dir>/outputs/<date>_<config_name>
   checkpoint_dir: null         # null -> {output_dir}/checkpoints
   export_dir: null             # null -> {output_dir}/exports
   profile_dir: null            # null -> {output_dir}/profiles

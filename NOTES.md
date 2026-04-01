@@ -54,3 +54,6 @@ Still need to fix the export of the model. Rather need to recompile my LAMMPS co
 Standard deviation of forces. Trained vs. 0 prediction. 
 Safe and minimal LJ prior for anti MD explosions.
 
+
+31.03.2026
+There is an issue with exporting of the uniform1d backend. Currently model is written into naive tp method after training. Need to check this out!

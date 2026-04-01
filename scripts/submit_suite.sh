@@ -70,7 +70,7 @@ fi
 
 DATE_TAG="$(date +%Y%m%d)"
 GROUP_NAME="training_suite_${SUITE_NAME}"
-GROUP_OUTPUT_DIR="${PROJECT_ROOT}/outputs/${DATE_TAG}_${GROUP_NAME}"
+GROUP_OUTPUT_DIR="${INPUT_DIR}/outputs/${DATE_TAG}_${GROUP_NAME}"
 mkdir -p "${GROUP_OUTPUT_DIR}"
 GROUP_OUTPUT_DIR="$(cd "${GROUP_OUTPUT_DIR}" && pwd -P)"
 

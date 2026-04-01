@@ -192,6 +192,52 @@ class CombinedModel:
             params, R, mask, species, neighbor, segment_id=segment_id
         )
 
+    def compute_energy_for_export(
+        self,
+        params: Dict[str, Any],
+        R: jax.Array,
+        mask: jax.Array,
+        species: jax.Array,
+        neighbor: Optional[Any] = None,
+        segment_id: Optional[jax.Array] = None,
+    ) -> jax.Array:
+        """Compute total energy while allowing ML backends to use export-safe paths."""
+        if self.prior_only:
+            return self.compute_energy(
+                params, R, mask, species, neighbor, segment_id=segment_id
+            )
+
+        E_ml = self.ml_model.compute_energy_for_export(
+            params['ml'], R, mask, species, neighbor, segment_id=segment_id
+        )
+
+        if self.use_priors:
+            R_detached = jax.lax.stop_gradient(R)
+            mask_3d = mask[:, None]
+            R_masked = jnp.where(mask_3d > 0, R, R_detached)
+            if self.train_priors and "prior" in params:
+                E_prior = self.prior.compute_total_energy(
+                    R_masked, mask, species=species, params=params["prior"]
+                )
+            else:
+                E_prior = self.prior.compute_total_energy(R_masked, mask, species=species)
+            return E_ml + E_prior
+        return E_ml
+
+    def compute_total_energy_for_export(
+        self,
+        params: Dict[str, Any],
+        R: jax.Array,
+        mask: jax.Array,
+        species: jax.Array,
+        neighbor: Optional[Any] = None,
+        segment_id: Optional[jax.Array] = None,
+    ) -> jax.Array:
+        """Exporter-compatible alias for export-time energy tracing."""
+        return self.compute_energy_for_export(
+            params, R, mask, species, neighbor, segment_id=segment_id
+        )
+
     def compute_components(
         self,
         params: Dict[str, Any],

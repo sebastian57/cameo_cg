@@ -246,6 +246,8 @@ class AllegroModelCuEq(BaseMLModel):
         # mlp_dtype flows to Allegro.__init__ via **allegro_kwargs;
         # logging is an explicit param of the factory (not forwarded to Allegro).
         ml_model_type = config.get_ml_model_type()
+        self.ml_model_type = ml_model_type
+        self._enable_logging = bool(enable_logging)
         if ml_model_type == "allegro_cueq_fast":
             from .allegro_cueq_fast_1103 import (
                 allegro_neighborlist_pp,  # lazy cuequivariance import
@@ -273,6 +275,7 @@ class AllegroModelCuEq(BaseMLModel):
         self._apply_allegro_for_training = self.apply_allegro
         if self.remat_level > 0:
             self._apply_allegro_for_training = jax.checkpoint(self.apply_allegro)
+        self._apply_allegro_for_export = None
 
         self._R0 = R0_safe
         self._species0 = species_safe
@@ -316,8 +319,9 @@ class AllegroModelCuEq(BaseMLModel):
         target_dtype = getattr(ref_position, "dtype", self.compute_dtype)
         return self.nneigh_fn.update(jnp.asarray(R, dtype=target_dtype), nbrs)
 
-    def compute_energy(
+    def _compute_energy_with_apply(
         self,
+        apply_fn: Any,
         params: Any,
         R: jax.Array,
         mask: jax.Array,
@@ -360,11 +364,114 @@ class AllegroModelCuEq(BaseMLModel):
         species_masked = jnp.where(valid_mask, species, 0).astype(jnp.int32)
         R_model = jnp.asarray(R_masked, dtype=self.compute_dtype)
 
-        E = self._apply_allegro_for_training(
+        E = apply_fn(
             params, R_model, nbrs, species_masked,
             mask=valid_mask.astype(jnp.bool_),
         )
         return jnp.asarray(E, dtype=jnp.float32)
+
+    def _build_export_apply_allegro(self):
+        """Build an export-safe apply function when the fast backend needs it."""
+        if self.ml_model_type != "allegro_cueq_fast":
+            return self.apply_allegro
+
+        export_allegro_config = dict(self.allegro_config)
+        requested_method = str(export_allegro_config.get("tp_method", "naive"))
+        requested_method = requested_method.strip().lower().replace("-", "_")
+        layer_methods = export_allegro_config.get("tp_method_by_layer")
+
+        layer_requires_override = isinstance(layer_methods, (list, tuple)) and any(
+            str(method).strip().lower().replace("-", "_") in ("uniform_1d", "linear_1d")
+            for method in layer_methods
+        )
+        method_requires_override = requested_method in ("uniform_1d", "linear_1d")
+
+        if not method_requires_override and not layer_requires_override:
+            return self.apply_allegro
+
+        export_allegro_config["tp_method"] = "naive"
+        if layer_requires_override:
+            export_allegro_config["tp_method_by_layer"] = [
+                "naive"
+                if str(method).strip().lower().replace("-", "_") in ("uniform_1d", "linear_1d")
+                else method
+                for method in layer_methods
+            ]
+
+        tp_mode = export_allegro_config.get("tp_mode")
+        normalized_mode = (
+            str(tp_mode).strip().lower().replace("-", "_")
+            if tp_mode is not None
+            else None
+        )
+        if normalized_mode in ("block_uniform_1d", "block_linear_1d"):
+            export_allegro_config["tp_mode"] = "block_naive"
+
+        from .allegro_cueq_fast_1103 import allegro_neighborlist_pp
+
+        model_logger.info(
+            "Export fallback for allegro_cueq_fast: rebuilding apply_fn with "
+            "tp_method='naive' to avoid cuEq uniform_1d export failures."
+        )
+        _, export_apply = allegro_neighborlist_pp(
+            displacement=self.displacement,
+            r_cutoff=self.cutoff,
+            n_species=self.n_species,
+            positions_test=self._R0,
+            neighbor_test=self.nbrs_init,
+            max_edge_multiplier=self.max_edge_multiplier,
+            max_edges=self.max_edges,
+            mode="energy",
+            logging=self._enable_logging,
+            mlp_dtype=self.mlp_dtype,
+            **export_allegro_config,
+        )
+        return export_apply
+
+    def _get_export_apply_allegro(self):
+        if self._apply_allegro_for_export is None:
+            self._apply_allegro_for_export = self._build_export_apply_allegro()
+        return self._apply_allegro_for_export
+
+    def compute_energy(
+        self,
+        params: Any,
+        R: jax.Array,
+        mask: jax.Array,
+        species: jax.Array,
+        neighbor: Optional[Any] = None,
+        segment_id: Optional[jax.Array] = None,
+    ) -> jax.Array:
+        """Compute cuEq Allegro energy for given coordinates."""
+        return self._compute_energy_with_apply(
+            self._apply_allegro_for_training,
+            params,
+            R,
+            mask,
+            species,
+            neighbor,
+            segment_id=segment_id,
+        )
+
+    def compute_energy_for_export(
+        self,
+        params: Any,
+        R: jax.Array,
+        mask: jax.Array,
+        species: jax.Array,
+        neighbor: Optional[Any] = None,
+        segment_id: Optional[jax.Array] = None,
+    ) -> jax.Array:
+        """Compute energy through an export-safe cuEq path when needed."""
+        return self._compute_energy_with_apply(
+            self._get_export_apply_allegro(),
+            params,
+            R,
+            mask,
+            species,
+            neighbor,
+            segment_id=segment_id,
+        )
 
     @property
     def model_apply_fn(self):

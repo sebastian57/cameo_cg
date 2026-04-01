@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-task=4
-#SBATCH --time=04:00:00
+#SBATCH --time=01:00:00
 #SBATCH --partition=booster
 #SBATCH --output=outputs/slurm-%j.out
 
@@ -125,6 +125,7 @@ if [[ ! -f "${CONFIG_FILE}" ]]; then
     echo "ERROR: Config file not found: ${CONFIG_FILE}"
     exit 1
 fi
+CONFIG_DIR="$(cd "$(dirname "${CONFIG_FILE}")" && pwd -P)"
 
 # Resolve multi-protein dir
 if [[ -n "$MULTI_PROTEIN_DIR" && "${MULTI_PROTEIN_DIR}" != /* ]]; then
@@ -152,8 +153,8 @@ if [[ -n "${PARENT_OUTPUT_DIR:-}" ]]; then
     OUTPUTS_ROOT="${PARENT_OUTPUT_DIR}"
     RUN_OUTPUT_DIR="${OUTPUTS_ROOT}/${RUN_NAME}"
 else
-    # Single-run mode
-    OUTPUTS_ROOT="${PROJECT_ROOT}/outputs"
+    # Single-run mode: keep run outputs next to the submitted config.
+    OUTPUTS_ROOT="${CONFIG_DIR}/outputs"
     RUN_OUTPUT_DIR="${OUTPUTS_ROOT}/${DATE_TAG}_${RUN_NAME}"
 fi
 
@@ -163,6 +164,14 @@ RUN_EXPORT_DIR="${RUN_OUTPUT_DIR}/exports"
 RUN_CHECKPOINT_DIR="${RUN_OUTPUT_DIR}/checkpoints"
 RUN_PROFILE_DIR="${RUN_OUTPUT_DIR}/profiles"
 mkdir -p "${RUN_EXPORT_DIR}" "${RUN_CHECKPOINT_DIR}" "${RUN_PROFILE_DIR}"
+
+RUN_SLURM_LOG="${RUN_OUTPUT_DIR}/slurm-${JOB_TAG}.out"
+if [[ -n "${SLURM_JOB_ID:-}" && -z "${PARENT_OUTPUT_DIR:-}" ]]; then
+    BOOTSTRAP_SLURM_LOG="${SLURM_SUBMIT_DIR:-$(pwd -P)}/outputs/slurm-${SLURM_JOB_ID}.out"
+    if [[ -f "${BOOTSTRAP_SLURM_LOG}" && "${BOOTSTRAP_SLURM_LOG}" != "${RUN_SLURM_LOG}" ]]; then
+        mv "${BOOTSTRAP_SLURM_LOG}" "${RUN_SLURM_LOG}" 2>/dev/null || true
+    fi
+fi
 
 # Runtime config: inject resolved output paths into a copy of the config
 INPUT_CONFIG_COPY="${RUN_OUTPUT_DIR}/config_input.yaml"
@@ -187,6 +196,7 @@ paths['output_dir'] = str(Path(sys.argv[3]).resolve().parent)
 paths['export_dir'] = export_dir
 paths['checkpoint_dir'] = checkpoint_dir
 paths['profile_dir'] = profile_dir
+paths['slurm_dir'] = str(out.parent)
 
 # Also set legacy keys for backward compat with older code paths
 training = data.setdefault('training', {})
@@ -202,7 +212,7 @@ spline_file = priors.get('spline_file')
 if spline_file:
     sp = Path(spline_file)
     if not sp.is_absolute():
-        for candidate in [project_root / sp, src.parent / sp]:
+        for candidate in [src.parent / sp, project_root / sp]:
             if candidate.exists():
                 priors['spline_file'] = str(candidate.resolve())
                 break
@@ -214,7 +224,12 @@ data_path = ((data.get('data') or {}).get('path'))
 if data_path:
     dp = Path(data_path)
     if not dp.is_absolute():
-        data['data']['path'] = str((project_root / dp).resolve())
+        for candidate in [src.parent / dp, project_root / dp]:
+            if candidate.exists():
+                data['data']['path'] = str(candidate.resolve())
+                break
+        else:
+            data['data']['path'] = str((project_root / dp).resolve())
 
 out.write_text(yaml.safe_dump(data, sort_keys=False))
 PYCFG

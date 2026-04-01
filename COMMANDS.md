@@ -1,271 +1,156 @@
-# cameo_cg — Command Reference
+# Command Reference
 
-Quick reference for common operations.
+## Core Pattern
 
----
+Run commands from the repository root, but keep configs and outputs in `local_work/`.
 
-## Repository Layout
-
-```
-cameo_cg/
-├── config/            # ConfigManager + type definitions
-├── configs/           # base_config.yaml (all options documented)
-├── data/              # DatasetLoader, CoordinatePreprocessor
-├── data_prep/         # CG mapping, prior fitting, dataset tools
-├── models/            # ML model wrappers, PriorEnergy, topology
-├── training/          # Trainer, optimizers, prior residual
-├── export/            # ModelExporter (MLIR for LAMMPS)
-├── analysis_tests/    # All evaluation, analysis, and test scripts
-├── scripts/           # train.py, SLURM wrappers, shell scripts
-├── utils/             # Shared JAX setup utilities
-├── new_conf.yaml      # Working example config
-└── COMMANDS.md        # This file
+```bash
+mkdir -p local_work/example_run
+cp configs/base_config.yaml local_work/example_run/example_config.yaml
+sbatch ./scripts/run_training.sh local_work/example_run/example_config.yaml
 ```
 
----
+Single-run outputs appear under:
+
+```text
+local_work/example_run/outputs/YYYYMMDD_example_config/
+```
 
 ## Training
 
-### Single-Node Training (4 GPUs)
+Single node:
 
 ```bash
-sbatch scripts/run_training.sh new_conf.yaml
+sbatch ./scripts/run_training.sh local_work/example_run/example_config.yaml
 ```
 
-### Multi-Node Training
+Two nodes:
 
 ```bash
-sbatch --nodes=2 scripts/run_training.sh new_conf.yaml
+sbatch --nodes=2 ./scripts/run_training.sh local_work/example_run/example_config.yaml
 ```
 
-### Resume from Checkpoint
+Resume from the latest checkpoint:
 
 ```bash
-sbatch scripts/run_training.sh new_conf.yaml --resume auto
-sbatch scripts/run_training.sh new_conf.yaml --resume ./checkpoints/epoch30.pkl
+sbatch ./scripts/run_training.sh local_work/example_run/example_config.yaml --resume auto
 ```
 
-### Suite of Experiments (Array Jobs)
-
-Place multiple config files in a directory, then:
+Resume from a specific checkpoint:
 
 ```bash
-bash scripts/submit_suite.sh --input_dir ./my_configs/ --name my_experiment
+sbatch ./scripts/run_training.sh   local_work/example_run/example_config.yaml   --resume local_work/example_run/outputs/YYYYMMDD_example_config/checkpoints/stage_sgd_nesterov_epoch2.pkl
 ```
 
-This creates a SLURM array job — one task per config file. Results are
-written to each config's `paths.output_dir`.
+## Suite Submission
 
-### Run Analysis Over a Suite
+Prepare a config directory under `local_work/`, then submit:
 
 ```bash
-sbatch scripts/run_analysis.sh /path/to/suite/output/
+bash ./scripts/submit_suite.sh   --input_dir local_work/my_suite/configs   --name my_suite
 ```
 
-Or directly:
+Suite outputs are written under the submitted config directory:
+
+```text
+local_work/my_suite/configs/outputs/YYYYMMDD_training_suite_my_suite/
+```
+
+## Monitoring
+
+Follow the main training log:
 
 ```bash
-python analysis_tests/analyze_suite.py /path/to/suite/output/ --detailed-force-eval
+tail -f local_work/example_run/outputs/YYYYMMDD_example_config/train_<jobid>.log
 ```
 
----
-
-## Evaluation
-
-All evaluation scripts live in `analysis_tests/`.
-
-### Force Evaluation
-
-Three modes: `full` (ML + priors), `prior-only`, `ml-only`.
+Follow the SLURM log:
 
 ```bash
-# Full model evaluation
-python analysis_tests/evaluate_forces.py \
-    exported_models/model_params.pkl new_conf.yaml --frames 50
-
-# Prior-only
-python analysis_tests/evaluate_forces.py \
-    new_conf.yaml --mode prior-only --frames 10
-
-# ML-only
-python analysis_tests/evaluate_forces.py \
-    exported_models/model_params.pkl new_conf.yaml --mode ml-only
+tail -f local_work/example_run/outputs/YYYYMMDD_example_config/slurm-<jobid>.out
 ```
 
-### Full Dataset Evaluation
+Cluster helpers:
 
 ```bash
-python analysis_tests/evaluate.py new_conf.yaml params.pkl --full
+squeue -u $USER
+scontrol show job <jobid>
+scancel <jobid>
 ```
-
-### Plotting Loss Curves
-
-```bash
-python analysis_tests/visualizer.py train.log new_conf.yaml loss_plot.png
-```
-
-Loss curves are also auto-plotted at the end of training.
-
----
 
 ## Export
 
-### Post-hoc MLIR Export from Saved Params
-
-Use this when training was pure ML (`model.use_priors: false`) but you want
-to reattach fixed priors only for deployment.
+Post-hoc MLIR re-export:
 
 ```bash
-python export/reexport_mlir.py \
-    /path/to/model_params.pkl \
-    /path/to/model_config.yaml \
-    --mode combined \
-    --prior-source config \
-    --output-name model_with_priors
+python export/reexport_mlir.py   /path/to/model_params.pkl   /path/to/model_config.yaml   --mode combined   --prior-source config   --output-name model_with_priors
 ```
 
-This writes:
-- `model_with_priors.mlir`
-- `model_with_priors_params.pkl`
-- `model_with_priors_config.yaml`
-
-Use `--mode ml-only` to force an ML-only re-export. Use
-`--prior-source params` if the input pickle already contains a prior block and
-you want to preserve it instead of replacing it with the fixed config priors.
-
-Submit to a GPU node with:
+Batch re-export:
 
 ```bash
-sbatch export/run_reexport.sh /path/to/model_params.pkl /path/to/export_priors_minimal.yaml \
-    --mode combined --prior-source config --output-name model_with_priors
+sbatch export/run_reexport.sh   /path/to/model_params.pkl   /path/to/export_config.yaml   --mode combined   --prior-source config   --output-name model_with_priors
 ```
 
----
+## Evaluation And Analysis
+
+Force evaluation:
+
+```bash
+python analysis_tests/evaluate_forces.py   /path/to/model_params.pkl   /path/to/config.yaml   --frames 50
+```
+
+Suite analysis:
+
+```bash
+sbatch scripts/run_analysis.sh /path/to/suite/output
+```
+
+Direct suite analysis:
+
+```bash
+python analysis_tests/analyze_suite.py /path/to/suite/output --detailed-force-eval
+```
 
 ## Data Preparation
 
-### Coarse-Graining
+Coarse-grain a trajectory:
 
 ```bash
-python data_prep/cg_1bead.py \
-    --npz raw_data/protein_allatom.npz \
-    --pdb raw_data/protein_topology.pdb \
-    --output data_prep/datasets/protein_cg.npz
+python data_prep/cg_1bead.py   --npz raw_data/protein_allatom.npz   --pdb raw_data/protein_topology.pdb   --output data_prep/datasets/protein_cg.npz
 ```
 
-### Prior Fitting
+Fit priors:
 
 ```bash
-# Parametric + spline priors
-python data_prep/prior_fitting_script.py \
-    --data /path/to/dataset.npz \
-    --out_yaml data_prep/fitted_priors.yaml \
-    --plots_dir data_prep/plots \
-    --T 320.0 \
-    --spline \
-    --spline_out data_prep/datasets/fitted_priors_spline.npz
+python data_prep/prior_fitting_script.py   --data /path/to/dataset.npz   --out_yaml data_prep/fitted_priors.yaml   --plots_dir data_prep/plots   --T 320.0   --spline   --spline_out data_prep/datasets/fitted_priors_spline.npz
 ```
 
-### Dataset Analysis
+## Environment
+
+Primary setup docs:
+- `env_setup/SETUP_ENV.md`
+- `env_setup/interactive_job.md`
+- `env_setup/LAMMPS_build.md`
+- `CONNECTOR_REBUILD.md`
+
+Override the selected environment for a run:
 
 ```bash
-python data_prep/analyze_dataset.py --npz data_prep/datasets/my_data.npz
+export CAMEO_ACTIVE_VENV=/path/to/venv
+sbatch ./scripts/run_training.sh local_work/example_run/example_config.yaml
 ```
 
----
+## Repository Map
 
-## Configuration
-
-Reference config with all options documented: `configs/base_config.yaml`
-
-Working example: `new_conf.yaml`
-
-### Key Sections
-
-```yaml
-debug:
-  neighbor_logging: false
-  shape_trace: false
-  model_logging: false
-
-paths:
-  output_dir: ./outputs/my_run
-  checkpoint_dir: null       # null -> {output_dir}/checkpoints
-  export_dir: null           # null -> {output_dir}/exports
-
-data:
-  path: data_prep/datasets/my_data.npz
-  batch_mode: standard       # standard | tiled
-
-model:
-  ml_model: allegro          # allegro | allegro_cueq | allegro_cueq_fast | mace | painn
-  use_priors: true
-  cutoff: 10.0
-  allegro:                   # direct hyperparameters (no size indirection)
-    num_types: 22
-    max_ell: 2
-    num_layers: 3
-    ...
-
-training:
-  stages:                    # ordered list — add more stages freely
-    - optimizer: adabelief
-      epochs: 80
-    - optimizer: lamb
-      epochs: 0
-  batch_per_device: 2
-  compute_dtype: float32     # float32 | bfloat16
-```
-
----
-
-## SLURM Job Management
-
-```bash
-squeue -u $USER                         # list jobs
-scontrol show job <JOB_ID>              # details
-scancel <JOB_ID>                        # cancel
-tail -f outputs/slurm-<JOB_ID>.out      # live output
-```
-
----
-
-## Debugging
-
-### Debug Config Section
-
-All debug flags default to off. Override via YAML or environment variables:
-
-```yaml
-debug:
-  neighbor_logging: true     # or: CHEMTRAIN_DEBUG_NEIGHBOR=1
-  shape_trace: true          # or: CHEMTRAIN_DEBUG_SHAPE_TRACE=1
-  model_logging: true        # jax.debug.print in compiled blocks
-```
-
-### GPU / JAX Checks
-
-```bash
-nvidia-smi -L
-echo $CUDA_VISIBLE_DEVICES
-```
-
-```python
-import jax
-print(jax.devices(), jax.process_count(), jax.process_index())
-```
-
-### Environment Variables
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `JAX_ENABLE_X64` | `0` | Enable 64-bit precision |
-| `JAX_INIT_TIMEOUT` | `1800` | Distributed init timeout (seconds) |
-| `CHEMTRAIN_DEBUG_NEIGHBOR` | `0` | Neighbor list debug logging |
-| `CHEMTRAIN_DEBUG_SHAPE_TRACE` | `0` | One-shot shape trace |
-
-### Common Issues
-
-1. **QOSMaxWallDurationPerJobLimit**: Reduce `--time`
-2. **Multi-node failures**: Check coordinator setup in SLURM output
-3. **Memory errors**: Reduce `batch_per_device` or `max_frames`
+- `scripts/`: launchers and top-level entry points
+- `config/`: config manager and path helpers
+- `configs/`: shared reference configs
+- `models/`: ML and prior-energy code
+- `training/`: trainer wrappers and optimizer setup
+- `export/`: deployment export code
+- `analysis_tests/`: evaluation scripts
+- `data/`: runtime data loading
+- `data_prep/`: offline preprocessing
+- `env_setup/`: environment setup helpers
+- `local_work/`: ignored local experiment workspace

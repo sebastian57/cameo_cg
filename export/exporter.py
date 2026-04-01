@@ -271,8 +271,12 @@ class ModelExporter(exporter.Exporter):
             # Empty prior params if not using priors
             prior_params = {}
 
-        # Use model's compute_total_energy as apply_fn if not provided
+        # Use model's export-safe total-energy path as apply_fn if not provided
         if apply_fn is None:
+            energy_fn = getattr(
+                model, "compute_total_energy_for_export", model.compute_total_energy
+            )
+
             # Create wrapper function that matches expected signature
             def default_apply_fn(
                 params_, apply_model_, nneigh_fn_, displacement_,
@@ -280,7 +284,7 @@ class ModelExporter(exporter.Exporter):
                 bonds_, angles_, rep_pairs_, dihedrals_, prior_params_,
                 neighbor=None
             ):
-                return model.compute_total_energy(params_, R_, mask_, species_, neighbor)
+                return energy_fn(params_, R_, mask_, species_, neighbor)
 
             apply_fn = default_apply_fn
 

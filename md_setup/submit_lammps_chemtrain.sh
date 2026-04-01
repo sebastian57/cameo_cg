@@ -7,14 +7,20 @@
 #SBATCH --partition=booster
 #SBATCH --gres=gpu:4
 
+set -Eeuo pipefail
 
-source /p/project1/cameo/schmidt36/load_modules.sh
-source /p/project1/cameo/schmidt36/env_cueq_allegro_opt/bin/activate
-source /p/project1/cameo/schmidt36/set_lammps_paths.sh
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+VENV_DIR="${CAMEO_CUEQ_VENV:-/p/project1/cameo/schmidt36/env_cueq_allegro_opt}"
+LMP_BIN="${CAMEO_LMP_BIN:-lmp}"
 
-PROJECT_ROOT=/p/project1/cameo/schmidt36/cameo_cg
-INPUT_FILE="$PROJECT_ROOT/md_setup/inp_lammps_trained.in"
-cd "$PROJECT_ROOT"
+source "${PROJECT_ROOT}/env_setup/load_modules.sh"
+source "${VENV_DIR}/bin/activate"
+export PYTHON_BIN="$(command -v python)"
+source "${PROJECT_ROOT}/env_setup/set_lammps_paths.sh"
+
+INPUT_FILE="${PROJECT_ROOT}/md_setup/inp_lammps_trained.in"
+cd "${PROJECT_ROOT}"
 
 echo "[MLIR preflight] disabled for the modernized JAX 0.9.x deployment path"
 
@@ -27,4 +33,4 @@ export TF_CPP_MIN_LOG_LEVEL=2
 export CUDA_HOME=/p/software/juwelsbooster/stages/2025/software/CUDA/12
 export XLA_FLAGS="--xla_gpu_autotune_level=0 --xla_gpu_cuda_data_dir=$CUDA_HOME"
 
-srun /p/project1/cameo/schmidt36/lammps/build/lmp -in "$INPUT_FILE"
+srun "${LMP_BIN}" -in "${INPUT_FILE}"

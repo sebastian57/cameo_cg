@@ -1,23 +1,30 @@
+# --- local workspaces (keep work outside tracked source tree) ---
+local_work/*
+!local_work/.gitignore
+new_conf.yaml
+
 # --- local agent / assistant notes (not for repo) ---
 LOCAL_AGENT_CONTEXT.md
 CLEANUP_PLAN.md
 
-# --- logs ---
+# --- tracked markdown whitelist ---
+**/*.md
+!README.md
+!COMMANDS.md
+!NOTES.md
+!WORKFLOW.md
+!CONNECTOR_REBUILD.md
+!env_setup/LAMMPS_build.md
+!env_setup/interactive_job.md
+!env_setup/SETUP_ENV.md
+
+# --- logs / outputs ---
 outputs/
 train_*.log
 slurm-*.out
 force_matching.log
-configs_testing/
-tiling_testing/
-test_configs/
-configs_cleanup_val/
-configs_further_tests/
-full_eval/
-saved_models/
-# --- crash dumps / core files ---
-core.*
 
-# --- run artifacts / outputs (dirs) ---
+# --- run artifacts / outputs ---
 exported_models/
 force_eval/
 force_eval_test/
@@ -26,39 +33,38 @@ checkpoints_scaling/
 checkpoints_mace/
 checkpoints_painn/
 checkpoints_phase1_r1/
+checkpoints_profile_compare/
 scaling_results/
 rand_plots/
 ml_training_testing_suite/outputs/
 training_exp_configs/
-checkpoints_configs_testing/
-config/__pycache__/
-models/__pycache__/
-utils__pycache__/
-data/__pycache__/
-training/__pycache__/
+configs_testing/
+test_configs/
+configs_cleanup_val/
+configs_further_tests/
+tiling_testing/
+full_eval/
+saved_models/
 
-# --- pycache / python artifacts ---
-models/__pycache__/
-data_prep/__pycache__/
-scripts/__pycache__/
+# --- crash dumps / core files ---
+core.*
+
+# --- python caches / build artifacts ---
+__pycache__/
+**/__pycache__/
 *.pyc
-evaluation/__pycache__/
-export/__pycache__/
-checkpoints_profile_compare/
-checkpoints_allegro/__pycache__/
-checkpoints_scaling/__pycache__/
-checkpoints_mace/__pycache__/
-checkpoints_painn/__pycache__/
-config/__pycache__/
-data/__pycache__/
-exported_models/__pycache__/
-force_eval/__pycache__/
+*.pyo
+*.pyd
+*.py[cod]
+*.so
+*.egg-info/
 
 # --- large / generated datasets ---
 data_prep/datasets/
 data_prep/plots
 data_prep/plots_2g4q4z5k_i4/
-# --- temporary / old scripts --- 
+
+# --- temporary / old scripts ---
 scripts/analyze_scaling.py
 scripts/config_scaling_test.yaml
 scripts/run_scaling_test.sh
