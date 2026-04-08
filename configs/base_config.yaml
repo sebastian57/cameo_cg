@@ -19,15 +19,14 @@ debug:
   model_logging: false           # jax.debug.print inside compiled model blocks
 
 # -----------------------------------------------------------------------------
-# Output paths — all outputs derive from output_dir unless overridden.
-# null entries default to {output_dir}/{subdir}.
+# Output paths — set output_dir once.
+# Other directories default to {output_dir}/{subdir}:
+# checkpoints, exports, profiles, slurm.
+# Optional manual overrides are supported by adding:
+# paths.checkpoint_dir / paths.export_dir / paths.profile_dir / paths.slurm_dir
 # -----------------------------------------------------------------------------
 paths:
   output_dir: ./local_work/default_run   # launcher overrides this to <config_dir>/outputs/<date>_<config_name>
-  checkpoint_dir: null         # null -> {output_dir}/checkpoints
-  export_dir: null             # null -> {output_dir}/exports
-  profile_dir: null            # null -> {output_dir}/profiles
-  slurm_dir: null              # null -> {output_dir}/slurm
 
 # -----------------------------------------------------------------------------
 # Data
