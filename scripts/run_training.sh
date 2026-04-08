@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-task=4
-#SBATCH --time=01:00:00
+#SBATCH --time=04:00:00
 #SBATCH --partition=booster
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
@@ -177,9 +177,28 @@ if [[ -n "${PARENT_OUTPUT_DIR:-}" ]]; then
     OUTPUTS_ROOT="${PARENT_OUTPUT_DIR}"
     RUN_OUTPUT_DIR="${OUTPUTS_ROOT}/${RUN_NAME}"
 else
-    # Single-run mode: keep run outputs next to the submitted config.
-    OUTPUTS_ROOT="${CONFIG_DIR}/outputs"
-    RUN_OUTPUT_DIR="${OUTPUTS_ROOT}/${DATE_TAG}_${RUN_NAME}"
+    # Single-run mode:
+    # 1) If paths.output_dir is set in config, use it (absolute or repo-root-relative).
+    # 2) Otherwise default to local_work/outputs/<date>_<run_name>.
+    CONFIG_OUTPUT_DIR="$("${PYTHON_BIN}" -c "
+import sys, yaml
+try:
+    d = yaml.safe_load(open(sys.argv[1])) or {}
+except Exception:
+    d = {}
+v = ((d.get('paths') or {}).get('output_dir'))
+print('' if v is None else str(v).strip())
+" "${CONFIG_FILE}" 2>/dev/null || echo '')"
+    if [[ -n "${CONFIG_OUTPUT_DIR}" ]]; then
+        if [[ "${CONFIG_OUTPUT_DIR}" == /* ]]; then
+            RUN_OUTPUT_DIR="${CONFIG_OUTPUT_DIR}"
+        else
+            RUN_OUTPUT_DIR="${PROJECT_ROOT}/${CONFIG_OUTPUT_DIR}"
+        fi
+    else
+        OUTPUTS_ROOT="${PROJECT_ROOT}/local_work/outputs"
+        RUN_OUTPUT_DIR="${OUTPUTS_ROOT}/${DATE_TAG}_${RUN_NAME}"
+    fi
 fi
 
 mkdir -p "${RUN_OUTPUT_DIR}"

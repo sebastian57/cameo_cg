@@ -26,7 +26,7 @@ debug:
 # paths.checkpoint_dir / paths.export_dir / paths.profile_dir / paths.slurm_dir
 # -----------------------------------------------------------------------------
 paths:
-  output_dir: ./local_work/default_run   # launcher overrides this to <config_dir>/outputs/<date>_<config_name>
+  output_dir: ./local_work/outputs/my_run   # optional override; default launcher path is local_work/outputs/<date>_<config_name>
 
 # -----------------------------------------------------------------------------
 # Data

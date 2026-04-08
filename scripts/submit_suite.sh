@@ -4,7 +4,7 @@
 #
 # Usage:
 #   scripts/submit_suite.sh --input_dir <config_dir> --name <suite_name> \
-#       [--max_concurrent 4] [--nodes 1]
+#       [--max_concurrent 4] [--nodes 1] [--output_root local_work/outputs]
 #
 # Each *.yaml in <config_dir> becomes one array task.
 # =============================================================================
@@ -43,6 +43,7 @@ INPUT_DIR=""
 SUITE_NAME=""
 MAX_CONCURRENT="${MAX_CONCURRENT:-4}"
 NODES=1
+OUTPUT_ROOT="${OUTPUT_ROOT:-${PROJECT_ROOT}/local_work/outputs}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -50,15 +51,16 @@ while [[ $# -gt 0 ]]; do
         --name)       SUITE_NAME="$2";      shift 2 ;;
         --max_concurrent) MAX_CONCURRENT="$2"; shift 2 ;;
         --nodes)      NODES="$2";           shift 2 ;;
+        --output_root) OUTPUT_ROOT="$2";    shift 2 ;;
         *)
             echo "Unknown argument: $1"
-            echo "Usage: $0 --input_dir <config_dir> --name <suite_name> [--max_concurrent <n>] [--nodes <n>]"
+            echo "Usage: $0 --input_dir <config_dir> --name <suite_name> [--max_concurrent <n>] [--nodes <n>] [--output_root <dir>]"
             exit 1 ;;
     esac
 done
 
 if [[ -z "${INPUT_DIR}" || -z "${SUITE_NAME}" ]]; then
-    echo "Usage: $0 --input_dir <config_dir> --name <suite_name> [--max_concurrent <n>] [--nodes <n>]"
+    echo "Usage: $0 --input_dir <config_dir> --name <suite_name> [--max_concurrent <n>] [--nodes <n>] [--output_root <dir>]"
     exit 1
 fi
 
@@ -68,9 +70,15 @@ if [[ ! -d "${INPUT_DIR}" ]]; then
     exit 1
 fi
 
+if [[ "${OUTPUT_ROOT}" != /* ]]; then
+    OUTPUT_ROOT="${PROJECT_ROOT}/${OUTPUT_ROOT}"
+fi
+mkdir -p "${OUTPUT_ROOT}"
+OUTPUT_ROOT="$(cd "${OUTPUT_ROOT}" && pwd -P)"
+
 DATE_TAG="$(date +%Y%m%d)"
 GROUP_NAME="training_suite_${SUITE_NAME}"
-GROUP_OUTPUT_DIR="${INPUT_DIR}/outputs/${DATE_TAG}_${GROUP_NAME}"
+GROUP_OUTPUT_DIR="${OUTPUT_ROOT}/${DATE_TAG}_${GROUP_NAME}"
 mkdir -p "${GROUP_OUTPUT_DIR}"
 GROUP_OUTPUT_DIR="$(cd "${GROUP_OUTPUT_DIR}" && pwd -P)"
 
@@ -93,6 +101,7 @@ echo "============================================================"
 echo "Submitting suite: ${GROUP_NAME}"
 echo "  Project root:     ${PROJECT_ROOT}"
 echo "  Input directory:  ${INPUT_DIR}"
+echo "  Output root:      ${OUTPUT_ROOT}"
 echo "  Group output:     ${GROUP_OUTPUT_DIR}"
 echo "  Config count:     ${#configs[@]}"
 echo "  Array spec:       ${ARRAY_SPEC}"

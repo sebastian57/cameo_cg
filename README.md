@@ -10,7 +10,7 @@ Use `local_work/` for everything experiment-specific.
 That means:
 - run shell launchers from the repository root
 - keep training configs in `local_work/<experiment>/`
-- let training outputs be created under that same local workspace
+- let training outputs be created under `local_work/outputs/`
 - keep temporary notes, copied checkpoints, debug artifacts, and one-off analysis products in `local_work/`
 - only create files outside `local_work/` if they are intended to be shared and potentially committed
 
@@ -30,7 +30,7 @@ sbatch ./scripts/run_training.sh local_work/example_run/example_config.yaml
 For a single run, outputs are written to:
 
 ```text
-local_work/example_run/outputs/YYYYMMDD_example_config/
+local_work/outputs/YYYYMMDD_example_config/
 ```
 
 That run directory contains the copied input config, the resolved runtime config, training logs, checkpoints, exports, profiles, and the SLURM log for the run.
@@ -39,8 +39,9 @@ That run directory contains the copied input config, the resolved runtime config
 
 The launchers are designed so that:
 - the submitted config can live in `local_work/`
-- single-run outputs are written next to that config under `outputs/`
-- suite outputs are written under the submitted config directory as well
+- single-run outputs default to `local_work/outputs/YYYYMMDD_<config_name>/`
+- set `paths.output_dir` in a config to force an explicit run directory
+- suite outputs are written under `local_work/outputs/` by default
 - relative dataset and spline-prior paths can be resolved relative to either the config directory or the repository root
 - launchers should still be invoked from the repository root, for example `sbatch ./scripts/run_training.sh ...`
 

@@ -13,7 +13,7 @@ sbatch ./scripts/run_training.sh local_work/example_run/example_config.yaml
 Single-run outputs appear under:
 
 ```text
-local_work/example_run/outputs/YYYYMMDD_example_config/
+local_work/outputs/YYYYMMDD_example_config/
 ```
 
 ## Training
@@ -39,7 +39,7 @@ sbatch ./scripts/run_training.sh local_work/example_run/example_config.yaml --re
 Resume from a specific checkpoint:
 
 ```bash
-sbatch ./scripts/run_training.sh   local_work/example_run/example_config.yaml   --resume local_work/example_run/outputs/YYYYMMDD_example_config/checkpoints/stage_sgd_nesterov_epoch2.pkl
+sbatch ./scripts/run_training.sh   local_work/example_run/example_config.yaml   --resume local_work/outputs/YYYYMMDD_example_config/checkpoints/stage_sgd_nesterov_epoch2.pkl
 ```
 
 ## Suite Submission
@@ -50,10 +50,10 @@ Prepare a config directory under `local_work/`, then submit:
 bash ./scripts/submit_suite.sh   --input_dir local_work/my_suite/configs   --name my_suite
 ```
 
-Suite outputs are written under the submitted config directory:
+Suite outputs are written under `local_work/outputs` by default:
 
 ```text
-local_work/my_suite/configs/outputs/YYYYMMDD_training_suite_my_suite/
+local_work/outputs/YYYYMMDD_training_suite_my_suite/
 ```
 
 ## Monitoring
@@ -61,13 +61,13 @@ local_work/my_suite/configs/outputs/YYYYMMDD_training_suite_my_suite/
 Follow the main training log:
 
 ```bash
-tail -f local_work/example_run/outputs/YYYYMMDD_example_config/train_<jobid>.log
+tail -f local_work/outputs/YYYYMMDD_example_config/train_<jobid>.log
 ```
 
 Follow the SLURM log:
 
 ```bash
-tail -f local_work/example_run/outputs/YYYYMMDD_example_config/slurm-<jobid>.out
+tail -f local_work/outputs/YYYYMMDD_example_config/slurm-<jobid>.out
 ```
 
 Cluster helpers:
