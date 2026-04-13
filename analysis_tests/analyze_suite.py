@@ -224,14 +224,24 @@ def _mean_epoch_time_from_results(results: Dict[str, Any]) -> float:
 def _select_eval_venv(config_path: Path) -> tuple[Path, str]:
     config = ConfigManager(str(config_path))
     ml_model = config.get_ml_model_type()
-    if ml_model.startswith('allegro_cueq'):
-        venv_dir = Path('/p/project1/cameo/schmidt36/env_cueq_allegro_opt')
-        venv_name = 'env_cueq_allegro_opt'
+
+    if ml_model.startswith("allegro_cueq"):
+        preferred_env = "CAMEO_CUEQ_VENV"
     else:
-        venv_dir = Path('/p/project1/cameo/schmidt36/clean_booster_env')
-        venv_name = 'clean_booster_env'
-    python_bin = venv_dir / 'bin' / 'python'
-    return python_bin, venv_name
+        preferred_env = "CAMEO_STANDARD_VENV"
+
+    venv_raw = os.environ.get(preferred_env) or os.environ.get("CAMEO_ACTIVE_VENV")
+    if not venv_raw:
+        raise RuntimeError(
+            f"Missing virtual environment path. Set {preferred_env} or CAMEO_ACTIVE_VENV."
+        )
+
+    venv_dir = Path(venv_raw).expanduser().resolve()
+    python_bin = venv_dir / "bin" / "python"
+    if not python_bin.exists():
+        raise FileNotFoundError(f"Python executable not found in venv: {python_bin}")
+
+    return python_bin, venv_dir.name
 
 
 def _subprocess_env_for_config(config_path: Path) -> tuple[Path, str, Dict[str, str]]:
@@ -998,6 +1008,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description='Summarize ML training testing-suite runs into a CSV and analysis plots.')
     parser.add_argument('input_dir', type=str, help='Single run directory or a directory containing multiple run directories.')
     parser.add_argument('--output-csv', type=str, default=None, help='Output CSV path. Defaults to <input>_analysis/summary.csv')
+    parser.add_argument('--analysis-dir', type=str, default=None, help='Directory for analysis artifacts. Defaults to input-derived <input>_analysis path.')
     parser.add_argument('--force-eval-frames', type=int, default=32, help='Random training frames to use for force evaluation.')
     parser.add_argument('--force-eval-seed', type=int, default=42, help='Seed for the force-eval subset.')
     parser.add_argument('--devices-per-run', type=int, default=4, help='Devices used during training; used for global batch size and optimizer steps/epoch.')
@@ -1028,7 +1039,7 @@ def main() -> None:
     if not run_dirs:
         raise SystemExit('No completed run directories found after excluding non-completed runs.')
 
-    analysis_root = _analysis_root_for_input(input_path)
+    analysis_root = Path(args.analysis_dir).resolve() if args.analysis_dir else _analysis_root_for_input(input_path)
     tail_plots_dir = analysis_root / 'tail_loss_plots'
     force_eval_plots_dir = analysis_root / 'force_eval_plots'
     detailed_force_eval_root = analysis_root / 'detailed_force_eval'

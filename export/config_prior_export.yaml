@@ -17,7 +17,7 @@
 model_id: training_testing_large_model_lr_with_priors
 
 data:
-  path: /p/project1/cameo/schmidt36/cameo_cg/data_prep/datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz
+  path: data_prep/datasets/2g4q4z5k_320K_kcalmol_1bead_notnorm_aggforce.npz
 
 preprocessing:
   buffer_multiplier: 2.0
@@ -61,7 +61,7 @@ model:
     logging: false
   priors:
     use_spline_priors: true
-    spline_file: /p/project1/cameo/schmidt36/cameo_cg/data_prep/datasets/fitted_priors_spline.npz
+    spline_file: data_prep/datasets/fitted_priors_spline.npz
     residue_specific_angles: false
     weights:
       bond: 0.0

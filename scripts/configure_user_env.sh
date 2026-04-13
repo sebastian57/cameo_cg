@@ -1,22 +1,22 @@
 #!/bin/bash
-# Persist cameo_cg_pkgflow environment variables in ~/.bashrc.
+# Persist cameo_cg environment variables in ~/.bashrc.
 #
 # Usage examples:
 #   source scripts/configure_user_env.sh \
-#       --project-root /p/project1/cameo/schmidt36/cameo_cg_pkgflow \
-#       --cueq-venv /p/project1/cameo/schmidt36/test_env_newsetup \
-#       --standard-venv /p/project1/cameo/schmidt36/clean_booster_env
+#       --project-root /path/to/cameo_cg \
+#       --cueq-venv /path/to/env_cueq \
+#       --standard-venv /path/to/env_standard
 #
 #   source scripts/configure_user_env.sh \
-#       --active-venv /p/project1/cameo/schmidt36/test_env_newsetup
+#       --active-venv /path/to/env_cueq
 #
 #   source scripts/configure_user_env.sh --show
 
 set -euo pipefail
 
 BASHRC_PATH="${HOME}/.bashrc"
-START_MARK="# >>> cameo_cg_pkgflow env >>>"
-END_MARK="# <<< cameo_cg_pkgflow env <<<"
+START_MARK="# >>> cameo_cg env >>>"
+END_MARK="# <<< cameo_cg env <<<"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
 DEFAULT_PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 

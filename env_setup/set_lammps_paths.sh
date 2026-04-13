@@ -25,8 +25,6 @@ if [[ -n "${CAMEO_LAMMPS_BUILD_DIR:-}" ]]; then
     _lammps_build_dir="${CAMEO_LAMMPS_BUILD_DIR}"
 elif command -v lmp >/dev/null 2>&1; then
     _lammps_build_dir=""
-elif [[ -d "/p/project1/cameo/schmidt36/lammps/build" ]]; then
-    _lammps_build_dir="/p/project1/cameo/schmidt36/lammps/build"
 else
     _lammps_build_dir=""
 fi

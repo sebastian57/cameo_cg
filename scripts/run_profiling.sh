@@ -1,4 +1,4 @@
-#!/bin/bash -x
+#!/bin/bash
 
 #SBATCH --account=cameo
 #SBATCH --nodes=1
@@ -6,7 +6,7 @@
 #SBATCH --gpus-per-task=4
 #SBATCH --time=02:00:00
 #SBATCH --partition=booster
-#SBATCH --output=outputs/slurm-%j.out
+#SBATCH --output=/dev/null
 
 # =============================================================================
 # Profiling SLURM script — focused compute vs communication baseline
@@ -30,19 +30,18 @@
 #     sbatch --nodes=2 scripts/run_profiling.sh config_profile_compare.yaml
 #
 #   Resume is not supported for profiling runs (always starts fresh).
-#
-# OUTPUTS (in outputs/ and ./profiles_compare/):
-#   - outputs/slurm-<JOB_ID>.out          — SLURM log (verification output)
-#   - outputs/train_allegro_<JOB_ID>.log  — training log with all timing data
-#   - outputs/gpu_telemetry_<JOB_ID>_<host>.csv — GPU utilization 1 Hz samples
-#   - profiles_compare/stage_sgd_nesterov_rank<R>_epoch*/ — JAX XLA traces
-#
 # =============================================================================
 
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+if [[ -n "${CAMEO_CG_PROJECT_ROOT:-}" ]]; then
+    PROJECT_ROOT="${CAMEO_CG_PROJECT_ROOT}"
+elif [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+    PROJECT_ROOT="${SLURM_SUBMIT_DIR}"
+else
+    PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+fi
 export PROJECT_ROOT
 
 CONFIG_FILE="${1:-config_profile_compare.yaml}"
@@ -54,12 +53,32 @@ if [[ -z "${CONFIG_FILE}" ]]; then
 fi
 
 if [[ "${CONFIG_FILE}" != /* ]]; then
-    if [[ -f "${PROJECT_ROOT}/${CONFIG_FILE}" ]]; then
+    if [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/${CONFIG_FILE}" ]]; then
+        CONFIG_FILE="${SLURM_SUBMIT_DIR}/${CONFIG_FILE}"
+    elif [[ -f "${PROJECT_ROOT}/${CONFIG_FILE}" ]]; then
         CONFIG_FILE="${PROJECT_ROOT}/${CONFIG_FILE}"
     else
         CONFIG_FILE="$(pwd -P)/${CONFIG_FILE}"
     fi
 fi
+if [[ ! -f "${CONFIG_FILE}" ]]; then
+    echo "ERROR: Config file not found: ${CONFIG_FILE}" >&2
+    exit 1
+fi
+
+JOB_TAG="${SLURM_JOB_ID:-local}"
+RUN_NAME="$(basename "${CONFIG_FILE%.*}")"
+DATE_TAG="$(date +%Y%m%d)"
+OUTPUTS_ROOT="${OUTPUT_ROOT:-${PROJECT_ROOT}/local_work/outputs}"
+RUN_OUTPUT_DIR="${PROFILE_OUTPUT_DIR:-${OUTPUTS_ROOT}/${DATE_TAG}_profiling_${RUN_NAME}}"
+if [[ "${RUN_OUTPUT_DIR}" != /* ]]; then
+    RUN_OUTPUT_DIR="${PROJECT_ROOT}/${RUN_OUTPUT_DIR}"
+fi
+mkdir -p "${RUN_OUTPUT_DIR}"
+RUN_OUTPUT_DIR="$(cd "${RUN_OUTPUT_DIR}" && pwd -P)"
+
+RUN_SLURM_LOG="${RUN_OUTPUT_DIR}/slurm-${JOB_TAG}.out"
+exec > >(tee -a "${RUN_SLURM_LOG}") 2>&1
 
 source "${SCRIPT_DIR}/slurm_env.sh"
 
@@ -106,6 +125,7 @@ echo "SLURM Profiling Run Configuration"
 echo "============================================================"
 echo "Config file:    ${CONFIG_FILE}"
 echo "Job ID:         ${SLURM_JOB_ID:-local}"
+echo "Run dir:        ${RUN_OUTPUT_DIR}"
 echo "Nodes:          ${SLURM_NNODES:-1}"
 echo "GPUs/node:      4 (pmap distributes across local GPUs)"
 echo "Total GPUs:     $(( ${SLURM_NNODES:-1} * 4 ))"
@@ -157,13 +177,10 @@ fi
 echo "Project root:    ${PROJECT_ROOT}"
 echo "Training script: ${TRAIN_SCRIPT}"
 
-OUTPUTS_DIR="${PROJECT_ROOT}/outputs"
-mkdir -p "${OUTPUTS_DIR}"
-
 GPU_TELEMETRY_SRUN_PID=""
 if is_truthy "${CHEMTRAIN_PROFILE_GPU_TELEMETRY}"; then
     echo "Starting per-node GPU telemetry sampling (1 Hz)..."
-    GPU_TELEMETRY_PREFIX="${OUTPUTS_DIR}/gpu_telemetry_${SLURM_JOB_ID:-local}"
+    GPU_TELEMETRY_PREFIX="${RUN_OUTPUT_DIR}/gpu_telemetry_${SLURM_JOB_ID:-local}"
     srun --overlap --ntasks-per-node=1 bash -lc "
         out='${GPU_TELEMETRY_PREFIX}_\$(hostname).csv'
         echo 'timestamp,index,util_gpu,util_mem,power_w,sm_clock_mhz,mem_clock_mhz,pci_gen,pci_width' > \"\$out\"
@@ -184,5 +201,5 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-LOGFILE="${OUTPUTS_DIR}/train_allegro_${SLURM_JOB_ID:-local}.log"
+LOGFILE="${RUN_OUTPUT_DIR}/train_allegro_${SLURM_JOB_ID:-local}.log"
 srun -u -l --ntasks-per-node=1 "${PYTHON_BIN}" -u "${TRAIN_SCRIPT}" "${CONFIG_FILE}" 2>&1 | tee -a "${LOGFILE}"

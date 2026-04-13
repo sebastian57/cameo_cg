@@ -33,6 +33,7 @@ paths:
 # -----------------------------------------------------------------------------
 data:
   path: data_prep/datasets/example.npz       # REQUIRED — path to .npz dataset
+  use_bucketed_dir: false                    # true = treat data.path as bucket directory (bucket_N*.npz)
   max_frames: null                            # null = use all frames
   batch_mode: standard                        # standard | tiled
   # Tiled-mode options (only used when batch_mode: tiled)

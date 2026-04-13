@@ -5,30 +5,55 @@
 #SBATCH --gpus-per-task=4
 #SBATCH --time=04:00:00
 #SBATCH --partition=booster
-#SBATCH --output=/p/project1/cameo/schmidt36/cameo_cg/outputs/slurm-pipeline-%j.out
+#SBATCH --output=/dev/null
 
 set -euo pipefail
 
-# -----------------------------------------------------------------------------
-# Editable run configuration
-# -----------------------------------------------------------------------------
-PROJECT_ROOT="/p/project1/cameo/schmidt36/cameo_cg"
-VENV_DIR="/p/project1/cameo/schmidt36/clean_booster_env"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+if [[ -n "${CAMEO_CG_PROJECT_ROOT:-}" ]]; then
+  PROJECT_ROOT="${CAMEO_CG_PROJECT_ROOT}"
+else
+  PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+fi
 
-H5_DIR="${PROJECT_ROOT}/data_prep/datasets/larger_dataset_v2"
-OUT_DIR="${PROJECT_ROOT}/data_prep/datasets/larger_dataset_320K_2500_aggforce_v2"
-NFRAMES=2500
-TEMP_GROUP=320
-PRIOR_FIT_T=320
+if [[ -n "${CAMEO_ACTIVE_VENV:-}" ]]; then
+  VENV_DIR="${CAMEO_ACTIVE_VENV}"
+else
+  VENV_DIR="${CAMEO_STANDARD_VENV:-}"
+fi
+if [[ -z "${VENV_DIR}" ]]; then
+  echo "ERROR: Set CAMEO_STANDARD_VENV (or CAMEO_ACTIVE_VENV) before submitting." >&2
+  exit 1
+fi
 
-ENABLE_SPLINE=0
-RESIDUE_SPECIFIC_ANGLES=0
-NORMALIZE_FORCES=0
-USE_4WAY_GROUPING=0
-VERBOSE=0
+# -----------------------------------------------------------------------------
+# Editable run configuration (all paths can be absolute or project-root relative)
+# -----------------------------------------------------------------------------
+H5_DIR="${H5_DIR:-data_prep/datasets/4pro_dir}"
+DATE_TAG="$(date +%Y%m%d)"
+OUT_DIR="${OUT_DIR:-data_prep/datasets/pipeline_${DATE_TAG}}"
+NFRAMES="${NFRAMES:-2500}"
+TEMP_GROUPS=(${TEMP_GROUPS:-320})
+PRIOR_FIT_T="${PRIOR_FIT_T:-320}"
+
+ENABLE_SPLINE="${ENABLE_SPLINE:-0}"
+RESIDUE_SPECIFIC_ANGLES="${RESIDUE_SPECIFIC_ANGLES:-0}"
+NORMALIZE_FORCES="${NORMALIZE_FORCES:-0}"
+USE_4WAY_GROUPING="${USE_4WAY_GROUPING:-0}"
+VERBOSE="${VERBOSE:-0}"
 # -----------------------------------------------------------------------------
 
-mkdir -p "${PROJECT_ROOT}/outputs"
+if [[ "${H5_DIR}" != /* ]]; then
+  H5_DIR="${PROJECT_ROOT}/${H5_DIR}"
+fi
+if [[ "${OUT_DIR}" != /* ]]; then
+  OUT_DIR="${PROJECT_ROOT}/${OUT_DIR}"
+fi
+
+mkdir -p "${OUT_DIR}"
+LOG_FILE="${OUT_DIR}/slurm-pipeline-${SLURM_JOB_ID:-local}.out"
+exec > >(tee -a "${LOG_FILE}") 2>&1
+
 cd "${PROJECT_ROOT}"
 
 module purge
@@ -71,7 +96,7 @@ CMD=(
   --h5_dir "${H5_DIR}"
   --out_dir "${OUT_DIR}"
   --nframes "${NFRAMES}"
-  --temp "${TEMP_GROUP}"
+  --temp "${TEMP_GROUPS[@]}"
   --T "${PRIOR_FIT_T}"
 )
 
@@ -99,7 +124,7 @@ echo "Venv:         ${VENV_DIR}"
 echo "H5 dir:       ${H5_DIR}"
 echo "Out dir:      ${OUT_DIR}"
 echo "Frames:       ${NFRAMES}"
-echo "Temp group:   ${TEMP_GROUP}"
+echo "Temp groups:  ${TEMP_GROUPS[*]}"
 echo "Prior-fit T:  ${PRIOR_FIT_T}"
 echo "Aggforce:     enabled"
 echo "Spline:       ${ENABLE_SPLINE}"

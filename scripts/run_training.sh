@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-task=4
-#SBATCH --time=04:00:00
+#SBATCH --time=10:00:00
 #SBATCH --partition=booster
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
@@ -156,9 +156,79 @@ PROJECT_ROOT="$(resolve_repo_root "${CONFIG_DIR}" "${SLURM_SUBMIT_DIR:-}" "${PRO
 }
 SCRIPT_DIR="${PROJECT_ROOT}/scripts"
 
+# Ensure a Python interpreter exists before loading the selected SLURM env.
+PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || command -v python || true)}"
+if [[ -z "${PYTHON_BIN}" ]]; then
+    echo "ERROR: Could not locate python/python3 in PATH."
+    exit 1
+fi
+
 # Resolve multi-protein dir
 if [[ -n "$MULTI_PROTEIN_DIR" && "${MULTI_PROTEIN_DIR}" != /* ]]; then
     MULTI_PROTEIN_DIR="${PROJECT_ROOT}/${MULTI_PROTEIN_DIR}"
+fi
+
+# Auto-enable bucketed multi-protein mode only when explicitly requested
+# in config (data.use_bucketed_dir: true) and data.path resolves to a directory.
+if [[ -z "${MULTI_PROTEIN_DIR}" ]]; then
+    AUTO_MULTI_DIR="$(${PYTHON_BIN} - <<'PYAUTO' "${CONFIG_FILE}" "${PROJECT_ROOT}"
+from pathlib import Path
+import sys
+import yaml
+
+cfg = Path(sys.argv[1]).resolve()
+project_root = Path(sys.argv[2]).resolve()
+try:
+    data = yaml.safe_load(cfg.read_text()) or {}
+except Exception:
+    data = {}
+data_cfg = data.get('data') or {}
+flag_raw = data_cfg.get('use_bucketed_dir', False)
+if isinstance(flag_raw, str):
+    bucketed_mode = flag_raw.strip().lower() in {'1', 'true', 'yes', 'on'}
+else:
+    bucketed_mode = bool(flag_raw)
+if not bucketed_mode:
+    print('')
+    raise SystemExit(0)
+raw = data_cfg.get('path')
+if not raw:
+    print('__BUCKET_FLAG_SET_BUT_NO_PATH__')
+    raise SystemExit(0)
+p = Path(str(raw))
+if p.is_absolute():
+    cand = p
+else:
+    candidates = [cfg.parent / p, project_root / p]
+    cand = None
+    for c in candidates:
+        if c.exists():
+            cand = c
+            break
+    if cand is None:
+        cand = project_root / p
+if cand.exists() and cand.is_dir():
+    print(str(cand.resolve()))
+else:
+    print('__BUCKET_FLAG_SET_BUT_NOT_DIR__')
+PYAUTO
+)"
+    if [[ "${AUTO_MULTI_DIR}" == "__BUCKET_FLAG_SET_BUT_NO_PATH__" ]]; then
+        echo "WARNING: data.use_bucketed_dir=true but data.path is empty; using normal DatasetLoader mode."
+        AUTO_MULTI_DIR=""
+    elif [[ "${AUTO_MULTI_DIR}" == "__BUCKET_FLAG_SET_BUT_NOT_DIR__" ]]; then
+        echo "WARNING: data.use_bucketed_dir=true but data.path is not a directory; using normal DatasetLoader mode."
+        AUTO_MULTI_DIR=""
+    fi
+    if [[ -n "${AUTO_MULTI_DIR}" ]]; then
+        MULTI_PROTEIN_DIR="${AUTO_MULTI_DIR}"
+        echo "[run_training.sh] Auto-enabled bucketed --multi-protein-dir from config (data.use_bucketed_dir=true): ${MULTI_PROTEIN_DIR}"
+    fi
+fi
+
+if [[ -n "$MULTI_PROTEIN_DIR" && -n "$RESUME_VALUE" ]]; then
+    echo "WARNING: --resume not supported with --multi-protein-dir; ignoring"
+    RESUME_VALUE=""
 fi
 
 # =============================================================================

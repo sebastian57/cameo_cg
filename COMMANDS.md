@@ -106,6 +106,17 @@ Suite analysis:
 sbatch scripts/run_analysis.sh /path/to/suite/output
 ```
 
+```bash
+sbatch scripts/run_analysis.sh \
+  --input-dir /p/project1/cameo/schmidt36/cameo_md/outputs/<your_run_dir> \
+  --name <analysis_name> \
+  --detailed-force-eval \
+  --complete-eval \
+  --detailed-batch-size 8 \
+  --complete-eval-batch-size 4
+```
+
+
 Direct suite analysis:
 
 ```bash

@@ -231,6 +231,7 @@ def build_cg_dataset(npz_in, npz_out, use_aggforce=True, normalize_forces=False,
         logger.info(f"Species mapping: per-AA sorted ({len(aa_to_id)} types)")
 
     # Force projection
+    aggforce_weight_matrix = None
     if use_aggforce:
         optimal_mapping = generate_optim_forcematch(dataset["F"], dataset["R"], general["pdb"])
         F_out = optimal_mapping["mapped_forces"]
@@ -239,6 +240,13 @@ def build_cg_dataset(npz_in, npz_out, use_aggforce=True, normalize_forces=False,
         logger.debug(f"  Max aggforce: {np.max(np.abs(F_out)):.4f}  Mean: {np.mean(np.abs(F_out)):.4f}")
         logger.debug(f"  Max CA-sliced: {np.max(np.abs(F_cg)):.4f}  Mean: {np.mean(np.abs(F_cg)):.4f}")
         logger.debug(f"  Constraints: {optimal_mapping['constraints']}")
+        try:
+            aggforce_weight_matrix = np.asarray(
+                optimal_mapping["tmap"].force_map.standard_matrix, dtype=np.float64
+            )
+            logger.info(f"Extracted aggforce weight matrix: shape {aggforce_weight_matrix.shape}")
+        except Exception as exc:
+            logger.warning(f"Could not extract aggforce weight matrix: {exc}")
     else:
         F_out = F_cg
         logger.info("Force projection: CA-sliced (aggforce disabled)")
@@ -257,8 +265,7 @@ def build_cg_dataset(npz_in, npz_out, use_aggforce=True, normalize_forces=False,
     logger.debug(f"CG output shapes: R={R_cg.shape}, F={F_out.shape}, Z={Z_cg.shape}")
     logger.debug(f"Box shape: {dataset['box'].shape}")
 
-    np.savez(
-        f"{npz_out}",
+    save_kwargs = dict(
         R=R_cg,
         F=F_out,
         Z=Z_cg,
@@ -271,6 +278,10 @@ def build_cg_dataset(npz_in, npz_out, use_aggforce=True, normalize_forces=False,
         ca_indices=ca_indices,
         N_max=[n_beads]*10,
     )
+    if aggforce_weight_matrix is not None:
+        save_kwargs["aggforce_weight_matrix"] = aggforce_weight_matrix
+
+    np.savez(f"{npz_out}", **save_kwargs)
 
     logger.info(f"Saved CG dataset to: {npz_out}")
 

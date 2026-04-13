@@ -160,8 +160,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--temp",
+        nargs="+",
         default=None,
-        help="Single temperature group to extract (e.g. 320). Omit to use all available temperatures."
+        help=(
+            "One or more temperature groups to extract (e.g. --temp 320 348). "
+            "Omit to use all available temperatures."
+        )
     )
 
     # ===== Step 2 Options (Coarse-graining) =====
@@ -305,7 +309,7 @@ def main() -> None:
     # =============================================================================
     # Steps 1 + 2: Per-Protein Processing Loop
     # =============================================================================
-    temps: List[str] = "all" if args.temp is None else [args.temp]
+    temps: List[str] = "all" if args.temp is None else [str(t).strip() for t in args.temp]
     cg_paths: List[str] = []
     n_failed: int = 0
 
