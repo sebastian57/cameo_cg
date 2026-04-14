@@ -1,6 +1,6 @@
 # Environment Setup
 
-Use this workflow when you need to recreate the `cameo_cg_cleanup` Python environment on a new HPC system where:
+Use this workflow when you need to recreate the `cameo_cg` Python environment on a new HPC system where:
 
 - the non-Python system stack is already available
 - internet access is not available from the compute hardware
@@ -10,7 +10,7 @@ Use this workflow when you need to recreate the `cameo_cg_cleanup` Python enviro
 
 The clean local setup is:
 
-1. Clone `cameo_cg_cleanup`
+1. Clone `cameo_cg`
 2. Clone `chemtrain-deploy`
 3. Clone `chemtrain` inside `chemtrain-deploy/external/chemtrain`
 4. Start an interactive job on a compute node
@@ -24,7 +24,7 @@ Create a layout like this:
 
 ```text
 work/
-├── cameo_cg_cleanup/
+├── cameo_cg/
 └── chemtrain-deploy/
     └── external/
         ├── chemtrain/
@@ -41,7 +41,7 @@ Notes:
 Run these on a machine where you can access the repositories:
 
 ```bash
-git clone <cameo_cg_cleanup_repo_url>
+git clone <cameo_cg_repo_url>
 git clone https://github.com/tummfm/chemtrain-deploy.git
 git clone https://github.com/tummfm/chemtrain.git chemtrain-deploy/external/chemtrain
 ```
@@ -60,13 +60,13 @@ git checkout 9cad115c715b3f9df7813410153c2fc192a8240c
 
 Create the environment on the hardware that will actually run the jobs.
 
-Load the required system modules first, then start an interactive job on a compute node using your site-specific scheduler commands.
+Load the required system modules first, then start an interactive job on a compute node using your site-specific scheduler commands. You can use the examples from interactive_job.md to help for this step.
 
 After the job starts, continue the setup there.
 
 ## 3. Load Modules And Create The Virtual Environment
 
-From the `env_setup` directory of `cameo_cg_cleanup`:
+From the `env_setup` directory of `cameo_cg`:
 
 ```bash
 source load_modules.sh
@@ -98,10 +98,10 @@ This avoids any network access during installation.
 
 ## 5. Install The Remaining Packages
 
-After `chemtrain` and `chemutils` are installed locally, install the remaining pinned packages from the portable requirements file shipped with `cameo_cg_cleanup`:
+After `chemtrain` and `chemutils` are installed locally, install the remaining pinned packages from the portable requirements file shipped with `cameo_cg`:
 
 ```bash
-cd /path/to/cameo_cg_cleanup
+cd /path/to/cameo_cg
 
 pip install -r env_setup/requirements_cueq_env.txt
 ```
@@ -141,17 +141,17 @@ python -c "import jax; print(jax.__version__)"
 For normal repo usage, set:
 
 ```bash
-export CONFIG_FILE=/path/to/cameo_cg_cleanup/configs/base_config.yaml
+export CONFIG_FILE=/path/to/cameo_cg/configs/base_config.yaml
 ```
 
-Then run commands from inside the `cameo_cg_cleanup` repository.
+Then run commands from inside the `cameo_cg` repository.
 
 ## Summary
 
 The minimal local install order is:
 
 ```bash
-source /path/to/cameo_cg_cleanup/env_setup/load_modules.sh
+source /path/to/cameo_cg/env_setup/load_modules.sh
 
 python3.12 -m venv env_cueq
 source env_cueq/bin/activate
@@ -161,6 +161,6 @@ cd /path/to/chemtrain-deploy
 pip install -e "external/chemtrain[all]"
 pip install -e "external/chemutils"
 
-cd /path/to/cameo_cg_cleanup
+cd /path/to/cameo_cg
 pip install -r env_setup/requirements_cueq_env.txt
 ```
