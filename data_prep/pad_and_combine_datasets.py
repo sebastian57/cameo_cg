@@ -36,19 +36,21 @@ def _load_datasets(paths):
         d = {
             "R": data["R"].astype(np.float32),
             "F": data["F"].astype(np.float32),
-            "Z": data["Z"].astype(np.int32),
-            "resid": data["resid"].astype(np.int32),
-            "resname": _normalize_resname_array(data["resname"]),
+            "Z": data["Z"].astype(np.int32) if "Z" in data else None,
+            "resid": data["resid"].astype(np.int32) if "resid" in data else None,
+            "resname": _normalize_resname_array(data["resname"]) if "resname" in data else None,
+            "species": data["species"].astype(np.int32) if "species" in data else None,
         }
         datasets.append(d)
     return datasets
 
 
 def _build_global_aa_mapping(datasets, pad_resname="PAD"):
-    """Build a global AA→ID mapping across all datasets."""
+    """Build a global AA→ID mapping across all datasets that have resname."""
     all_resnames = set()
     for d in datasets:
-        all_resnames.update(set(d["resname"].tolist()))
+        if d["resname"] is not None:
+            all_resnames.update(set(d["resname"].tolist()))
     all_resnames.discard(pad_resname)
     id_to_aa = sorted(all_resnames)
     aa_to_id = {aa: i for i, aa in enumerate(id_to_aa)}
@@ -72,31 +74,38 @@ def _combine_datasets(datasets, paths, aa_to_id, id_to_aa, out_path,
     for i, (p, N, T) in enumerate(zip(paths, Ns, Ts)):
         logger.debug(f"  [{i}] {Path(p).name}: {T} frames, {N} atoms")
 
+    has_metadata = any(d["resname"] is not None for d in datasets)
+
     R_all = np.zeros((T_total, N_max, 3), dtype=np.float32)
     F_all = np.zeros((T_total, N_max, 3), dtype=np.float32)
-    resid_all = np.full((T_total, N_max), pad_resid, dtype=np.int32)
-    Z_all = np.full((T_total, N_max), pad_Z, dtype=np.int32)
-    resname_all = np.empty((T_total, N_max), dtype=object)
-    resname_all[:] = pad_resname
     species_all = np.full((T_total, N_max), pad_species, dtype=np.int32)
     mask_all = np.zeros((T_total, N_max), dtype=np.float32)
     n_atoms_all = np.zeros((T_total,), dtype=np.int32)
     protein_id_all = np.zeros((T_total,), dtype=np.int32)
 
+    if has_metadata:
+        resid_all = np.full((T_total, N_max), pad_resid, dtype=np.int32)
+        Z_all = np.full((T_total, N_max), pad_Z, dtype=np.int32)
+        resname_all = np.empty((T_total, N_max), dtype=object)
+        resname_all[:] = pad_resname
+
     cursor = 0
     for pid, (p, d) in enumerate(zip(paths, datasets)):
         R = d["R"]; F = d["F"]
-        Z = d["Z"]; resid = d["resid"]; resname = d["resname"]
         T, N, _ = R.shape
         sl = slice(cursor, cursor + T)
 
-        species_1d = np.array([aa_to_id[aa] for aa in resname], dtype=np.int32)
+        if d["resname"] is not None:
+            species_1d = np.array([aa_to_id[aa] for aa in d["resname"]], dtype=np.int32)
+        else:
+            species_1d = d["species"]
 
         R_all[sl, :N, :] = R
         F_all[sl, :N, :] = F
-        Z_all[sl, :N] = Z[None, :]
-        resid_all[sl, :N] = resid[None, :]
-        resname_all[sl, :N] = resname[None, :]
+        if has_metadata:
+            Z_all[sl, :N] = d["Z"][None, :]
+            resid_all[sl, :N] = d["resid"][None, :]
+            resname_all[sl, :N] = d["resname"][None, :]
         species_all[sl, :N] = species_1d[None, :]
         mask_all[sl, :N] = 1.0
         n_atoms_all[sl] = N
@@ -106,22 +115,25 @@ def _combine_datasets(datasets, paths, aa_to_id, id_to_aa, out_path,
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    np.savez(
-        out_path,
+    save_dict = dict(
         R=R_all,
         F=F_all,
-        Z=Z_all,
-        resid=resid_all,
-        resname=resname_all,
         species=species_all,
         mask=mask_all,
         n_atoms=n_atoms_all,
         protein_id=protein_id_all,
         paths=np.array([str(p) for p in paths], dtype=object),
-        aa_to_id=np.array([aa_to_id], dtype=object),
-        id_to_aa=np.array([id_to_aa], dtype=object),
         N_max=np.array([N_max], dtype=np.int32),
     )
+    if has_metadata:
+        save_dict.update(
+            Z=Z_all,
+            resid=resid_all,
+            resname=resname_all,
+            aa_to_id=np.array([aa_to_id], dtype=object),
+            id_to_aa=np.array([id_to_aa], dtype=object),
+        )
+    np.savez(out_path, **save_dict)
     logger.info(f"Saved: {out_path}")
     logger.info(f"  proteins={len(paths)}, T_total={T_total}, N_max={N_max}, n_species={len(id_to_aa)}")
     return str(out_path)

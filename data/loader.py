@@ -442,9 +442,13 @@ class DatasetLoader:
         if raw_data["aa_to_id"] is not None:
             self.aa_to_id = raw_data["aa_to_id"]
             self.id_to_aa = {v: k for k, v in self.aa_to_id.items()}
-        else:
+        elif self.resname is not None:
             # Create mapping from resnames
             self.aa_to_id, self.id_to_aa = create_species_mapping(self.resname)
+        else:
+            # No mapping available (e.g. non-AA CG datasets with pre-assigned species IDs)
+            self.aa_to_id = {}
+            self.id_to_aa = {}
 
     @property
     def n_frames(self) -> int:
