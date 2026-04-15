@@ -36,7 +36,7 @@ def generate_optim_forcematch(forces, coords, pdb_string):
 
     cmap = LinearMap(inds, n_fg_sites=coords.shape[1])
 
-    constraints = guess_pairwise_constraints(coords[0:10], threshold=1e-3)
+    constraints = guess_pairwise_constraints(coords[0:100], threshold=5e-3)
 
     optim_results = project_forces(
         coords=coords,
