@@ -83,7 +83,8 @@ export SELECTED_VENV
 # ---------------------------------------------------------------------------
 # Load modules and activate environment
 # ---------------------------------------------------------------------------
-source "${PROJECT_ROOT}/env_setup/load_modules.sh"
+#source "${PROJECT_ROOT}/env_setup/load_modules.sh"
+source "/p/project1/cameo/schmidt36/load_modules.sh"
 source "${SELECTED_VENV}/bin/activate"
 PYTHON_BIN="$(command -v python)"
 if [[ -z "${PYTHON_BIN}" ]]; then
@@ -94,6 +95,8 @@ export PYTHON_BIN
 source "${PROJECT_ROOT}/env_setup/set_lammps_paths.sh"
 
 echo "Selected ml_model: ${MODEL_TYPE_CANON} -> activated ${SELECTED_VENV_NAME}"
+echo "JAX version: $(${PYTHON_BIN} -c 'import jax; print(jax.__version__)' 2>&1)"
+echo "JAX location: $(${PYTHON_BIN} -c 'import jax, os; print(os.path.dirname(jax.__file__))' 2>&1)"
 
 # ---------------------------------------------------------------------------
 # Compiler and CUDA setup

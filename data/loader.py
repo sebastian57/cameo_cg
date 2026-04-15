@@ -430,7 +430,20 @@ class DatasetLoader:
         self.R = np.asarray(raw_data["R"][indices], dtype=np.float32)
         self.F = np.asarray(raw_data["F"][indices], dtype=np.float32)
         self.mask = np.asarray(raw_data["mask"][indices], dtype=np.float32)
-        self.species = np.asarray(raw_data["species"][indices], dtype=np.int32)
+
+        # Species: optional — if absent, default to zeros (all atoms same type).
+        # Also handle 1-D species arrays (shape (N_atoms,)) by broadcasting to
+        # (N_frames, N_atoms) so that per-frame indexing works correctly.
+        raw_species = raw_data["species"]
+        if raw_species is None:
+            self.species = np.zeros_like(self.mask, dtype=np.int32)
+        else:
+            raw_species = np.asarray(raw_species, dtype=np.int32)
+            if raw_species.ndim == 1:
+                # Per-atom species (no frame dimension): tile to all selected frames.
+                self.species = np.tile(raw_species[None, :], (len(indices), 1))
+            else:
+                self.species = raw_species[indices]
 
         # Store metadata
         self.N_max = raw_data["N_max"]

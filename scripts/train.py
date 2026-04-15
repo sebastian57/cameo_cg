@@ -636,11 +636,17 @@ def _build_loader_kwargs(split: dict) -> dict:
 
 def _build_validation_split(dataset: dict, start: int, stop: int) -> dict:
     """Build an untiled validation split with auxiliary loss-mask fields."""
+    mask_slice = np.asarray(dataset["mask"][start:stop], dtype=np.float32)
+    species_raw = dataset.get("species")
     val_split = {
         "R": np.asarray(dataset["R"][start:stop], dtype=np.float32),
         "F": np.asarray(dataset["F"][start:stop], dtype=np.float32),
-        "mask": np.asarray(dataset["mask"][start:stop], dtype=np.float32),
-        "species": np.asarray(dataset["species"][start:stop], dtype=np.int32),
+        "mask": mask_slice,
+        "species": (
+            np.asarray(species_raw[start:stop], dtype=np.int32)
+            if species_raw is not None
+            else np.zeros_like(mask_slice, dtype=np.int32)
+        ),
     }
     sample_ids = np.arange(start, stop, dtype=np.int32)
     return _attach_batch_metadata(val_split, sample_ids)
@@ -657,7 +663,12 @@ def _build_tiled_validation_split(
     val_R = np.asarray(dataset["R"][start:stop], dtype=np.float32)
     val_F = np.asarray(dataset["F"][start:stop], dtype=np.float32)
     val_mask = np.asarray(dataset["mask"][start:stop], dtype=np.float32)
-    val_species = np.asarray(dataset["species"][start:stop], dtype=np.int32)
+    _sp = dataset.get("species")
+    val_species = (
+        np.asarray(_sp[start:stop], dtype=np.int32)
+        if _sp is not None
+        else np.zeros_like(val_mask, dtype=np.int32)
+    )
 
     if val_R.shape[0] == 0:
         raise ValueError("Validation split is empty; cannot build tiled validation dataset.")
@@ -691,11 +702,17 @@ def _build_tiled_validation_split(
 
 def _build_tiled_train_source(dataset: dict, n_train: int) -> dict:
     """Capture the untiled training structures used to rebuild random tiles."""
+    mask_slice = np.asarray(dataset["mask"][:n_train], dtype=np.float32)
+    _sp = dataset.get("species")
     return {
         "R": np.asarray(dataset["R"][:n_train], dtype=np.float32),
         "F": np.asarray(dataset["F"][:n_train], dtype=np.float32),
-        "mask": np.asarray(dataset["mask"][:n_train], dtype=np.float32),
-        "species": np.asarray(dataset["species"][:n_train], dtype=np.int32),
+        "mask": mask_slice,
+        "species": (
+            np.asarray(_sp[:n_train], dtype=np.int32)
+            if _sp is not None
+            else np.zeros_like(mask_slice, dtype=np.int32)
+        ),
         "structure_ids": np.arange(n_train, dtype=np.int32),
     }
 
@@ -756,11 +773,17 @@ def _build_train_split(
     seed: int,
 ) -> dict:
     """Build the training split and optionally tile it."""
+    mask_slice = np.asarray(dataset["mask"][:n_train], dtype=np.float32)
+    species_raw = dataset.get("species")
     train_split = {
         "R": np.asarray(dataset["R"][:n_train], dtype=np.float32),
         "F": np.asarray(dataset["F"][:n_train], dtype=np.float32),
-        "mask": np.asarray(dataset["mask"][:n_train], dtype=np.float32),
-        "species": np.asarray(dataset["species"][:n_train], dtype=np.int32),
+        "mask": mask_slice,
+        "species": (
+            np.asarray(species_raw[:n_train], dtype=np.int32)
+            if species_raw is not None
+            else np.zeros_like(mask_slice, dtype=np.int32)
+        ),
     }
     structure_ids = np.arange(n_train, dtype=np.int32)
     if config.get_batch_mode() != "tiled":
