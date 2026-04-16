@@ -16,6 +16,67 @@
 # Relative input paths are resolved from the directory where `sbatch` is run.
 # =============================================================================
 
+# -----------------------------------------------------------------------------
+# Direct-invocation submit mode:
+#   bash export/run_reexport.sh <params.pkl> <config.yaml> [extra args]
+#
+# If launched outside an active SLURM job, auto-submit via sbatch and route
+# slurm stdout into the params directory.
+# -----------------------------------------------------------------------------
+if [[ -z "${SLURM_JOB_ID:-}" ]]; then
+    if [[ $# -lt 2 ]]; then
+        cat <<'USAGE'
+Usage:
+  bash export/run_reexport.sh <params.pkl> <config.yaml> [extra args]
+  sbatch export/run_reexport.sh <params.pkl> <config.yaml> [extra args]
+
+Direct bash invocation auto-submits via sbatch and writes:
+  <params_dir>/slurm-reexport-<jobid>.out
+USAGE
+        exit 1
+    fi
+
+    if ! command -v sbatch >/dev/null 2>&1; then
+        echo "ERROR: sbatch not found in PATH." >&2
+        exit 2
+    fi
+
+    resolve_abs_submit() {
+        local p="$1"
+        if [[ "$p" == /* ]]; then
+            printf '%s\n' "$p"
+        else
+            printf '%s\n' "$(pwd -P)/$p"
+        fi
+    }
+
+    PARAMS_FILE_SUBMIT="$(resolve_abs_submit "$1")"
+    CONFIG_FILE_SUBMIT="$(resolve_abs_submit "$2")"
+    shift 2
+    EXTRA_ARGS_SUBMIT=("$@")
+
+    if [[ ! -f "${PARAMS_FILE_SUBMIT}" ]]; then
+        echo "ERROR: params file not found: ${PARAMS_FILE_SUBMIT}" >&2
+        exit 2
+    fi
+    if [[ ! -f "${CONFIG_FILE_SUBMIT}" ]]; then
+        echo "ERROR: config file not found: ${CONFIG_FILE_SUBMIT}" >&2
+        exit 2
+    fi
+
+    PARAMS_DIR_SUBMIT="$(cd "$(dirname "${PARAMS_FILE_SUBMIT}")" && pwd -P)"
+    SLURM_OUT_SUBMIT="${PARAMS_DIR_SUBMIT}/slurm-reexport-%j.out"
+    SCRIPT_SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
+
+    echo "Submitting reexport via sbatch"
+    echo "  params: ${PARAMS_FILE_SUBMIT}"
+    echo "  config: ${CONFIG_FILE_SUBMIT}"
+    echo "  slurm output: ${SLURM_OUT_SUBMIT}"
+
+    sbatch --output="${SLURM_OUT_SUBMIT}" "${SCRIPT_SELF}" "${PARAMS_FILE_SUBMIT}" "${CONFIG_FILE_SUBMIT}" "${EXTRA_ARGS_SUBMIT[@]}"
+    exit 0
+fi
+
 set -Eeuo pipefail
 
 run_reexport_err_trap() {
@@ -70,10 +131,15 @@ Usage: sbatch export/run_reexport.sh <params.pkl> <config.yaml> [extra args]
 Relative paths are resolved from the directory where sbatch is run.
 
 Example:
+  bash export/run_reexport.sh \
+      /path/to/model_checkpoint.pkl \
+      /path/to/config_runtime.yaml \
+      --mode ml-only --output-name model_ml_only_reexport
+
   sbatch export/run_reexport.sh \
       /path/to/model_checkpoint.pkl \
       /path/to/config_runtime.yaml \
-      --mode combined --prior-source config --output-name model_with_priors
+      --mode ml-only --output-name model_ml_only_reexport
 USAGE
     exit 1
 fi
@@ -93,18 +159,27 @@ if [[ ! -f "${CONFIG_FILE}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Output routing:
+# Defaults:
+# - Mode defaults to ml-only unless caller explicitly passes --mode.
 # - If --output-dir is explicitly provided, respect it.
-# - Otherwise, infer run directory from params/config and export into
-#   <run_dir>/exports (matching training layout).
+# - Otherwise infer run directory from params/config:
+#     * if run dir already ends with /exports -> write there
+#     * else -> write into <run_dir>/exports
 # ---------------------------------------------------------------------------
 has_output_dir_arg=0
+has_mode_arg=0
 for arg in "${EXTRA_ARGS[@]}"; do
     if [[ "${arg}" == "--output-dir" || "${arg}" == --output-dir=* ]]; then
         has_output_dir_arg=1
-        break
+    fi
+    if [[ "${arg}" == "--mode" || "${arg}" == --mode=* ]]; then
+        has_mode_arg=1
     fi
 done
+
+if [[ ${has_mode_arg} -eq 0 ]]; then
+    EXTRA_ARGS+=("--mode" "ml-only")
+fi
 
 PARAMS_DIR="$(cd "$(dirname "${PARAMS_FILE}")" && pwd -P)"
 CONFIG_DIR="$(cd "$(dirname "${CONFIG_FILE}")" && pwd -P)"
@@ -130,7 +205,12 @@ else
     RUN_BASE_DIR="${COMMON_DIR}"
 fi
 
-DEFAULT_EXPORT_DIR="${RUN_BASE_DIR}/exports"
+if [[ "$(basename "${RUN_BASE_DIR}")" == "exports" ]]; then
+    DEFAULT_EXPORT_DIR="${RUN_BASE_DIR}"
+else
+    DEFAULT_EXPORT_DIR="${RUN_BASE_DIR}/exports"
+fi
+
 if [[ ${has_output_dir_arg} -eq 0 ]]; then
     EXTRA_ARGS+=("--output-dir" "${DEFAULT_EXPORT_DIR}")
 fi
@@ -140,7 +220,7 @@ source "${SHARED_SCRIPT_DIR}/slurm_env.sh"
 
 export CUDA_VISIBLE_DEVICES=0
 
-LOG_DIR="${RUN_BASE_DIR}"
+LOG_DIR="${PARAMS_DIR}"
 mkdir -p "${LOG_DIR}" "${DEFAULT_EXPORT_DIR}"
 LOGFILE="${LOG_DIR}/reexport_${SLURM_JOB_ID:-local}.log"
 exec > >(tee -a "${LOGFILE}") 2>&1

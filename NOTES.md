@@ -57,3 +57,22 @@ Safe and minimal LJ prior for anti MD explosions.
 
 31.03.2026
 There is an issue with exporting of the uniform1d backend. Currently model is written into naive tp method after training. Need to check this out!
+
+
+
+
+15.04.2026
+Continue working on rigurous md testing. 
+Do the constrained md test (option3)
+Get original gromacs config for actual comparisons
+Talk to emile about tica analysis and set it up correctly. 
+Once MD testing results are in, look for: 
+	Noise to Signal ratio
+	How well we approx grad PMF
+	Sample transition states? 
+	Do we need priors for long MD runs? 
+Maybe test specific, known protein systems and see if I can recreate them using a trained model. 
+Test out of distribution!
+After results are evaluated, think about next steps. 
+
+

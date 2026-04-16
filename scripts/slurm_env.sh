@@ -83,8 +83,8 @@ export SELECTED_VENV
 # ---------------------------------------------------------------------------
 # Load modules and activate environment
 # ---------------------------------------------------------------------------
-#source "${PROJECT_ROOT}/env_setup/load_modules.sh"
-source "/p/project1/cameo/schmidt36/load_modules.sh"
+source "${PROJECT_ROOT}/env_setup/load_modules.sh"
+#source "/p/project1/cameo/schmidt36/load_modules.sh"
 source "${SELECTED_VENV}/bin/activate"
 PYTHON_BIN="$(command -v python)"
 if [[ -z "${PYTHON_BIN}" ]]; then
