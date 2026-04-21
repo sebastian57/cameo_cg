@@ -62,14 +62,24 @@ def load_npz(path: PathLike) -> Dict[str, Any]:
                 "which cannot be concatenated into a single DatasetLoader."
             )
 
-        def cat(key):
-            return np.concatenate([d[key] for d in datasets], axis=0)
+        def cat_or_default(key, default_fn):
+            arrays = []
+            for d in datasets:
+                if key in d:
+                    arrays.append(d[key])
+                else:
+                    arrays.append(default_fn(d))
+            return np.concatenate(arrays, axis=0)
 
         result = {
-            "R":       cat("R").astype(np.float32),
-            "F":       cat("F").astype(np.float32),
-            "mask":    cat("mask").astype(np.float32),
-            "species": cat("species").astype(np.int32),
+            "R":       cat_or_default("R", lambda d: d["R"]).astype(np.float32),
+            "F":       cat_or_default("F", lambda d: d["F"]).astype(np.float32),
+            "mask":    cat_or_default(
+                "mask", lambda d: np.ones(d["R"].shape[:2], dtype=np.float32)
+            ).astype(np.float32),
+            "species": cat_or_default(
+                "species", lambda d: np.zeros(d["R"].shape[:2], dtype=np.int32)
+            ).astype(np.int32),
             "Z":       datasets[0]["Z"].astype(np.int32) if "Z" in datasets[0] else None,
             "resid":   datasets[0]["resid"].astype(np.int32) if "resid" in datasets[0] else None,
             "resname": datasets[0]["resname"] if "resname" in datasets[0] else None,

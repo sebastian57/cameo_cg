@@ -7,6 +7,7 @@
 #SBATCH --time=02:00:00
 #SBATCH --partition=develbooster
 #SBATCH --output=/dev/null
+#SBATCH --error=/dev/null
 
 # =============================================================================
 # SLURM wrapper for suite analysis.
@@ -76,6 +77,11 @@ INPUT_DIR="$(cd "${INPUT_DIR}" && pwd -P)"
 OUTPUT_ROOT="${PROJECT_ROOT}/local_work/outputs"
 mkdir -p "${OUTPUT_ROOT}"
 
+JOB_TAG="${SLURM_JOB_ID:-local}"
+if [[ -n "${SLURM_ARRAY_JOB_ID:-}" && -n "${SLURM_ARRAY_TASK_ID:-}" ]]; then
+    JOB_TAG="${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
+fi
+
 if [[ -n "${RUN_NAME}" ]]; then
     ANALYSIS_LABEL="${RUN_NAME}"
 else
@@ -88,8 +94,10 @@ fi
 ANALYSIS_DIR="${OUTPUT_ROOT}/${ANALYSIS_LABEL}"
 mkdir -p "${ANALYSIS_DIR}"
 
-ANALYSIS_LOG="${ANALYSIS_DIR}/slurm-analysis-${SLURM_JOB_ID:-local}.out"
-exec > >(tee -a "${ANALYSIS_LOG}") 2>&1
+RUN_SLURM_OUT="${ANALYSIS_DIR}/slurm-${JOB_TAG}.out"
+RUN_SLURM_ERR="${ANALYSIS_DIR}/slurm-${JOB_TAG}.err"
+touch "${RUN_SLURM_OUT}" "${RUN_SLURM_ERR}"
+exec > >(tee -a "${RUN_SLURM_OUT}") 2> >(tee -a "${RUN_SLURM_ERR}" >&2)
 
 # --- Environment setup (shared with training scripts) ---
 _found_config="$(find -L "${INPUT_DIR}" -maxdepth 4 -name "config_runtime.yaml" | sort | head -1)"
@@ -121,3 +129,9 @@ echo "============================================================"
     --analysis-dir "${ANALYSIS_DIR}" \
     --devices-per-run 1 \
     "${EXTRA_ARGS[@]}"
+
+echo "============================================================"
+echo "Analysis complete."
+echo "SLURM stdout:   ${RUN_SLURM_OUT}"
+echo "SLURM stderr:   ${RUN_SLURM_ERR}"
+echo "============================================================"

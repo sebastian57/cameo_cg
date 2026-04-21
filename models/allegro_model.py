@@ -240,8 +240,15 @@ class AllegroModel(BaseMLModel):
         )
         self._apply_allegro_for_training = self.apply_allegro
         if self.remat_level > 0:
-            # Coarse remat boundary around full model apply.
-            self._apply_allegro_for_training = jax.checkpoint(self.apply_allegro)
+            _REMAT_POLICIES = {
+                "none": None,
+                "allegro_blocks_coarse": jax.checkpoint_policies.dots_saveable,
+                "allegro_blocks_deep": jax.checkpoint_policies.nothing_saveable,
+            }
+            _policy = _REMAT_POLICIES.get(self.remat_policy)
+            self._apply_allegro_for_training = jax.checkpoint(
+                self.apply_allegro, policy=_policy
+            )
 
         # Store initialization parameters
         self._R0 = R0_safe

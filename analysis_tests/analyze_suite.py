@@ -260,17 +260,31 @@ def _resolve_data_path(config: ConfigManager) -> Path:
 
 
 def _load_mask(data_path: Path) -> np.ndarray:
+    def _mask_from_npz(data: Any, source: Path) -> np.ndarray:
+        if 'mask' in data:
+            return np.asarray(data['mask'], dtype=np.float32)
+        if 'R' not in data:
+            raise KeyError(
+                f"Dataset at {source} is missing both 'mask' and fallback 'R' arrays."
+            )
+        print(
+            f"[analyze_suite] WARNING: dataset {source} has no 'mask'; "
+            "using all-ones mask derived from R.shape[:2].",
+            flush=True,
+        )
+        return np.ones(np.asarray(data['R']).shape[:2], dtype=np.float32)
+
     if data_path.is_dir():
         masks = []
         for npz_file in sorted(data_path.glob('*.npz')):
             with np.load(npz_file, allow_pickle=True) as data:
-                masks.append(np.asarray(data['mask'], dtype=np.float32))
+                masks.append(_mask_from_npz(data, npz_file))
         if not masks:
             raise FileNotFoundError(f'No .npz files found in directory: {data_path}')
         return np.concatenate(masks, axis=0)
 
     with np.load(data_path, allow_pickle=True) as data:
-        return np.asarray(data['mask'], dtype=np.float32)
+        return _mask_from_npz(data, data_path)
 
 
 def _dataset_frame_indices(n_total: int, max_frames: Optional[int], seed: int) -> np.ndarray:

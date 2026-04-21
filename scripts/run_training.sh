@@ -278,9 +278,10 @@ RUN_CHECKPOINT_DIR="${RUN_OUTPUT_DIR}/checkpoints"
 RUN_PROFILE_DIR="${RUN_OUTPUT_DIR}/profiles"
 mkdir -p "${RUN_EXPORT_DIR}" "${RUN_CHECKPOINT_DIR}" "${RUN_PROFILE_DIR}"
 
-RUN_SLURM_LOG="${RUN_OUTPUT_DIR}/slurm-${JOB_TAG}.out"
-touch "${RUN_SLURM_LOG}"
-exec > >(tee -a "${RUN_SLURM_LOG}") 2>&1
+RUN_SLURM_OUT="${RUN_OUTPUT_DIR}/slurm-${JOB_TAG}.out"
+RUN_SLURM_ERR="${RUN_OUTPUT_DIR}/slurm-${JOB_TAG}.err"
+touch "${RUN_SLURM_OUT}" "${RUN_SLURM_ERR}"
+exec > >(tee -a "${RUN_SLURM_OUT}") 2> >(tee -a "${RUN_SLURM_ERR}" >&2)
 
 echo "[run_training.sh] Project root: ${PROJECT_ROOT}"
 echo "[run_training.sh] Script dir:   ${SCRIPT_DIR}"
@@ -516,4 +517,6 @@ srun -l --ntasks-per-node=1 "${PYTHON_BIN}" -u "${TRAIN_SCRIPT}" \
 
 echo "============================================================"
 echo "Training complete. Log: ${LOGFILE}"
+echo "SLURM stdout:   ${RUN_SLURM_OUT}"
+echo "SLURM stderr:   ${RUN_SLURM_ERR}"
 echo "============================================================"

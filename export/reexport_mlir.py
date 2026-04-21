@@ -269,6 +269,15 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Base name for exported artifacts (default: derived from params filename)",
     )
+    parser.add_argument(
+        "--export-mode",
+        choices=("auto", "symbolic", "fixed_size"),
+        default=None,
+        help=(
+            "Override export.mode during re-export. "
+            "Use 'symbolic' for connector-compatible dynamic/signature export."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -286,6 +295,8 @@ def main() -> None:
 
     config = ConfigManager(config_path)
     export_config = _build_export_config(config, args.mode)
+    if args.export_mode is not None:
+        export_config.set("export", "mode", args.export_mode)
 
     with open(params_path, "rb") as handle:
         payload = pickle.load(handle)

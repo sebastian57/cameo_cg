@@ -1202,17 +1202,42 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     logging.info("GENERATING PLOTS")
     logging.info("=" * 60)
 
-    # Look for log file in outputs/ directory (created by run_training.sh)
-    log_file_outputs = Path("outputs") / f"train_{job_id}.log"
-    log_file_legacy = Path(f"train_{job_id}.log")
+    # Resolve training log from canonical run directories first, then legacy fallbacks.
+    log_file = None
+    log_candidates = []
+    log_name = f"train_{job_id}.log"
 
-    # Try outputs/ first, then fall back to legacy location
-    if log_file_outputs.exists():
-        log_file = log_file_outputs
-    elif log_file_legacy.exists():
-        log_file = log_file_legacy
-    else:
-        log_file = None
+    run_output_dir = Path(config.get_output_dir())
+    run_slurm_dir = Path(config.get_slurm_dir())
+    run_dir_from_export = export_dir.parent
+
+    for base in (run_output_dir, run_slurm_dir, run_dir_from_export):
+        log_candidates.extend(
+            [
+                base / log_name,
+                base / f"slurm-{job_id}.out",
+                base / f"slurm-{job_id}.err",
+            ]
+        )
+
+    log_candidates.extend(
+        [
+            Path("outputs") / log_name,
+            Path(log_name),
+            Path("outputs") / f"slurm-{job_id}.out",
+            Path(f"slurm-{job_id}.out"),
+        ]
+    )
+
+    seen = set()
+    for candidate in log_candidates:
+        resolved = candidate.resolve(strict=False)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if candidate.exists():
+            log_file = candidate
+            break
 
     if log_file is not None:
         plotter = LossPlotter(str(log_file), config=config)
@@ -1226,7 +1251,10 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         plotter.save_loss_data(data_path)
         logging.info(f"[Plot] Loss data: {data_path}")
     else:
-        logging.warning(f"[Plot] Log file not found in outputs/ or current directory (job_id={job_id})")
+        logging.warning(
+            f"[Plot] Log file not found for job_id={job_id} "
+            f"(checked paths.output_dir/paths.slurm_dir/export_dir parent, outputs/, and cwd)"
+        )
 
     logging.info("\n" + "=" * 60)
     logging.info("TRAINING PIPELINE COMPLETE")
