@@ -7,6 +7,7 @@ Supports pure ML, pure prior, or combined training via config.
 
 import jax
 import jax.numpy as jnp
+import inspect
 from typing import Dict, Any, Optional
 
 from config.types import EnergyComponents, ForceComponents
@@ -46,6 +47,7 @@ class CombinedModel:
     """
 
     def __init__(self, config, R0: jax.Array, box: jax.Array, species: jax.Array, N_max: int,
+                 init_mask: Optional[jax.Array] = None,
                  prior_only: bool = False, n_species_override: Optional[int] = None,
                  id_to_aa: Optional[Dict[int, str]] = None):
         """
@@ -79,9 +81,14 @@ class CombinedModel:
             from . import allegro_cueq_model as _cueq  # noqa: F401
 
         ModelClass = get_ml_model_class(self.ml_model_type)
+        ml_kwargs = {
+            "n_species_override": n_species_override,
+        }
+        if "init_mask" in inspect.signature(ModelClass.__init__).parameters:
+            ml_kwargs["init_mask"] = init_mask
         self.ml_model = ModelClass(
             config, R0, box, species, N_max,
-            n_species_override=n_species_override,
+            **ml_kwargs,
         )
         model_logger.info(f"ML backbone: {self.ml_model_type}")
 

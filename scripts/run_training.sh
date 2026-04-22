@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-task=4
-#SBATCH --time=10:00:00
+#SBATCH --time=13:00:00
 #SBATCH --partition=booster
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
@@ -293,10 +293,14 @@ echo "[run_training.sh] Run dir:      ${RUN_OUTPUT_DIR}"
 # =============================================================================
 source "${SCRIPT_DIR}/slurm_env.sh"
 
-# Runtime config: inject resolved output paths into a copy of the config
-INPUT_CONFIG_COPY="${RUN_OUTPUT_DIR}/config_input.yaml"
-RUNTIME_CONFIG="${RUN_OUTPUT_DIR}/config_runtime.yaml"
+# Runtime config: inject resolved output paths into a copy of the config.
+# Use job-unique filenames to avoid cross-job overwrite when multiple configs
+# share the same paths.output_dir.
+INPUT_CONFIG_COPY="${RUN_OUTPUT_DIR}/config_input_${JOB_TAG}.yaml"
+RUNTIME_CONFIG="${RUN_OUTPUT_DIR}/config_runtime_${JOB_TAG}.yaml"
 cp -f "${CONFIG_FILE}" "${INPUT_CONFIG_COPY}"
+# Backward-compat alias used by older analysis utilities.
+ln -sfn "$(basename "${INPUT_CONFIG_COPY}")" "${RUN_OUTPUT_DIR}/config_input.yaml"
 
 "${PYTHON_BIN}" - <<'PYCFG' "${CONFIG_FILE}" "${RUNTIME_CONFIG}" "${RUN_EXPORT_DIR}" "${RUN_CHECKPOINT_DIR}" "${RUN_PROFILE_DIR}" "${PROJECT_ROOT}"
 from pathlib import Path
@@ -353,6 +357,8 @@ if data_path:
 
 out.write_text(yaml.safe_dump(data, sort_keys=False))
 PYCFG
+# Backward-compat alias used by older analysis utilities.
+ln -sfn "$(basename "${RUNTIME_CONFIG}")" "${RUN_OUTPUT_DIR}/config_runtime.yaml"
 
 LOGFILE="${RUN_OUTPUT_DIR}/train_${JOB_TAG}.log"
 

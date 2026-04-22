@@ -29,7 +29,7 @@ fi
 # -----------------------------------------------------------------------------
 # Editable run configuration (all paths can be absolute or project-root relative)
 # -----------------------------------------------------------------------------
-H5_DIR="${H5_DIR:-data_prep/datasets/4pro_dir}"
+H5_DIR="${H5_DIR:-data_prep/datasets/dataset_1604_25pro}"
 DATE_TAG="$(date +%Y%m%d)"
 OUT_DIR="${OUT_DIR:-data_prep/datasets/pipeline_${DATE_TAG}}"
 NFRAMES="${NFRAMES:-2500}"

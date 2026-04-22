@@ -78,6 +78,7 @@ class AllegroModelCuEq(BaseMLModel):
         species: jax.Array,
         N_max: int,
         n_species_override: Optional[int] = None,
+        init_mask: Optional[jax.Array] = None,
     ):
         """
         Initialize AllegroModelCuEq.
@@ -101,6 +102,7 @@ class AllegroModelCuEq(BaseMLModel):
         self.neighbor_list_format_name, self.neighbor_list_format = resolve_neighbor_list_format(
             config.get_neighbor_list_format()
         )
+        self._neighbor_disable_cell_list = bool(config.neighbor_disable_cell_list_enabled())
 
         self.allegro_config = dict(config.get_allegro_config())
         self._pad_spacing = jnp.asarray(
@@ -167,28 +169,36 @@ class AllegroModelCuEq(BaseMLModel):
         self.displacement, self.shift = space.free()
         safe_box = jnp.asarray(box, dtype=self.compute_dtype)
 
-        self.nneigh_fn = partition.neighbor_list(
+        self.nneigh_fn = custom_partition.masked_neighbor_list(
             self.displacement,
             box=safe_box,
             r_cutoff=self.cutoff,
             dr_threshold=self.dr_threshold,
             fractional_coordinates=False,
+            disable_cell_list=self._neighbor_disable_cell_list,
             format=self.neighbor_list_format,
         )
-        model_logger.info(f"  neighbor format = {self.neighbor_list_format_name}")
-
-        # Sanitize padded entries for initialization
-        species_arr = jnp.asarray(species)
-        init_padded_mask = species_arr < 0
-        R0_safe = self._spread_padded_coordinates(
-            jnp.asarray(R0, dtype=self.compute_dtype), init_padded_mask
+        model_logger.info(
+            f"  neighbor format = {self.neighbor_list_format_name} "
+            f"(disable_cell_list={self._neighbor_disable_cell_list})"
         )
+
+        # Mask-aware neighbor init avoids coordinate teleporting and excludes
+        # padded nodes from neighbor candidate generation.
+        species_arr = jnp.asarray(species)
+        if init_mask is not None:
+            init_valid_mask = jnp.asarray(init_mask > 0, dtype=jnp.bool_)
+        else:
+            init_valid_mask = species_arr >= 0
+        R0_safe = jnp.asarray(R0, dtype=self.compute_dtype)
 
         self._neighbor_extra_capacity = int(
             self.allegro_config.pop("neighbor_extra_capacity", 10)
         )
         self.nbrs_init = self.nneigh_fn.allocate(
-            R0_safe, extra_capacity=self._neighbor_extra_capacity
+            R0_safe,
+            extra_capacity=self._neighbor_extra_capacity,
+            mask=init_valid_mask,
         )
         model_logger.info(
             f"  neighbor extra_capacity = {self._neighbor_extra_capacity}"
@@ -350,7 +360,12 @@ class AllegroModelCuEq(BaseMLModel):
             nbrs = self.nbrs_init
         ref_position = getattr(nbrs, "reference_position", None)
         target_dtype = getattr(ref_position, "dtype", self.compute_dtype)
-        return self.nneigh_fn.update(jnp.asarray(R, dtype=target_dtype), nbrs)
+        valid_mask = jnp.ones((int(jnp.asarray(R).shape[0]),), dtype=jnp.bool_)
+        return self.nneigh_fn.update(
+            jnp.asarray(R, dtype=target_dtype),
+            nbrs,
+            mask=valid_mask,
+        )
 
     def _compute_energy_with_apply(
         self,
@@ -365,16 +380,16 @@ class AllegroModelCuEq(BaseMLModel):
         """Compute cuEq Allegro energy for given coordinates."""
         valid_mask = mask > 0
         R_base = jnp.asarray(R, dtype=self.compute_dtype)
-        padded_mask = jnp.logical_not(valid_mask)
-        R_safe = self._spread_padded_coordinates(R_base, padded_mask)
-        R_masked = jnp.where(valid_mask[:, None], R_base, jax.lax.stop_gradient(R_safe))
+        R_masked = R_base
 
         if neighbor is None:
             base_nbrs = self.nbrs_init
             ref_position = getattr(base_nbrs, "reference_position", None)
             target_dtype = getattr(ref_position, "dtype", self.compute_dtype)
             nbrs = self.nneigh_fn.update(
-                jnp.asarray(R_masked, dtype=target_dtype), base_nbrs
+                jnp.asarray(R_masked, dtype=target_dtype),
+                base_nbrs,
+                mask=valid_mask.astype(jnp.bool_),
             )
         else:
             nbr_error = getattr(neighbor, "error", None)
@@ -384,15 +399,16 @@ class AllegroModelCuEq(BaseMLModel):
                 ref_position = getattr(neighbor, "reference_position", None)
                 target_dtype = getattr(ref_position, "dtype", self.compute_dtype)
                 nbrs = self.nneigh_fn.update(
-                    jnp.asarray(R_masked, dtype=target_dtype), neighbor
+                    jnp.asarray(R_masked, dtype=target_dtype),
+                    neighbor,
+                    mask=valid_mask.astype(jnp.bool_),
                 )
 
-        if segment_id is not None:
-            nbrs = custom_partition.mask_neighbor_list(
-                nbrs,
-                mask=valid_mask.astype(jnp.bool_),
-                segment_id=jnp.asarray(segment_id, dtype=jnp.int32),
-            )
+        nbrs = custom_partition.mask_neighbor_list(
+            nbrs,
+            mask=valid_mask.astype(jnp.bool_),
+            segment_id=jnp.asarray(segment_id, dtype=jnp.int32) if segment_id is not None else None,
+        )
 
         species_masked = jnp.where(valid_mask, species, 0).astype(jnp.int32)
         R_model = jnp.asarray(R_masked, dtype=self.compute_dtype)

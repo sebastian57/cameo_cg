@@ -1,0 +1,123 @@
+seed: 4129
+model_context: even_more_data_longer_fp32
+model_id: cueq_fast_tiled_memsave_allframes_240ep_bs4_2nodes_fp32
+
+debug:
+  neighbor_logging: false
+  neighbor_rank0_only: true
+  shape_trace: false
+  model_logging: false
+
+paths:
+  output_dir: /p/project1/cameo/schmidt36/cameo_cg/local_work/outputs/even_more_data/cueq_fast_tiled_memsave_allframes_240ep_bs4_2nodes_fp32
+
+data:
+  path: /p/project1/cameo/schmidt36/cameo_cg/data_prep/datasets/dataset_1604_25pro_320_aggforce_allframes_padded/03_padded_npz
+  max_frames: null
+  batch_mode: tiled
+  tile_target_beads: 1024
+  tile_bucket_beads: [640, 896, 1024]
+  tile_bucket_edges: [2600, 4500, 6500]
+  tile_edge_estimate_mode: distance_cutoff
+  tile_edge_estimate_cutoff: 10.0
+  tile_edge_estimate_scale: 15.0
+  tile_sort_by_size: true
+  tile_sort_by_estimated_edges: true
+  tile_isolate_large_structures: true
+  tile_spatial_separation: true
+  tile_structure_gap: 35.0
+  tile_large_structure_threshold: 220
+  tile_large_structure_edge_threshold: 2000
+  tile_drop_incomplete: false
+  tile_train_only: true
+
+preprocessing:
+  buffer_multiplier: 2.0
+  park_multiplier: 0.95
+
+model:
+  ml_model: allegro_cueq_fast
+  use_priors: false
+  train_priors: false
+  prior_only: false
+  cutoff: 10.0
+  dr_threshold: 1.0
+  neighbor_list_format: sparse
+  neighbor_disable_cell_list: true
+  allegro:
+    num_types: 22
+    max_ell: 2
+    hidden_irreps: 64x0o + 64x1o + 64x1e + 64x2e
+    num_layers: 3
+    n_radial_basis: 18
+    envelope_p: 6
+    embed_n_hidden: [64, 128]
+    species_embed: 32
+    mlp_n_hidden: 96
+    mlp_n_layers: 3
+    mlp_activation: mish
+    mlp_hidden_activation: silu
+    mlp_output_activation: silu
+    avg_num_neighbors: 15
+    max_edge_multiplier: 1.02
+    neighbor_extra_capacity: 2
+  allegro_cueq:
+    mlp_dtype: float32
+    tp_backend: fused_sp
+    tp_mode: mixed_naive
+    tp_method: uniform_1d
+    tp_batch_strategy: flatten_Eg
+    tp_left_mode: node_agg
+
+optimizer:
+  grad_clip: 2.0
+  sgd_nesterov:
+    lr: 0.01
+    peak_lr: 0.03
+    end_lr: 0.01
+    warmup_steps: 100
+    decay_steps: 5000
+    momentum: 0.99
+    grad_clip: 5.0
+    weight_decay: 0.0
+
+training:
+  stages:
+  - optimizer: sgd_nesterov
+    epochs: 240
+  val_fraction: 0.1
+  batch_per_device: 4
+  batch_cache: 2
+  checkpoint_freq: 1
+  gammas:
+    F: 1.0
+    U: 0.0
+  force_loss_normalization: valid_components
+  enable_mixed_precision: false
+  compute_dtype: float32
+  param_dtype: float32
+  reduce_dtype: float32
+  enable_buffer_donation: false
+  donate_mode: state_and_batch
+  remat_level: 1
+  remat_policy: allegro_blocks_deep
+  grad_accum_steps: 1
+  grad_accum_mode: stack_scan
+  pretrain_prior: false
+  export_combined_ml_priors: false
+  profiling:
+    enabled: false
+    jax_trace_enabled: false
+    trace_rank0_only: true
+    log_compiles: false
+    batch_profiler_enabled: false
+    batch_stats_enabled: false
+    batch_stats_rank0_only: true
+    batch_stats_log_every: 1
+    epoch_summary_enabled: true
+
+ensemble:
+  enabled: false
+  n_models: 5
+  base_seed: 42
+  save_all_models: false

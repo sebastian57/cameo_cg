@@ -76,6 +76,7 @@ class AllegroModel(BaseMLModel):
         species: jax.Array,
         N_max: int,
         n_species_override: Optional[int] = None,
+        init_mask: Optional[jax.Array] = None,
     ):
         """
         Initialize Allegro model.
@@ -104,6 +105,7 @@ class AllegroModel(BaseMLModel):
         self.neighbor_list_format_name, self.neighbor_list_format = resolve_neighbor_list_format(
             config.get_neighbor_list_format()
         )
+        self._neighbor_disable_cell_list = bool(config.neighbor_disable_cell_list_enabled())
 
         self.allegro_config = config.get_allegro_config()
         self._pad_spacing = jnp.asarray(
@@ -120,22 +122,28 @@ class AllegroModel(BaseMLModel):
         # Match neighbor-list math to selected compute dtype.
         safe_box = jnp.asarray(box, dtype=self.compute_dtype)
 
-        self.nneigh_fn = partition.neighbor_list(
+        self.nneigh_fn = custom_partition.masked_neighbor_list(
             self.displacement,
             box=safe_box,
             r_cutoff=self.cutoff,
             dr_threshold=self.dr_threshold,
             fractional_coordinates=False,
+            disable_cell_list=self._neighbor_disable_cell_list,
             format=self.neighbor_list_format,
         )
-        model_logger.info(f"Neighbor list format: {self.neighbor_list_format_name}")
-
-        # Sanitize padded entries for Allegro initialization.
-        species_arr = jnp.asarray(species)
-        init_padded_mask = species_arr < 0
-        R0_safe = self._spread_padded_coordinates(
-            jnp.asarray(R0, dtype=self.compute_dtype), init_padded_mask
+        model_logger.info(
+            f"Neighbor list format: {self.neighbor_list_format_name} "
+            f"(disable_cell_list={self._neighbor_disable_cell_list})"
         )
+
+        # Mask-aware init avoids padded-node neighbor candidates without
+        # teleporting coordinates.
+        species_arr = jnp.asarray(species)
+        if init_mask is not None:
+            init_valid_mask = jnp.asarray(init_mask > 0, dtype=jnp.bool_)
+        else:
+            init_valid_mask = species_arr >= 0
+        R0_safe = jnp.asarray(R0, dtype=self.compute_dtype)
 
         # Allocate initial neighbor list
         self.allegro_config = dict(self.allegro_config)
@@ -143,7 +151,9 @@ class AllegroModel(BaseMLModel):
             self.allegro_config.pop("neighbor_extra_capacity", 10)
         )
         self.nbrs_init = self.nneigh_fn.allocate(
-            R0_safe, extra_capacity=self._neighbor_extra_capacity
+            R0_safe,
+            extra_capacity=self._neighbor_extra_capacity,
+            mask=init_valid_mask,
         )
         self._log_initial_neighbor_debug(self.nbrs_init, R0_safe)
 
@@ -306,7 +316,10 @@ class AllegroModel(BaseMLModel):
 
         ref_position = getattr(nbrs, "reference_position", None)
         target_dtype = getattr(ref_position, "dtype", self.compute_dtype)
-        nbrs = self.nneigh_fn.update(jnp.asarray(R, dtype=target_dtype), nbrs)
+        valid_mask = jnp.ones((int(jnp.asarray(R).shape[0]),), dtype=jnp.bool_)
+        nbrs = self.nneigh_fn.update(
+            jnp.asarray(R, dtype=target_dtype), nbrs, mask=valid_mask
+        )
         return nbrs
 
     def compute_energy(
@@ -333,13 +346,11 @@ class AllegroModel(BaseMLModel):
         Returns:
             Total energy (scalar)
         """
-        # Apply mask to coordinates and spread padded atoms away from all real atoms.
+        # Keep coordinates in compute precision; neighbor masking handles
+        # padded entries without coordinate teleporting.
         valid_mask = mask > 0
-        # Run coordinate and neighbor-list path in selected compute precision.
         R_base = jnp.asarray(R, dtype=self.compute_dtype)
-        padded_mask = jnp.logical_not(valid_mask)
-        R_safe = self._spread_padded_coordinates(R_base, padded_mask)
-        R_masked = jnp.where(valid_mask[:, None], R_base, jax.lax.stop_gradient(R_safe))
+        R_masked = R_base
 
         # Reuse/update a neighbor list for training. During MLIR export, the
         # exporter may pass a graph-derived sparse NeighborList shell where
@@ -348,7 +359,11 @@ class AllegroModel(BaseMLModel):
             base_nbrs = self.nbrs_init
             ref_position = getattr(base_nbrs, "reference_position", None)
             target_dtype = getattr(ref_position, "dtype", self.compute_dtype)
-            nbrs = self.nneigh_fn.update(jnp.asarray(R_masked, dtype=target_dtype), base_nbrs)
+            nbrs = self.nneigh_fn.update(
+                jnp.asarray(R_masked, dtype=target_dtype),
+                base_nbrs,
+                mask=valid_mask.astype(jnp.bool_),
+            )
         else:
             nbr_error = getattr(neighbor, "error", None)
             if nbr_error is None:
@@ -357,14 +372,17 @@ class AllegroModel(BaseMLModel):
             else:
                 ref_position = getattr(neighbor, "reference_position", None)
                 target_dtype = getattr(ref_position, "dtype", self.compute_dtype)
-                nbrs = self.nneigh_fn.update(jnp.asarray(R_masked, dtype=target_dtype), neighbor)
+                nbrs = self.nneigh_fn.update(
+                    jnp.asarray(R_masked, dtype=target_dtype),
+                    neighbor,
+                    mask=valid_mask.astype(jnp.bool_),
+                )
 
-        if segment_id is not None:
-            nbrs = custom_partition.mask_neighbor_list(
-                nbrs,
-                mask=valid_mask.astype(jnp.bool_),
-                segment_id=jnp.asarray(segment_id, dtype=jnp.int32),
-            )
+        nbrs = custom_partition.mask_neighbor_list(
+            nbrs,
+            mask=valid_mask.astype(jnp.bool_),
+            segment_id=jnp.asarray(segment_id, dtype=jnp.int32) if segment_id is not None else None,
+        )
 
         # Ensure species are valid (masked atoms -> species 0)
         species_masked = jnp.where(valid_mask, species, 0).astype(jnp.int32)

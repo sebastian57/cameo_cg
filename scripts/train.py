@@ -197,6 +197,7 @@ import sys
 import copy
 import pickle
 import time
+import json
 from pathlib import Path
 import numpy as np
 import jax.numpy as jnp
@@ -352,6 +353,108 @@ def _shuffle_dataset_for_split(dataset: dict, seed: int) -> dict:
         seed,
     )
     return shuffled
+
+
+def _log_dataset_protein_debug(
+    *,
+    dataset: dict,
+    id_to_aa: Optional[Dict[int, str]],
+    dataset_path: Path,
+    export_dir: Path,
+) -> None:
+    """Log protein-level bead stats and species frequencies for debugging."""
+    if "mask" not in dataset or "species" not in dataset:
+        return
+
+    mask = np.asarray(dataset["mask"], dtype=np.float32) > 0
+    species = np.asarray(dataset["species"], dtype=np.int32)
+    n_frames = int(mask.shape[0])
+    n_valid = np.asarray(np.sum(mask, axis=1), dtype=np.int32)
+
+    source_name = dataset.get("source_name")
+    if source_name is None:
+        source_name = np.full((n_frames,), dataset_path.stem, dtype=object)
+    else:
+        source_name = np.asarray(source_name)
+        if source_name.shape[0] != n_frames:
+            source_name = np.full((n_frames,), dataset_path.stem, dtype=object)
+    source_name = source_name.astype(str)
+
+    valid_species = species[mask]
+    if valid_species.size == 0:
+        data_logger.warning("[DataDebug] No valid beads found; skipping protein/species summary.")
+        return
+
+    species_ids, species_counts = np.unique(valid_species, return_counts=True)
+    species_summary = []
+    for sid, count in zip(species_ids.tolist(), species_counts.tolist()):
+        label = id_to_aa.get(int(sid), f"id{int(sid)}") if id_to_aa else f"id{int(sid)}"
+        species_summary.append(
+            {
+                "species_id": int(sid),
+                "label": str(label),
+                "count": int(count),
+            }
+        )
+
+    data_logger.info(
+        "[DataDebug] Global valid bead count=%d across %d frames (mean_valid_beads=%.2f).",
+        int(valid_species.size),
+        n_frames,
+        float(np.mean(n_valid)),
+    )
+    data_logger.info(
+        "[DataDebug] Global species counts: %s",
+        ", ".join(
+            f"{row['species_id']}:{row['label']}={row['count']}" for row in species_summary
+        ),
+    )
+
+    proteins = np.unique(source_name)
+    protein_rows = []
+    for protein in proteins.tolist():
+        protein_mask = source_name == protein
+        frame_count = int(np.sum(protein_mask))
+        if frame_count == 0:
+            continue
+        valid_per_frame = n_valid[protein_mask]
+        protein_species = species[protein_mask][mask[protein_mask]]
+        ps_ids, ps_counts = np.unique(protein_species, return_counts=True)
+        per_species = {
+            str(int(sid)): int(count)
+            for sid, count in zip(ps_ids.tolist(), ps_counts.tolist())
+        }
+        protein_rows.append(
+            {
+                "protein": str(protein),
+                "frames": frame_count,
+                "beads_per_frame_min": int(np.min(valid_per_frame)),
+                "beads_per_frame_mean": float(np.mean(valid_per_frame)),
+                "beads_per_frame_max": int(np.max(valid_per_frame)),
+                "total_valid_beads": int(np.sum(valid_per_frame, dtype=np.int64)),
+                "species_counts": per_species,
+            }
+        )
+        data_logger.info(
+            "[DataDebug][Protein] name=%s frames=%d beads/frame(min/mean/max)=%d/%.1f/%d total_valid_beads=%d",
+            protein,
+            frame_count,
+            int(np.min(valid_per_frame)),
+            float(np.mean(valid_per_frame)),
+            int(np.max(valid_per_frame)),
+            int(np.sum(valid_per_frame, dtype=np.int64)),
+        )
+
+    summary = {
+        "dataset_path": str(dataset_path),
+        "n_frames": n_frames,
+        "global_valid_beads": int(valid_species.size),
+        "global_species_counts": species_summary,
+        "proteins": protein_rows,
+    }
+    out_path = export_dir / "dataset_debug_summary.json"
+    out_path.write_text(json.dumps(summary, indent=2))
+    data_logger.info("[DataDebug] Wrote dataset summary: %s", out_path)
 
 
 def _validate_tiled_mode_constraints(config: ConfigManager) -> None:
@@ -682,20 +785,40 @@ def _build_tiled_validation_split(
         structure_ids=structure_ids,
         target_beads=config.get_tile_target_beads(),
         bucket_beads=config.get_tile_bucket_beads(),
+        target_edges=config.get_tile_target_edges(),
+        bucket_edges=config.get_tile_bucket_edges(),
+        edge_estimate_scale=config.get_tile_edge_estimate_scale(),
+        edge_estimate_mode=config.get_tile_edge_estimate_mode(),
+        edge_estimate_cutoff=config.get_tile_edge_estimate_cutoff(),
         shuffle_structures=False,
         sort_by_size=config.tile_sort_by_size_enabled(),
+        sort_by_estimated_edges=config.tile_sort_by_estimated_edges_enabled(),
         drop_incomplete=False,
+        isolate_large_structures=config.tile_isolate_large_structures_enabled(),
+        large_structure_threshold=config.get_tile_large_structure_threshold(),
+        large_structure_edge_threshold=config.get_tile_large_structure_edge_threshold(),
+        spatial_separation=config.tile_spatial_separation_enabled(),
+        structure_gap=config.get_tile_structure_gap(),
         seed=seed,
     )
     tiled = _attach_batch_metadata(tiled, np.arange(tiled["R"].shape[0], dtype=np.int32))
     data_logger.info(
         "[Tiling][Validation] Built %d validation tiles from %d held-out structures "
-        "(target_beads=%d, bucket_beads=%s, sort_by_size=%s).",
+        "(target_beads=%d, bucket_beads=%s, target_edges=%s, bucket_edges=%s, "
+        "edge_mode=%s, edge_cutoff=%s, spatial_separation=%s, structure_gap=%.2f, "
+        "sort_by_size=%s, sort_by_estimated_edges=%s).",
         int(tiled["R"].shape[0]),
         int(val_R.shape[0]),
         int(config.get_tile_target_beads()),
         config.get_tile_bucket_beads(),
+        config.get_tile_target_edges(),
+        config.get_tile_bucket_edges(),
+        config.get_tile_edge_estimate_mode(),
+        config.get_tile_edge_estimate_cutoff(),
+        bool(config.tile_spatial_separation_enabled()),
+        float(config.get_tile_structure_gap()),
         bool(config.tile_sort_by_size_enabled()),
+        bool(config.tile_sort_by_estimated_edges_enabled()),
     )
     return tiled
 
@@ -800,9 +923,20 @@ def _build_train_split(
         structure_ids=structure_ids,
         target_beads=config.get_tile_target_beads(),
         bucket_beads=config.get_tile_bucket_beads(),
+        target_edges=config.get_tile_target_edges(),
+        bucket_edges=config.get_tile_bucket_edges(),
+        edge_estimate_scale=config.get_tile_edge_estimate_scale(),
+        edge_estimate_mode=config.get_tile_edge_estimate_mode(),
+        edge_estimate_cutoff=config.get_tile_edge_estimate_cutoff(),
         shuffle_structures=config.tile_shuffle_structures_enabled(),
         sort_by_size=config.tile_sort_by_size_enabled(),
+        sort_by_estimated_edges=config.tile_sort_by_estimated_edges_enabled(),
         drop_incomplete=config.tile_drop_incomplete_enabled(),
+        isolate_large_structures=config.tile_isolate_large_structures_enabled(),
+        large_structure_threshold=config.get_tile_large_structure_threshold(),
+        large_structure_edge_threshold=config.get_tile_large_structure_edge_threshold(),
+        spatial_separation=config.tile_spatial_separation_enabled(),
+        structure_gap=config.get_tile_structure_gap(),
         seed=seed,
     )
     t_tile_build_end = time.perf_counter()
@@ -811,21 +945,38 @@ def _build_train_split(
 
     data_logger.info(
         "[Tiling] Built %d tiles from %d structures "
-        "(target_beads=%d, bucket_beads=%s, shuffled=%s, sort_by_size=%s, drop_incomplete=%s).",
+        "(target_beads=%d, bucket_beads=%s, target_edges=%s, bucket_edges=%s, "
+        "edge_mode=%s, edge_cutoff=%s, "
+        "shuffled=%s, sort_by_size=%s, sort_by_estimated_edges=%s, "
+        "isolate_large=%s, large_threshold=%s, large_edge_threshold=%s, "
+        "spatial_separation=%s, structure_gap=%.2f, drop_incomplete=%s).",
         int(tiled["R"].shape[0]),
         int(train_split["R"].shape[0]),
         int(config.get_tile_target_beads()),
         config.get_tile_bucket_beads(),
+        config.get_tile_target_edges(),
+        config.get_tile_bucket_edges(),
+        config.get_tile_edge_estimate_mode(),
+        config.get_tile_edge_estimate_cutoff(),
         bool(config.tile_shuffle_structures_enabled()),
         bool(config.tile_sort_by_size_enabled()),
+        bool(config.tile_sort_by_estimated_edges_enabled()),
+        bool(config.tile_isolate_large_structures_enabled()),
+        config.get_tile_large_structure_threshold(),
+        config.get_tile_large_structure_edge_threshold(),
+        bool(config.tile_spatial_separation_enabled()),
+        float(config.get_tile_structure_gap()),
         bool(config.tile_drop_incomplete_enabled()),
     )
     data_logger.info(
-        "[Tiling] Tile shape: R=%s, segment_id=%s, mean_valid=%.1f, mean_segments=%.2f",
+        "[Tiling] Tile shape: R=%s, segment_id=%s, mean_valid=%.1f, "
+        "mean_segments=%.2f, mean_est_edges=%.1f, max_est_edges=%.1f",
         tuple(tiled["R"].shape),
         tuple(tiled["segment_id"].shape),
         float(np.mean(tiled["n_valid"])),
         float(np.mean(tiled["n_segments"])),
+        float(np.mean(tiled.get("meta_estimated_edges", np.zeros((1,), dtype=np.float32)))),
+        float(np.max(tiled.get("meta_estimated_edges", np.zeros((1,), dtype=np.float32)))),
     )
     data_logger.info(
         "[TilingTiming] build_ms=%.3f metadata_ms=%.3f total_ms=%.3f",
@@ -971,6 +1122,12 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         park_mult=park_mult,
         fitted_params=fitted_prior_params,
     )
+    _log_dataset_protein_debug(
+        dataset=dataset,
+        id_to_aa=loader.id_to_aa,
+        dataset_path=data_path_obj,
+        export_dir=export_dir,
+    )
 
     box = extent
     data_logger.info(f"[Preprocessing] Computed box: {jax.device_get(box)}")
@@ -1035,6 +1192,7 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     if config.get_batch_mode() == "tiled":
         R0 = train_split["R"][0]
         species0 = train_split["species"][0]
+        init_mask0 = train_split["mask"][0]
         N_max = int(train_split["R"].shape[1])
         data_logger.info(
             "[Tiling] Model initialization uses tiled particle axis N_max=%d.",
@@ -1043,6 +1201,7 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     else:
         R0 = dataset["R"][0]
         species0 = loader.species[0]
+        init_mask0 = dataset["mask"][0]
         N_max = int(loader.N_max)
 
     model = CombinedModel(
@@ -1051,6 +1210,7 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         box=box,
         species=species0,
         N_max=N_max,
+        init_mask=init_mask0,
         n_species_override=n_species_global,
         id_to_aa=loader.id_to_aa,
         prior_only=config.prior_only_enabled()
@@ -1403,6 +1563,7 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
         if config.get_batch_mode() == "tiled":
             R0 = train_split["R"][0]
             species0 = train_split["species"][0]
+            init_mask0 = train_split["mask"][0]
             model_n_max = int(train_split["R"].shape[1])
             data_logger.info(
                 "[Tiling][Bucket %d] Model initialization uses tiled particle axis N_max=%d.",
@@ -1412,10 +1573,12 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
         else:
             R0 = dataset["R"][0]
             species0 = loader.species[0]
+            init_mask0 = dataset["mask"][0]
             model_n_max = int(n_max)
 
         model = CombinedModel(
             config=config, R0=R0, box=box, species=species0, N_max=model_n_max,
+            init_mask=init_mask0,
             n_species_override=global_n_species,
             id_to_aa=loader.id_to_aa,
             prior_only=config.prior_only_enabled()

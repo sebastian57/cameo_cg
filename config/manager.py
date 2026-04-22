@@ -188,6 +188,96 @@ class ConfigManager:
             )
         return parsed
 
+    def get_tile_target_edges(self) -> Optional[int]:
+        value = self.get("data", "tile_target_edges", default=None)
+        if value is None:
+            return None
+        parsed = int(value)
+        if parsed <= 0:
+            raise ValueError(f"data.tile_target_edges must be > 0, got {parsed}.")
+        return parsed
+
+    def get_tile_bucket_edges(self) -> Optional[list[int]]:
+        values = self.get("data", "tile_bucket_edges", default=None)
+        if values is None:
+            return None
+        if not isinstance(values, (list, tuple)):
+            raise ValueError(
+                "data.tile_bucket_edges must be a list of positive integers."
+            )
+        parsed = [int(v) for v in values]
+        if any(v <= 0 for v in parsed):
+            raise ValueError(
+                f"data.tile_bucket_edges must contain positive integers, got {values}."
+            )
+        return parsed
+
+    def get_tile_edge_estimate_scale(self) -> float:
+        value = float(self.get("data", "tile_edge_estimate_scale", default=15.0))
+        if value <= 0.0:
+            raise ValueError(
+                f"data.tile_edge_estimate_scale must be > 0, got {value}."
+            )
+        return value
+
+    def get_tile_edge_estimate_mode(self) -> str:
+        raw = str(self.get("data", "tile_edge_estimate_mode", default="valid_scaled"))
+        normalized = raw.strip().lower()
+        if normalized not in ("valid_scaled", "distance_cutoff"):
+            raise ValueError(
+                f"Unsupported data.tile_edge_estimate_mode='{raw}'. "
+                "Expected one of: valid_scaled, distance_cutoff."
+            )
+        return normalized
+
+    def get_tile_edge_estimate_cutoff(self) -> Optional[float]:
+        value = self.get("data", "tile_edge_estimate_cutoff", default=None)
+        if value is None:
+            return None
+        parsed = float(value)
+        if parsed <= 0.0:
+            raise ValueError(
+                f"data.tile_edge_estimate_cutoff must be > 0, got {parsed}."
+            )
+        return parsed
+
+    def tile_sort_by_estimated_edges_enabled(self) -> bool:
+        return bool(self.get("data", "tile_sort_by_estimated_edges", default=False))
+
+    def tile_isolate_large_structures_enabled(self) -> bool:
+        return bool(self.get("data", "tile_isolate_large_structures", default=False))
+
+    def get_tile_large_structure_threshold(self) -> Optional[int]:
+        value = self.get("data", "tile_large_structure_threshold", default=None)
+        if value is None:
+            return None
+        parsed = int(value)
+        if parsed <= 0:
+            raise ValueError(
+                f"data.tile_large_structure_threshold must be > 0, got {parsed}."
+            )
+        return parsed
+
+    def get_tile_large_structure_edge_threshold(self) -> Optional[float]:
+        value = self.get("data", "tile_large_structure_edge_threshold", default=None)
+        if value is None:
+            return None
+        parsed = float(value)
+        if parsed <= 0.0:
+            raise ValueError(
+                f"data.tile_large_structure_edge_threshold must be > 0, got {parsed}."
+            )
+        return parsed
+
+    def tile_spatial_separation_enabled(self) -> bool:
+        return bool(self.get("data", "tile_spatial_separation", default=False))
+
+    def get_tile_structure_gap(self) -> float:
+        value = float(self.get("data", "tile_structure_gap", default=25.0))
+        if value <= 0.0:
+            raise ValueError(f"data.tile_structure_gap must be > 0, got {value}.")
+        return value
+
     def tile_shuffle_structures_enabled(self) -> bool:
         return bool(self.get("data", "tile_shuffle_structures", default=False))
 
@@ -248,6 +338,9 @@ class ConfigManager:
                 "Expected one of: dense, sparse."
             )
         return normalized
+
+    def neighbor_disable_cell_list_enabled(self) -> bool:
+        return bool(self.get("model", "neighbor_disable_cell_list", default=False))
 
     def get_allegro_config(self, size: str = "default") -> Dict[str, Any]:
         """Get Allegro model hyperparameters from model.allegro,

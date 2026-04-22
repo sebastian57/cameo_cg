@@ -125,6 +125,39 @@ class Trainer:
         self._tile_bucket_beads = (
             config.get_tile_bucket_beads() if self._batch_mode == "tiled" else None
         )
+        self._tile_target_edges = (
+            config.get_tile_target_edges() if self._batch_mode == "tiled" else None
+        )
+        self._tile_bucket_edges = (
+            config.get_tile_bucket_edges() if self._batch_mode == "tiled" else None
+        )
+        self._tile_edge_estimate_scale = (
+            config.get_tile_edge_estimate_scale() if self._batch_mode == "tiled" else 15.0
+        )
+        self._tile_edge_estimate_mode = (
+            config.get_tile_edge_estimate_mode() if self._batch_mode == "tiled" else "valid_scaled"
+        )
+        self._tile_edge_estimate_cutoff = (
+            config.get_tile_edge_estimate_cutoff() if self._batch_mode == "tiled" else None
+        )
+        self._tile_sort_by_estimated_edges = (
+            self._batch_mode == "tiled" and config.tile_sort_by_estimated_edges_enabled()
+        )
+        self._tile_isolate_large_structures = (
+            self._batch_mode == "tiled" and config.tile_isolate_large_structures_enabled()
+        )
+        self._tile_large_structure_threshold = (
+            config.get_tile_large_structure_threshold() if self._batch_mode == "tiled" else None
+        )
+        self._tile_large_structure_edge_threshold = (
+            config.get_tile_large_structure_edge_threshold() if self._batch_mode == "tiled" else None
+        )
+        self._tile_spatial_separation = (
+            self._batch_mode == "tiled" and config.tile_spatial_separation_enabled()
+        )
+        self._tile_structure_gap = (
+            config.get_tile_structure_gap() if self._batch_mode == "tiled" else 25.0
+        )
         self._tiled_train_source = None
         if tiled_train_source is not None:
             self._tiled_train_source = {
@@ -1478,9 +1511,20 @@ class Trainer:
             structure_ids=self._tiled_train_source.get("structure_ids"),
             target_beads=int(self._tile_target_beads),
             bucket_beads=self._tile_bucket_beads,
+            target_edges=self._tile_target_edges,
+            bucket_edges=self._tile_bucket_edges,
+            edge_estimate_scale=self._tile_edge_estimate_scale,
+            edge_estimate_mode=self._tile_edge_estimate_mode,
+            edge_estimate_cutoff=self._tile_edge_estimate_cutoff,
             shuffle_structures=self._tile_shuffle_structures,
             sort_by_size=self._tile_sort_by_size,
+            sort_by_estimated_edges=self._tile_sort_by_estimated_edges,
             drop_incomplete=self._tile_drop_incomplete,
+            isolate_large_structures=self._tile_isolate_large_structures,
+            large_structure_threshold=self._tile_large_structure_threshold,
+            large_structure_edge_threshold=self._tile_large_structure_edge_threshold,
+            spatial_separation=self._tile_spatial_separation,
+            structure_gap=self._tile_structure_gap,
             seed=epoch_seed,
         )
         t_build_end = time.perf_counter()
@@ -1502,14 +1546,26 @@ class Trainer:
             sort_by_size=self._tile_sort_by_size,
         )
         training_logger.info(
-            "[Tiling][EpochBuild] epoch=%d seed=%d tiles=%d mean_structures_per_tile=%.2f mean_valid_beads=%.1f fill_ratio=%.3f sort_by_size=%s build_ms=%.3f metadata_ms=%.3f",
+            "[Tiling][EpochBuild] epoch=%d seed=%d tiles=%d mean_structures_per_tile=%.2f "
+            "mean_valid_beads=%.1f fill_ratio=%.3f mean_est_edges=%.1f max_est_edges=%.1f "
+            "sort_by_size=%s sort_by_estimated_edges=%s isolate_large=%s "
+            "large_bead_threshold=%s large_edge_threshold=%s "
+            "spatial_separation=%s structure_gap=%.2f build_ms=%.3f metadata_ms=%.3f",
             epoch_idx,
             epoch_seed,
             int(tiled["R"].shape[0]),
             float(np.mean(tiled["n_segments"])),
             float(np.mean(tiled["n_valid"])),
             float(np.mean(tiled["meta_fill_ratio"])),
+            float(np.mean(tiled.get("meta_estimated_edges", np.zeros((1,), dtype=np.float32)))),
+            float(np.max(tiled.get("meta_estimated_edges", np.zeros((1,), dtype=np.float32)))),
             self._tile_sort_by_size,
+            self._tile_sort_by_estimated_edges,
+            self._tile_isolate_large_structures,
+            self._tile_large_structure_threshold,
+            self._tile_large_structure_edge_threshold,
+            self._tile_spatial_separation,
+            self._tile_structure_gap,
             build_ms,
             metadata_ms,
         )

@@ -46,6 +46,12 @@ def load_npz(path: PathLike) -> Dict[str, Any]:
             raise FileNotFoundError(f"No .npz files found in directory: {path}")
 
         datasets = [np.load(f, allow_pickle=True) for f in files]
+        source_name_arrays = []
+        for f, d in zip(files, datasets):
+            n_frames_local = int(d["R"].shape[0])
+            source_name_arrays.append(
+                np.full((n_frames_local,), f.stem, dtype=object)
+            )
         n_atoms_per_file = [int(d["R"].shape[1]) for d in datasets]
         unique_n_atoms = sorted(set(n_atoms_per_file))
         if len(unique_n_atoms) > 1:
@@ -80,6 +86,7 @@ def load_npz(path: PathLike) -> Dict[str, Any]:
             "species": cat_or_default(
                 "species", lambda d: np.zeros(d["R"].shape[:2], dtype=np.int32)
             ).astype(np.int32),
+            "source_name": np.concatenate(source_name_arrays, axis=0),
             "Z":       datasets[0]["Z"].astype(np.int32) if "Z" in datasets[0] else None,
             "resid":   datasets[0]["resid"].astype(np.int32) if "resid" in datasets[0] else None,
             "resname": datasets[0]["resname"] if "resname" in datasets[0] else None,
@@ -107,6 +114,7 @@ def load_npz(path: PathLike) -> Dict[str, Any]:
         "N_max": data["N_max"] if "N_max" in data else data["R"].shape[1],
         "mask": data["mask"] if "mask" in data else np.ones(data["R"].shape[:2], dtype=np.float32),
         "aa_to_id": data["aa_to_id"].item() if "aa_to_id" in data else None,
+        "source_name": np.full((int(data["R"].shape[0]),), path.stem, dtype=object),
     }
 
     # Handle N_max being an array
@@ -146,46 +154,198 @@ def _choose_tile_capacity(
     n_valid: int,
     target_beads: int,
     bucket_beads: Optional[Sequence[int]],
+    n_edges_est: Optional[float] = None,
+    target_edges: Optional[int] = None,
+    bucket_edges: Optional[Sequence[int]] = None,
 ) -> int:
     """Choose padded tile capacity for a packed tile."""
+    if target_edges is not None and int(target_edges) <= 0:
+        raise ValueError(f"target_edges must be > 0, got {target_edges}.")
+    if bucket_edges is not None and bucket_beads is None:
+        raise ValueError("bucket_edges requires bucket_beads to be configured.")
+    if bucket_edges is not None and len(bucket_edges) != len(bucket_beads):
+        raise ValueError(
+            "bucket_edges must match bucket_beads length "
+            f"({len(bucket_edges)} != {len(bucket_beads)})."
+        )
+
     if bucket_beads:
-        for bucket in bucket_beads:
-            if n_valid <= int(bucket):
+        for idx, bucket in enumerate(bucket_beads):
+            bead_ok = n_valid <= int(bucket)
+            edge_ok = True
+            if n_edges_est is not None:
+                if bucket_edges is not None:
+                    edge_ok = float(n_edges_est) <= float(bucket_edges[idx])
+                elif target_edges is not None:
+                    edge_ok = float(n_edges_est) <= float(target_edges)
+            if bead_ok and edge_ok:
                 return int(bucket)
+        if bucket_edges is not None and n_edges_est is not None:
+            raise ValueError(
+                f"Tile with n_valid={n_valid} and n_edges_est={float(n_edges_est):.1f} "
+                f"does not fit configured buckets beads={list(bucket_beads)} "
+                f"edges={list(bucket_edges)}."
+            )
         raise ValueError(
             f"Tile with {n_valid} valid beads does not fit into configured "
             f"data.tile_bucket_beads={list(bucket_beads)}."
         )
+    if target_edges is not None and n_edges_est is not None:
+        if float(n_edges_est) > float(target_edges):
+            raise ValueError(
+                f"Tile with n_edges_est={float(n_edges_est):.1f} exceeds "
+                f"data.tile_target_edges={int(target_edges)}."
+            )
     return max(int(target_beads), int(n_valid))
+
+
+def _tile_fits_capacity(
+    beads_total: int,
+    edges_total_est: float,
+    target_beads: int,
+    bucket_beads: Optional[Sequence[int]],
+    target_edges: Optional[int],
+    bucket_edges: Optional[Sequence[int]],
+) -> bool:
+    if bucket_beads:
+        if bucket_edges is not None and len(bucket_edges) != len(bucket_beads):
+            raise ValueError(
+                "bucket_edges must match bucket_beads length "
+                f"({len(bucket_edges)} != {len(bucket_beads)})."
+            )
+        for idx, bucket in enumerate(bucket_beads):
+            bead_ok = beads_total <= int(bucket)
+            edge_ok = True
+            if bucket_edges is not None:
+                edge_ok = float(edges_total_est) <= float(bucket_edges[idx])
+            elif target_edges is not None:
+                edge_ok = float(edges_total_est) <= float(target_edges)
+            if bead_ok and edge_ok:
+                return True
+        return False
+
+    bead_ok = beads_total <= int(target_beads)
+    edge_ok = True
+    if target_edges is not None:
+        edge_ok = float(edges_total_est) <= float(target_edges)
+    return bool(bead_ok and edge_ok)
 
 
 def _pack_structures_greedy(
     sorted_indices: np.ndarray,
     valid_counts: np.ndarray,
+    edge_counts_est: np.ndarray,
     target_beads: int,
+    bucket_beads: Optional[Sequence[int]],
+    target_edges: Optional[int],
+    bucket_edges: Optional[Sequence[int]],
     drop_incomplete: bool,
+    isolate_large_structures: bool = False,
+    large_structure_threshold: Optional[int] = None,
+    large_structure_edge_threshold: Optional[float] = None,
 ) -> list[list[int]]:
-    """Greedily pack structures into tiles by valid bead budget."""
+    """Greedily pack structures into tiles with optional bead+edge capacity limits."""
     tiles: list[list[int]] = []
     current: list[int] = []
     current_beads = 0
+    current_edges = 0.0
+    isolate_threshold = (
+        int(large_structure_threshold)
+        if large_structure_threshold is not None
+        else int(target_beads)
+    )
 
     for idx in sorted_indices:
         n_valid = int(valid_counts[idx])
+        n_edges_est = float(edge_counts_est[idx])
         if n_valid <= 0:
             continue
-        if current and (current_beads + n_valid > target_beads):
+
+        is_large = False
+        if isolate_large_structures:
+            is_large = n_valid >= isolate_threshold
+            if large_structure_edge_threshold is not None:
+                is_large = is_large or (n_edges_est >= float(large_structure_edge_threshold))
+        if is_large:
+            if current:
+                tiles.append(current)
+                current = []
+                current_beads = 0
+                current_edges = 0.0
+            if not _tile_fits_capacity(
+                n_valid,
+                n_edges_est,
+                target_beads=target_beads,
+                bucket_beads=bucket_beads,
+                target_edges=target_edges,
+                bucket_edges=bucket_edges,
+            ):
+                raise ValueError(
+                    f"Large structure idx={int(idx)} with n_valid={n_valid} "
+                    f"and n_edges_est={n_edges_est:.1f} cannot fit configured tile limits."
+                )
+            tiles.append([int(idx)])
+            continue
+
+        if current and not _tile_fits_capacity(
+            current_beads + n_valid,
+            current_edges + n_edges_est,
+            target_beads=target_beads,
+            bucket_beads=bucket_beads,
+            target_edges=target_edges,
+            bucket_edges=bucket_edges,
+        ):
             tiles.append(current)
             current = []
             current_beads = 0
+            current_edges = 0.0
+
+        if not _tile_fits_capacity(
+            n_valid,
+            n_edges_est,
+            target_beads=target_beads,
+            bucket_beads=bucket_beads,
+            target_edges=target_edges,
+            bucket_edges=bucket_edges,
+        ):
+            raise ValueError(
+                f"Structure idx={int(idx)} with n_valid={n_valid} and "
+                f"n_edges_est={n_edges_est:.1f} cannot fit configured tile limits."
+            )
+
         current.append(int(idx))
         current_beads += n_valid
+        current_edges += n_edges_est
 
     if current:
         if not drop_incomplete or current_beads >= target_beads or not tiles:
             tiles.append(current)
 
     return tiles
+
+
+def _estimate_edges_by_cutoff(
+    R: np.ndarray,
+    mask: np.ndarray,
+    cutoff: float,
+) -> np.ndarray:
+    """Estimate directed edge counts per structure using a distance cutoff."""
+    n_structures = int(R.shape[0])
+    out = np.zeros((n_structures,), dtype=np.float64)
+    cutoff2 = float(cutoff) * float(cutoff)
+    for idx in range(n_structures):
+        valid_idx = np.flatnonzero(mask[idx] > 0)
+        n_valid = int(valid_idx.shape[0])
+        if n_valid <= 1:
+            out[idx] = 0.0
+            continue
+        coords = np.asarray(R[idx, valid_idx], dtype=np.float64)
+        disp = coords[:, None, :] - coords[None, :, :]
+        dist2 = np.sum(disp * disp, axis=-1)
+        within = dist2 <= cutoff2
+        np.fill_diagonal(within, False)
+        out[idx] = float(np.sum(within))
+    return out
 
 
 def compute_force_loss_weights(split: Dict[str, np.ndarray]) -> np.ndarray:
@@ -247,9 +407,21 @@ def build_tiled_dataset(
     structure_ids: Optional[np.ndarray] = None,
     target_beads: int = 1000,
     bucket_beads: Optional[Sequence[int]] = None,
+    target_edges: Optional[int] = None,
+    bucket_edges: Optional[Sequence[int]] = None,
+    edge_estimate_scale: float = 15.0,
+    edge_estimate_mode: str = "valid_scaled",
+    edge_estimate_cutoff: Optional[float] = None,
+    structure_edge_estimates: Optional[np.ndarray] = None,
     shuffle_structures: bool = False,
     sort_by_size: bool = True,
+    sort_by_estimated_edges: bool = False,
     drop_incomplete: bool = False,
+    isolate_large_structures: bool = False,
+    large_structure_threshold: Optional[int] = None,
+    large_structure_edge_threshold: Optional[float] = None,
+    spatial_separation: bool = False,
+    structure_gap: float = 25.0,
     seed: int = 0,
 ) -> Dict[str, np.ndarray]:
     """
@@ -264,6 +436,17 @@ def build_tiled_dataset(
     """
     if target_beads <= 0:
         raise ValueError(f"target_beads must be > 0, got {target_beads}.")
+    if target_edges is not None and int(target_edges) <= 0:
+        raise ValueError(f"target_edges must be > 0, got {target_edges}.")
+    if bucket_edges is not None and bucket_beads is None:
+        raise ValueError("bucket_edges requires bucket_beads to be configured.")
+    if bucket_edges is not None and len(bucket_edges) != len(bucket_beads):
+        raise ValueError(
+            "bucket_edges must match bucket_beads length "
+            f"({len(bucket_edges)} != {len(bucket_beads)})."
+        )
+    if structure_gap <= 0.0:
+        raise ValueError(f"structure_gap must be > 0, got {structure_gap}.")
 
     if R.ndim != 3 or F.ndim != 3:
         raise ValueError("R and F must have shape (n_structures, n_atoms, 3).")
@@ -274,6 +457,33 @@ def build_tiled_dataset(
 
     n_structures = int(R.shape[0])
     valid_counts = np.asarray(np.sum(mask > 0, axis=1), dtype=np.int32)
+    if structure_edge_estimates is not None:
+        edge_counts_est = np.asarray(structure_edge_estimates, dtype=np.float64)
+        if edge_counts_est.shape != (n_structures,):
+            raise ValueError(
+                "structure_edge_estimates must have shape (n_structures,), "
+                f"got {edge_counts_est.shape}."
+            )
+    else:
+        mode = str(edge_estimate_mode).strip().lower()
+        if mode == "valid_scaled":
+            edge_counts_est = valid_counts.astype(np.float64) * float(edge_estimate_scale)
+        elif mode == "distance_cutoff":
+            if edge_estimate_cutoff is None or float(edge_estimate_cutoff) <= 0.0:
+                raise ValueError(
+                    "edge_estimate_cutoff must be > 0 when edge_estimate_mode='distance_cutoff'."
+                )
+            edge_counts_est = _estimate_edges_by_cutoff(
+                R=np.asarray(R, dtype=np.float32),
+                mask=np.asarray(mask, dtype=np.float32),
+                cutoff=float(edge_estimate_cutoff),
+            )
+        else:
+            raise ValueError(
+                f"Unsupported edge_estimate_mode='{edge_estimate_mode}'. "
+                "Expected one of: valid_scaled, distance_cutoff."
+            )
+
     if structure_ids is None:
         structure_ids = np.arange(n_structures, dtype=np.int32)
     else:
@@ -288,12 +498,24 @@ def build_tiled_dataset(
     if shuffle_structures:
         rng = np.random.RandomState(seed)
         rng.shuffle(order)
-    if sort_by_size:
+    if sort_by_estimated_edges:
+        order = order[np.argsort(edge_counts_est[order])[::-1]]
+    elif sort_by_size:
         # First-fit decreasing improves fill ratio and keeps behavior deterministic.
         order = order[np.argsort(valid_counts[order])[::-1]]
 
     tiles = _pack_structures_greedy(
-        order, valid_counts, target_beads=target_beads, drop_incomplete=drop_incomplete
+        order,
+        valid_counts,
+        edge_counts_est,
+        target_beads=target_beads,
+        bucket_beads=bucket_beads,
+        target_edges=target_edges,
+        bucket_edges=bucket_edges,
+        drop_incomplete=drop_incomplete,
+        isolate_large_structures=isolate_large_structures,
+        large_structure_threshold=large_structure_threshold,
+        large_structure_edge_threshold=large_structure_edge_threshold,
     )
     if not tiles:
         raise ValueError(
@@ -312,6 +534,7 @@ def build_tiled_dataset(
     meta_capacity = []
     meta_fill_ratio = []
     meta_n_force_components = []
+    meta_estimated_edges = []
     meta_source_structure_ids = []
     meta_source_structure_n_valid = []
     meta_structure_size_min = []
@@ -323,10 +546,14 @@ def build_tiled_dataset(
         tile_indices_arr = np.asarray(tile_indices, dtype=np.int32)
         struct_valid = valid_counts[tile_indices_arr]
         n_valid_tile = int(np.sum(struct_valid))
+        n_edges_est_tile = float(np.sum(edge_counts_est[tile_indices_arr]))
         capacity = _choose_tile_capacity(
             n_valid=n_valid_tile,
             target_beads=target_beads,
             bucket_beads=bucket_beads,
+            n_edges_est=n_edges_est_tile,
+            target_edges=target_edges,
+            bucket_edges=bucket_edges,
         )
 
         R_out = np.zeros((capacity, 3), dtype=np.float32)
@@ -336,6 +563,7 @@ def build_tiled_dataset(
         segment_out = np.full((capacity,), -1, dtype=np.int32)
 
         cursor = 0
+        current_x = 0.0
         for seg_id, struct_idx in enumerate(tile_indices):
             valid_idx = np.flatnonzero(mask[struct_idx] > 0)
             n_valid = int(valid_idx.shape[0])
@@ -346,7 +574,16 @@ def build_tiled_dataset(
                     f"Tile overflow: required {cursor + n_valid} > capacity {capacity}."
                 )
             sl = slice(cursor, cursor + n_valid)
-            R_out[sl] = R[struct_idx, valid_idx]
+            coords = np.asarray(R[struct_idx, valid_idx], dtype=np.float32)
+            if spatial_separation:
+                centered = coords - np.mean(coords, axis=0, keepdims=True)
+                radii = np.linalg.norm(centered, axis=1)
+                radius = float(np.max(radii)) if radii.size > 0 else 0.0
+                center_x = current_x + radius
+                centered[:, 0] += center_x
+                current_x = center_x + radius + float(structure_gap)
+                coords = centered
+            R_out[sl] = coords
             F_out[sl] = F[struct_idx, valid_idx]
             mask_out[sl] = 1.0
             species_out[sl] = species[struct_idx, valid_idx]
@@ -364,6 +601,7 @@ def build_tiled_dataset(
         meta_capacity.append(np.int32(capacity))
         meta_fill_ratio.append(np.float32(cursor / max(capacity, 1)))
         meta_n_force_components.append(np.int32(cursor * 3))
+        meta_estimated_edges.append(np.float32(n_edges_est_tile))
 
         source_ids = np.full((max_segments,), -1, dtype=np.int32)
         source_valid = np.zeros((max_segments,), dtype=np.int32)
@@ -375,6 +613,28 @@ def build_tiled_dataset(
         meta_structure_size_mean.append(np.float32(np.mean(struct_valid)))
         meta_structure_size_max.append(np.int32(np.max(struct_valid)))
         meta_structure_size_std.append(np.float32(np.std(struct_valid)))
+
+    global_capacity = max(int(arr.shape[0]) for arr in tile_mask)
+
+    def _pad_2d(arr: np.ndarray, fill: float = 0.0) -> np.ndarray:
+        if arr.shape[0] == global_capacity:
+            return arr
+        out = np.full((global_capacity, arr.shape[1]), fill, dtype=arr.dtype)
+        out[: arr.shape[0]] = arr
+        return out
+
+    def _pad_1d(arr: np.ndarray, fill: float = 0.0) -> np.ndarray:
+        if arr.shape[0] == global_capacity:
+            return arr
+        out = np.full((global_capacity,), fill, dtype=arr.dtype)
+        out[: arr.shape[0]] = arr
+        return out
+
+    tile_R = [_pad_2d(arr, fill=0.0) for arr in tile_R]
+    tile_F = [_pad_2d(arr, fill=0.0) for arr in tile_F]
+    tile_mask = [_pad_1d(arr, fill=0.0) for arr in tile_mask]
+    tile_species = [_pad_1d(arr, fill=0) for arr in tile_species]
+    tile_segment_id = [_pad_1d(arr, fill=-1) for arr in tile_segment_id]
 
     return {
         "R": np.stack(tile_R, axis=0),
@@ -388,6 +648,7 @@ def build_tiled_dataset(
         "meta_capacity": np.asarray(meta_capacity, dtype=np.int32),
         "meta_fill_ratio": np.asarray(meta_fill_ratio, dtype=np.float32),
         "meta_n_force_components": np.asarray(meta_n_force_components, dtype=np.int32),
+        "meta_estimated_edges": np.asarray(meta_estimated_edges, dtype=np.float32),
         "meta_source_structure_ids": np.stack(meta_source_structure_ids, axis=0),
         "meta_source_structure_n_valid": np.stack(
             meta_source_structure_n_valid, axis=0
@@ -440,6 +701,11 @@ class DatasetLoader:
         self.R = np.asarray(raw_data["R"][indices], dtype=np.float32)
         self.F = np.asarray(raw_data["F"][indices], dtype=np.float32)
         self.mask = np.asarray(raw_data["mask"][indices], dtype=np.float32)
+        raw_source_name = raw_data.get("source_name")
+        if raw_source_name is None:
+            self.source_name = np.full((len(indices),), self.npz_path.stem, dtype=object)
+        else:
+            self.source_name = np.asarray(raw_source_name)[indices]
 
         # Species: optional — if absent, default to zeros (all atoms same type).
         # Also handle 1-D species arrays (shape (N_atoms,)) by broadcasting to
@@ -530,6 +796,7 @@ class DatasetLoader:
             "F": self.F,
             "mask": self.mask,
             "species": self.species,
+            "source_name": self.source_name,
         }
 
     def split_train_val(self, val_fraction: float = 0.1) -> Tuple["DatasetLoader", "DatasetLoader"]:
@@ -556,6 +823,7 @@ class DatasetLoader:
         train_loader.F = self.F[:n_train]
         train_loader.mask = self.mask[:n_train]
         train_loader.species = self.species[:n_train]
+        train_loader.source_name = self.source_name[:n_train]
         train_loader.N_max = self.N_max
         train_loader.resid = self.resid
         train_loader.resname = self.resname
@@ -571,6 +839,7 @@ class DatasetLoader:
         val_loader.F = self.F[n_train:]
         val_loader.mask = self.mask[n_train:]
         val_loader.species = self.species[n_train:]
+        val_loader.source_name = self.source_name[n_train:]
         val_loader.N_max = self.N_max
         val_loader.resid = self.resid
         val_loader.resname = self.resname

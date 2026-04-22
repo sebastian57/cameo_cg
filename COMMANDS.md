@@ -83,7 +83,7 @@ scancel <jobid>
 Post-hoc MLIR re-export:
 
 ```bash
-python export/reexport_mlir.py   /path/to/model_params.pkl   /path/to/model_config.yaml   --mode combined   --prior-source config   --output-name model_with_priors
+python export/reexport_mlir.py   /path/to/model_params.pkl   /path/to/model_config.yaml   --mode combined   --prior-source config   --output-name model_with_priors --export-mode symbolic
 ```
 
 Batch re-export:
