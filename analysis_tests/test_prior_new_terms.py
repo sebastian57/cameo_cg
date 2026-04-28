@@ -10,6 +10,8 @@ from models.prior_energy import (
     _build_charge_and_group_by_species,
     _stickiness_alpha_from_free,
     compute_dh_energy,
+    compute_fene_energy,
+    compute_leash_energy,
     compute_salt_bridge_energy,
 )
 from models.topology import TopologyBuilder
@@ -32,6 +34,23 @@ class _DummyConfig:
     def get_prior_params(self):
         return self.get("model", "priors", default={})
 
+    def get_prior_weights(self):
+        weights = {
+            "bond": 0.5,
+            "angle": 0.1,
+            "repulsive": 0.25,
+            "dihedral": 0.15,
+            "excluded_volume": 1.0,
+            "wca": 0.0,
+            "fene": 0.0,
+            "leash": 0.0,
+            "dh": 0.0,
+            "stickiness": 0.0,
+            "salt_bridge": 0.0,
+        }
+        weights.update(self.get("model", "priors", "weights", default={}))
+        return weights
+
 
 def _base_prior_cfg():
     return {
@@ -44,6 +63,9 @@ def _base_prior_cfg():
                     "repulsive": 1.0,
                     "dihedral": 0.3,
                     "excluded_volume": 0.4,
+                    "wca": 0.0,
+                    "fene": 0.0,
+                    "leash": 0.0,
                     "dh": 0.0,
                     "stickiness": 0.0,
                     "salt_bridge": 0.0,
@@ -133,6 +155,37 @@ def test_dh_sign_channels():
     assert float(e_pp) > 0.0
     assert float(e_mm) > 0.0
     assert float(e_pm) < 0.0
+
+
+def test_fene_zero_force_at_r0_and_wall_growth():
+    mask = jnp.array([1.0, 1.0], dtype=jnp.float32)
+    bonds = jnp.array([[0, 1]], dtype=jnp.int32)
+
+    R_eq = jnp.array([[0.0, 0.0, 0.0], [3.8, 0.0, 0.0]], dtype=jnp.float32)
+
+    def energy(R_):
+        return compute_fene_energy(
+            R_, mask, bonds, r0=3.8, R0=1.5, k=300.0, wall_energy=1.0e6, eps=1.0e-6
+        )
+
+    F_eq = -jax.grad(energy)(R_eq)
+    np.testing.assert_allclose(np.asarray(F_eq), 0.0, atol=1e-6, rtol=0.0)
+
+    R_wall = jnp.array([[0.0, 0.0, 0.0], [3.8 + 0.99 * 1.5, 0.0, 0.0]], dtype=jnp.float32)
+    assert float(energy(R_wall)) > 100.0
+
+
+def test_leash_zero_inside_flat_bottom():
+    mask = jnp.array([1.0, 1.0], dtype=jnp.float32)
+    pairs = jnp.array([[0, 1]], dtype=jnp.int32)
+    R = jnp.array([[0.0, 0.0, 0.0], [5.0, 0.0, 0.0]], dtype=jnp.float32)
+
+    def energy(R_):
+        return compute_leash_energy(R_, mask, pairs, d_safe=10.0, k_safe=0.2)
+
+    np.testing.assert_allclose(np.asarray(energy(R)), 0.0, atol=0.0, rtol=0.0)
+    F = -jax.grad(energy)(R)
+    np.testing.assert_allclose(np.asarray(F), 0.0, atol=0.0, rtol=0.0)
 
 
 def test_dh_sequence_gating_k1_vs_k2():
@@ -263,11 +316,16 @@ def test_disabled_new_terms_regression_matches_old_component_sum():
         + comps["E_repulsive"]
         + comps["E_dihedral"]
         + comps["E_excluded_volume"]
+        + comps["E_wca"]
+        + comps["E_fene"]
+        + comps["E_leash"]
     )
     np.testing.assert_allclose(np.asarray(comps["E_total"]), np.asarray(old_sum), rtol=1e-7, atol=1e-7)
     np.testing.assert_allclose(np.asarray(comps["E_dh"]), 0.0, rtol=0.0, atol=0.0)
     np.testing.assert_allclose(np.asarray(comps["E_stickiness"]), 0.0, rtol=0.0, atol=0.0)
     np.testing.assert_allclose(np.asarray(comps["E_salt_bridge"]), 0.0, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(np.asarray(comps["E_fene"]), 0.0, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(np.asarray(comps["E_leash"]), 0.0, rtol=0.0, atol=0.0)
 
 
 def test_typed_terms_enabled_without_mapping_raises():

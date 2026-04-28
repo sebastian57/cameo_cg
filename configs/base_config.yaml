@@ -122,9 +122,26 @@ model:
       dihedral: 0.25
       repulsive: 1.0
       excluded_volume: 0.0
+      wca: 0.0
+      fene: 0.0
+      leash: 0.0
       dh: 0.0
       stickiness: 0.0
       salt_bridge: 0.0
+
+    fene:
+      enabled: false            # set weights.fene > 0 to activate
+      r0: 3.8
+      R0: 1.5
+      k: 300.0
+      wall_energy: 1.0e6
+      eps: 1.0e-6
+
+    leash:
+      enabled: false            # set weights.leash > 0 to activate
+      d_safe: auto              # auto = 1.5 * 99.9th percentile frame max distance
+      k_safe: 0.2
+      min_sep: 2
 
     aa_typing:
       source: dataset_map       # dataset_map
@@ -290,6 +307,15 @@ training:
     U: 0.0                      # energy weight (usually 0 for force matching)
 
   force_loss_normalization: legacy_mean  # legacy_mean | valid_components | per_structure_components
+
+  # --- Denoising score-matching auxiliary loss ---
+  dsm:
+    enabled: false
+    lambda: 1.0
+    sigma_min: 0.05
+    sigma_max: 2.0
+    kT: 0.636                  # kcal/mol at ~320 K
+    seed_offset: 1729
 
   # --- Precision ---
   enable_mixed_precision: false

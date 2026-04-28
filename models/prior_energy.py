@@ -17,7 +17,7 @@ import jax.numpy as jnp
 import numpy as np
 from pathlib import Path
 from typing import Dict, Tuple, Optional, Any
-from .topology import TopologyBuilder
+from .topology import TopologyBuilder, precompute_repulsive_pairs
 from .spline_eval import (
     evaluate_cubic_spline,
     evaluate_cubic_spline_periodic,
@@ -349,6 +349,70 @@ def compute_salt_bridge_energy(
     return jnp.sum(jnp.where(keep, term, 0.0))
 
 
+def compute_fene_energy(
+    R: jax.Array,
+    mask: jax.Array,
+    bonds: jax.Array,
+    r0: jax.Array,
+    R0: jax.Array,
+    k: jax.Array,
+    wall_energy: jax.Array,
+    eps: jax.Array,
+) -> jax.Array:
+    """FENE energy for consecutive sequence bonds."""
+    if bonds.shape[0] == 0:
+        return jnp.array(0.0, dtype=R.dtype)
+
+    bi, bj = bonds[:, 0], bonds[:, 1]
+    valid = (mask[bi] * mask[bj]) > 0
+
+    dR = R[bi] - R[bj]
+    r = _safe_norm(dR)
+    r = jnp.where(valid, r, jax.lax.stop_gradient(r))
+
+    r0 = jnp.asarray(r0, dtype=R.dtype)
+    R0 = jnp.maximum(jnp.asarray(R0, dtype=R.dtype), jnp.asarray(eps, dtype=R.dtype))
+    k = jnp.asarray(k, dtype=R.dtype)
+    wall_energy = jnp.asarray(wall_energy, dtype=R.dtype)
+    eps = jnp.asarray(eps, dtype=R.dtype)
+
+    x = (r - r0) / R0
+    inside = jnp.abs(x) < (1.0 - eps)
+    x_safe = jnp.where(inside, x, 0.0)
+    U_inside = -0.5 * k * R0**2 * jnp.log1p(-(x_safe**2))
+    overshoot = jnp.maximum(jnp.abs(x) - (1.0 - eps), 0.0) * R0
+    U_outside = wall_energy + 0.5 * k * overshoot**2
+    U = jnp.where(inside, U_inside, U_outside)
+    U = jnp.where(k > 0.0, U, 0.0)
+    return jnp.sum(jnp.where(valid, U, 0.0))
+
+
+def compute_leash_energy(
+    R: jax.Array,
+    mask: jax.Array,
+    pairs: jax.Array,
+    d_safe: jax.Array,
+    k_safe: jax.Array,
+) -> jax.Array:
+    """Flat-bottom pair-distance leash energy."""
+    if pairs.shape[0] == 0:
+        return jnp.array(0.0, dtype=R.dtype)
+
+    pi, pj = pairs[:, 0], pairs[:, 1]
+    valid = (mask[pi] * mask[pj]) > 0
+
+    dR = R[pi] - R[pj]
+    r = _safe_norm(dR)
+    r = jnp.where(valid, r, jax.lax.stop_gradient(r))
+    r_eval = jnp.where(valid, r, 0.0)
+
+    d_safe = jnp.asarray(d_safe, dtype=R.dtype)
+    k_safe = jnp.asarray(k_safe, dtype=R.dtype)
+    dr = jnp.maximum(r_eval - d_safe, 0.0)
+    U = 0.5 * k_safe * dr**2
+    return jnp.sum(jnp.where(valid, U, 0.0))
+
+
 def _angular_fourier_energy(theta: jax.Array, a: jax.Array, b: jax.Array) -> jax.Array:
     """
     Compute Fourier series energy for angles.
@@ -518,6 +582,21 @@ class PriorEnergy:
         self.bonds, self.angles = topology.get_bonds_and_angles()
         self.dihedrals = topology.get_dihedrals()
         self.rep_pairs = topology.get_repulsive_pairs()
+        self.fene_pairs = self.bonds
+        wca_cfg = config.get("model", "priors", "wca", default=None)
+        if wca_cfg is None:
+            wca_cfg = config.get("priors", "wca", default={})
+        if not isinstance(wca_cfg, dict):
+            wca_cfg = {}
+        self.wca_min_sep = int(wca_cfg.get("min_sep", wca_cfg.get("min_repulsive_sep", 1)))
+        self.wca_pairs = precompute_repulsive_pairs(self.topology.N_max, min_sep=self.wca_min_sep)
+        leash_cfg = config.get("model", "priors", "leash", default=None)
+        if leash_cfg is None:
+            leash_cfg = config.get("priors", "leash", default={})
+        if not isinstance(leash_cfg, dict):
+            leash_cfg = {}
+        self.leash_min_sep = int(leash_cfg.get("min_sep", 2))
+        self.leash_pairs = precompute_repulsive_pairs(self.topology.N_max, min_sep=self.leash_min_sep)
         ev_min = int(config.get("model", "priors", "excluded_volume_min_sep", default=2))
         ev_max = int(config.get("model", "priors", "excluded_volume_max_sep", default=5))
         self.excluded_vol_pairs = topology.get_excluded_volume_pairs(min_sep=ev_min, max_sep=ev_max)
@@ -686,6 +765,62 @@ class PriorEnergy:
             "salt_sigma": jnp.asarray(sb_cfg.get("sigma", 0.3), dtype=jnp.float32),
         }
 
+    def _init_wca_params(self, prior_params: Dict[str, Any]) -> Dict[str, jax.Array]:
+        """Initialize WCA clash-guard parameters."""
+        wca_cfg = prior_params.get("wca", {})
+        if not isinstance(wca_cfg, dict):
+            wca_cfg = {}
+
+        epsilon = float(wca_cfg.get("epsilon", prior_params.get("wca_epsilon", 1.0)))
+        r_guard_raw = wca_cfg.get("r_guard", prior_params.get("wca_r_guard", None))
+        sigma_raw = wca_cfg.get("sigma", prior_params.get("wca_sigma", None))
+
+        if r_guard_raw is None and sigma_raw is None:
+            r_guard = 3.2
+            sigma = r_guard / (2.0 ** (1.0 / 6.0))
+        elif r_guard_raw is not None:
+            r_guard = float(r_guard_raw)
+            sigma = float(sigma_raw) if sigma_raw is not None else r_guard / (2.0 ** (1.0 / 6.0))
+        else:
+            sigma = float(sigma_raw)
+            r_guard = (2.0 ** (1.0 / 6.0)) * sigma
+
+        r_floor = float(wca_cfg.get("r_floor", prior_params.get("wca_r_floor", 0.5)))
+
+        return {
+            "wca_epsilon": jnp.asarray(epsilon, dtype=jnp.float32),
+            "wca_sigma": jnp.asarray(sigma, dtype=jnp.float32),
+            "wca_r_cut": jnp.asarray(r_guard, dtype=jnp.float32),
+            "wca_r_floor": jnp.asarray(r_floor, dtype=jnp.float32),
+        }
+
+    def _init_safety_prior_params(self, prior_params: Dict[str, Any]) -> Dict[str, jax.Array]:
+        """Initialize attractive safety prior parameters."""
+        fene_cfg = prior_params.get("fene", {})
+        if not isinstance(fene_cfg, dict):
+            fene_cfg = {}
+        leash_cfg = prior_params.get("leash", {})
+        if not isinstance(leash_cfg, dict):
+            leash_cfg = {}
+
+        d_safe_raw = leash_cfg.get("d_safe", prior_params.get("leash_d_safe", 0.0))
+        try:
+            d_safe = float(d_safe_raw)
+        except (TypeError, ValueError):
+            d_safe = 0.0
+
+        return {
+            "fene_r0": jnp.asarray(fene_cfg.get("r0", 3.8), dtype=jnp.float32),
+            "fene_R0": jnp.asarray(fene_cfg.get("R0", 1.5), dtype=jnp.float32),
+            "fene_k": jnp.asarray(fene_cfg.get("k", 300.0), dtype=jnp.float32),
+            "fene_wall_energy": jnp.asarray(
+                fene_cfg.get("wall_energy", 1.0e6), dtype=jnp.float32
+            ),
+            "fene_eps": jnp.asarray(fene_cfg.get("eps", 1.0e-6), dtype=jnp.float32),
+            "leash_d_safe": jnp.asarray(d_safe, dtype=jnp.float32),
+            "leash_k_safe": jnp.asarray(leash_cfg.get("k_safe", 0.2), dtype=jnp.float32),
+        }
+
     def _init_spline_priors(self, spline_path: str, config):
         """Initialize spline-based priors from NPZ file."""
         self.uses_splines = True
@@ -758,6 +893,8 @@ class PriorEnergy:
             "sigma_ex": jnp.asarray(prior_params.get("sigma_ex", 3.5), dtype=jnp.float32),
         }
         self.params.update(self._init_new_term_params(prior_params))
+        self.params.update(self._init_wca_params(prior_params))
+        self.params.update(self._init_safety_prior_params(prior_params))
 
         model_logger.info("Spline priors loaded: bond, angle, dihedral (repulsive stays parametric)")
 
@@ -781,6 +918,8 @@ class PriorEnergy:
             "sigma_ex": jnp.asarray(prior_params.get("sigma_ex", 3.5), dtype=jnp.float32),
         }
         self.params.update(self._init_new_term_params(prior_params))
+        self.params.update(self._init_wca_params(prior_params))
+        self.params.update(self._init_safety_prior_params(prior_params))
 
     def compute_bond_energy(
         self,
@@ -982,6 +1121,78 @@ class PriorEnergy:
 
         return E_ex
 
+    def compute_wca_energy(
+        self,
+        R: jax.Array,
+        mask: jax.Array,
+        params: Optional[Dict[str, jax.Array]] = None
+    ) -> jax.Array:
+        """
+        Compute a zero-above-cutoff WCA clash-guard energy.
+
+        E_WCA = 4*epsilon*((sigma/r)^12 - (sigma/r)^6) + epsilon for
+        r < r_cut, and 0 otherwise. By default r_cut is the requested guard
+        distance and sigma = r_cut / 2^(1/6), making the energy and force zero
+        at the guard boundary.
+        """
+        p = params if params is not None else self.params
+        if self.wca_pairs.shape[0] == 0:
+            return jnp.array(0.0, dtype=R.dtype)
+
+        pi, pj = self.wca_pairs[:, 0], self.wca_pairs[:, 1]
+        valid = (mask[pi] * mask[pj]) > 0
+
+        dR = R[pi] - R[pj]
+        r = _safe_norm(dR)
+        r = jnp.where(valid, r, jax.lax.stop_gradient(r))
+        r_eval = jnp.where(valid, r, 1e6)
+
+        r_floor = jnp.asarray(p["wca_r_floor"], dtype=R.dtype)
+        r_safe = jnp.maximum(r_eval, r_floor)
+        sigma = jnp.asarray(p["wca_sigma"], dtype=R.dtype)
+        epsilon = jnp.asarray(p["wca_epsilon"], dtype=R.dtype)
+        r_cut = jnp.asarray(p["wca_r_cut"], dtype=R.dtype)
+
+        sr6 = (sigma / r_safe) ** 6
+        U = 4.0 * epsilon * (sr6 ** 2 - sr6) + epsilon
+        active = valid & (r_eval < r_cut)
+        return jnp.sum(jnp.where(active, U, 0.0))
+
+    def compute_fene_energy(
+        self,
+        R: jax.Array,
+        mask: jax.Array,
+        params: Optional[Dict[str, jax.Array]] = None,
+    ) -> jax.Array:
+        """Compute FENE safety bonds for consecutive residues."""
+        p = params if params is not None else self.params
+        return compute_fene_energy(
+            R=R,
+            mask=mask,
+            bonds=self.fene_pairs,
+            r0=p["fene_r0"],
+            R0=p["fene_R0"],
+            k=p["fene_k"],
+            wall_energy=p["fene_wall_energy"],
+            eps=p["fene_eps"],
+        )
+
+    def compute_leash_energy(
+        self,
+        R: jax.Array,
+        mask: jax.Array,
+        params: Optional[Dict[str, jax.Array]] = None,
+    ) -> jax.Array:
+        """Compute flat-bottom pair-distance leash energy."""
+        p = params if params is not None else self.params
+        return compute_leash_energy(
+            R=R,
+            mask=mask,
+            pairs=self.leash_pairs,
+            d_safe=p["leash_d_safe"],
+            k_safe=p["leash_k_safe"],
+        )
+
     def compute_dh_energy(
         self,
         R: jax.Array,
@@ -1140,6 +1351,9 @@ class PriorEnergy:
                 - E_repulsive: Repulsive interaction energy (WEIGHTED)
                 - E_dihedral: Dihedral torsion energy (WEIGHTED)
                 - E_excluded_volume: Nearby-separation excluded volume (WEIGHTED)
+                - E_wca: WCA clash-guard term (WEIGHTED)
+                - E_fene: FENE chain-safety term (WEIGHTED)
+                - E_leash: Flat-bottom global leash term (WEIGHTED)
                 - E_dh: Debye-Huckel term (WEIGHTED)
                 - E_stickiness: Typed stickiness term (WEIGHTED)
                 - E_salt_bridge: Salt-bridge correction term (WEIGHTED)
@@ -1152,6 +1366,24 @@ class PriorEnergy:
         E_rep_raw = self.compute_repulsive_energy(R, mask, params=p)
         E_dih_raw = self.compute_dihedral_energy(R, mask, params=p)
         E_ex_raw = self.compute_excluded_volume_energy(R, mask, params=p)
+        E_wca_weight = self.weights.get("wca", 0.0)
+        E_wca_raw = (
+            self.compute_wca_energy(R, mask, params=p)
+            if E_wca_weight != 0.0
+            else jnp.array(0.0, dtype=R.dtype)
+        )
+        E_fene_weight = self.weights.get("fene", 0.0)
+        E_fene_raw = (
+            self.compute_fene_energy(R, mask, params=p)
+            if E_fene_weight != 0.0
+            else jnp.array(0.0, dtype=R.dtype)
+        )
+        E_leash_weight = self.weights.get("leash", 0.0)
+        E_leash_raw = (
+            self.compute_leash_energy(R, mask, params=p)
+            if E_leash_weight != 0.0
+            else jnp.array(0.0, dtype=R.dtype)
+        )
         E_dh_raw = self.compute_dh_energy(R, mask, species=species, params=p)
         E_stick_raw = self.compute_stickiness_energy(R, mask, species=species, params=p)
         E_sb_raw = self.compute_salt_bridge_energy(R, mask, species=species, params=p)
@@ -1162,11 +1394,26 @@ class PriorEnergy:
         E_rep = self.weights["repulsive"] * E_rep_raw
         E_dih = self.weights["dihedral"] * E_dih_raw
         E_ex = self.weights.get("excluded_volume", 1.0) * E_ex_raw
+        E_wca = E_wca_weight * E_wca_raw
+        E_fene = E_fene_weight * E_fene_raw
+        E_leash = E_leash_weight * E_leash_raw
         E_dh = self.weights.get("dh", 0.0) * E_dh_raw
         E_stick = self.weights.get("stickiness", 0.0) * E_stick_raw
         E_sb = self.weights.get("salt_bridge", 0.0) * E_sb_raw
 
-        E_total = E_bond + E_angle + E_rep + E_dih + E_ex + E_dh + E_stick + E_sb
+        E_total = (
+            E_bond
+            + E_angle
+            + E_rep
+            + E_dih
+            + E_ex
+            + E_wca
+            + E_fene
+            + E_leash
+            + E_dh
+            + E_stick
+            + E_sb
+        )
 
         return {
             "E_bond": E_bond,
@@ -1174,6 +1421,9 @@ class PriorEnergy:
             "E_repulsive": E_rep,
             "E_dihedral": E_dih,
             "E_excluded_volume": E_ex,
+            "E_wca": E_wca,
+            "E_fene": E_fene,
+            "E_leash": E_leash,
             "E_dh": E_dh,
             "E_stickiness": E_stick,
             "E_salt_bridge": E_sb,

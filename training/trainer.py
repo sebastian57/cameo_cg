@@ -22,6 +22,7 @@ from chemtrain.data.data_loaders import DataLoaders
 
 from config.types import PretrainResult, TrainingResults, StageResult
 from .optimizers import create_optimizer_from_config
+from .dsm import add_dsm_noise_fields, dsm_config, dsm_enabled, dsm_error, make_dsm_quantity
 from utils.logging import training_logger
 from data.loader import build_tiled_dataset, attach_batch_metadata
 
@@ -101,6 +102,10 @@ class Trainer:
         self.batch_per_device = config.get_batch_per_device()
         self.batch_cache = config.get_batch_cache()
         self.gammas = config.get_gammas()
+        self._dsm_cfg = dsm_config(config)
+        if self._dsm_cfg["enabled"]:
+            self.gammas = dict(self.gammas)
+            self.gammas["DSM"] = float(self._dsm_cfg["lambda"])
         self.checkpoint_path = Path(config.get_checkpoint_path())
         self.checkpoint_path.mkdir(parents=True, exist_ok=True)
         self._rank = jax.process_index()
@@ -1490,6 +1495,10 @@ class Trainer:
                 "segment_id",
                 "force_loss_mask",
                 "force_loss_weights",
+                "DSM",
+                "dsm_eps",
+                "dsm_sigma",
+                "dsm_loss_mask",
             ):
                 loader_kwargs[key] = value
             elif key.startswith("meta_") or key in ("n_valid", "n_segments"):
@@ -1531,6 +1540,8 @@ class Trainer:
         tiled = attach_batch_metadata(
             tiled, np.arange(tiled["R"].shape[0], dtype=np.int32)
         )
+        if dsm_enabled(self.config):
+            tiled = add_dsm_noise_fields(tiled, self.config, seed=epoch_seed)
         t_meta_end = time.perf_counter()
         build_ms = (t_build_end - t_build_start) * 1e3
         metadata_ms = (t_meta_end - t_build_end) * 1e3
@@ -1595,17 +1606,34 @@ class Trainer:
 
     def _force_matching_error_fns(self) -> Optional[Dict[str, Callable]]:
         """Return custom per-target error functions for chemtrain."""
+        fns = {}
         if self._force_loss_normalization in ("valid_components", "per_structure_components"):
-            return {"F": valid_component_mse}
-        return None
+            fns["F"] = valid_component_mse
+        if self._dsm_cfg["enabled"]:
+            fns["DSM"] = dsm_error
+        return fns or None
 
     def _force_matching_weights_keys(self) -> Optional[Dict[str, str]]:
         """Return dataset weight-key mapping for custom chemtrain losses."""
+        keys = {}
         if self._force_loss_normalization == "valid_components":
-            return {"F": "force_loss_mask"}
-        if self._force_loss_normalization == "per_structure_components":
-            return {"F": "force_loss_weights"}
-        return None
+            keys["F"] = "force_loss_mask"
+        elif self._force_loss_normalization == "per_structure_components":
+            keys["F"] = "force_loss_weights"
+        if self._dsm_cfg["enabled"]:
+            keys["DSM"] = "dsm_loss_mask"
+        return keys or None
+
+    def _force_matching_additional_targets(self) -> Optional[Dict[str, Callable]]:
+        """Return Chemtrain additional target quantities."""
+        if not self._dsm_cfg["enabled"]:
+            return None
+        return {
+            "DSM": make_dsm_quantity(
+                self.model.energy_fn_template,
+                kT=float(self._dsm_cfg["kT"]),
+            )
+        }
 
     def _loader_reference_data(self, loader: Any) -> Dict[str, Any]:
         """Extract loader arrays while preserving auxiliary batch metadata."""
@@ -1722,6 +1750,7 @@ class Trainer:
             gammas=self.gammas,
             error_fns=self._force_matching_error_fns(),
             weights_keys=self._force_matching_weights_keys(),
+            additional_targets=self._force_matching_additional_targets(),
             checkpoint_path=str(self.checkpoint_path),
             batch_per_device=self.batch_per_device,
             batch_cache=self.batch_cache,

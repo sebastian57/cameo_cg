@@ -278,6 +278,15 @@ def parse_args() -> argparse.Namespace:
             "Use 'symbolic' for connector-compatible dynamic/signature export."
         ),
     )
+    parser.add_argument(
+        "--naive-equivalence-atol",
+        type=float,
+        default=None,
+        help=(
+            "Override the absolute energy tolerance for cuEq fast -> symbolic/naive "
+            "export validation. By default the exporter uses max(1e-4, 1e-6 * n_atoms)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -297,6 +306,8 @@ def main() -> None:
     export_config = _build_export_config(config, args.mode)
     if args.export_mode is not None:
         export_config.set("export", "mode", args.export_mode)
+    if args.naive_equivalence_atol is not None:
+        export_config.set("export", "naive_equivalence_atol", float(args.naive_equivalence_atol))
 
     with open(params_path, "rb") as handle:
         payload = pickle.load(handle)

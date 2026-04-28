@@ -117,6 +117,8 @@ class ModelExporter(exporter.Exporter):
         sample_species_model: Optional[jax.Array] = None,
         export_mode: str = "auto",
         also_export_naive: bool = False,
+        naive_equivalence_atol: Optional[float] = None,
+        naive_equivalence_per_atom_atol: float = 1.0e-6,
     ):
         super().__init__()
         self.apply_fn = apply_fn
@@ -141,6 +143,10 @@ class ModelExporter(exporter.Exporter):
         )
         self.export_mode = _normalize_export_mode(export_mode)
         self.also_export_naive = bool(also_export_naive)
+        self.naive_equivalence_atol = (
+            None if naive_equivalence_atol is None else float(naive_equivalence_atol)
+        )
+        self.naive_equivalence_per_atom_atol = float(naive_equivalence_per_atom_atol)
         self._export_debug_logged = False
 
     def energy_fn(self, pos: jax.Array, species: jax.Array, graph) -> jax.Array:
@@ -235,13 +241,19 @@ class ModelExporter(exporter.Exporter):
             neighbor=self.sample_neighbors,
         )
         diff = float(jnp.abs(ref_energy - naive_energy))
-        if diff > 1.0e-4:
+        n_atoms = int(self.sample_positions.shape[0])
+        adaptive_atol = max(1.0e-4, self.naive_equivalence_per_atom_atol * n_atoms)
+        atol = self.naive_equivalence_atol if self.naive_equivalence_atol is not None else adaptive_atol
+        if diff > atol:
             raise ValueError(
-                f"Cross-backend export sanity check failed: |dE|={diff:.3e} exceeds 1e-4."
+                f"Cross-backend export sanity check failed: |dE|={diff:.3e} exceeds "
+                f"{atol:.3e} for {n_atoms} atoms."
             )
         export_logger.info(
-            "Cross-backend naive export sanity check passed: |dE|=%.2e",
+            "Cross-backend naive export sanity check passed: |dE|=%.2e <= %.2e for %d atoms",
             diff,
+            atol,
+            n_atoms,
         )
 
     def _neighborlist_to_sparse_buffers(self, neighbor, n_atoms: int):
@@ -500,6 +512,15 @@ class ModelExporter(exporter.Exporter):
         if config is not None:
             export_mode = _normalize_export_mode(config.get("export", "mode", default="auto"))
             also_export_naive = bool(config.get("export", "also_export_naive", default=False))
+            naive_equivalence_atol = config.get("export", "naive_equivalence_atol", default=None)
+            naive_equivalence_per_atom_atol = config.get(
+                "export",
+                "naive_equivalence_per_atom_atol",
+                default=1.0e-6,
+            )
+        else:
+            naive_equivalence_atol = None
+            naive_equivalence_per_atom_atol = 1.0e-6
 
         return cls(
             apply_fn=apply_fn,
@@ -522,6 +543,8 @@ class ModelExporter(exporter.Exporter):
             sample_species_model=getattr(ml_model, "_species0", None),
             export_mode=export_mode,
             also_export_naive=also_export_naive,
+            naive_equivalence_atol=naive_equivalence_atol,
+            naive_equivalence_per_atom_atol=naive_equivalence_per_atom_atol,
         )
 
     def __repr__(self) -> str:

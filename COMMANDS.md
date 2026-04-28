@@ -108,7 +108,7 @@ sbatch scripts/run_analysis.sh /path/to/suite/output
 
 ```bash
 sbatch scripts/run_analysis.sh \
-  --input-dir /p/project1/cameo/schmidt36/cameo_cg/outputs/<your_run_dir> \
+  --input-dir /p/project1/cameo/schmidt36/cameo_cg/local_work/outputs/<your_run_dir> \
   --name <analysis_name> \
   --detailed-force-eval \
   --complete-eval \

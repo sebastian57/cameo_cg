@@ -4,10 +4,14 @@ import os
 os.environ["JAX_TRACEBACK_FILTERING"] = "off"
 os.environ["PYTHONWARNINGS"] = "ignore::FutureWarning,ignore::UserWarning"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+os.environ.setdefault("JAX_PLATFORMS", "cpu")  # avoid CUDA init error on login nodes
 
 import yaml
 import numpy as np
 import matplotlib.pyplot as plt
+
+# np.trapz was removed in NumPy 2.0; np.trapezoid is the replacement.
+_trapz = getattr(np, "trapezoid", None) or np.trapz
 import logging
 import sys
 from pathlib import Path
@@ -49,7 +53,7 @@ def build_bonds_angles_dihedrals(resid):
     order = order_from_resid(resid)
     N = len(order)
 
-    bonds = np.stack([order[:-4], order[4:]], axis=1).astype(np.int32)
+    bonds = np.stack([order[:-1], order[1:]], axis=1).astype(np.int32)
     angles = np.stack([order[:-2], order[1:-1], order[2:]], axis=1).astype(np.int32)
 
     if N >= 4:
@@ -231,7 +235,7 @@ def prior_pdf_from_U_theta(theta, U, T=320.0, kB=0.0019872041):
     beta = 1.0 / (kB * T)
     U_shift = U - np.min(U)
     w = np.sin(theta) * np.exp(-beta * U_shift)
-    Z = np.trapz(w, theta)
+    Z = _trapz(w, theta)
     return w / Z
 
 
@@ -288,7 +292,7 @@ def prior_pdf_from_U_phi(phi, U, T=320.0, kB=0.0019872041):
     beta = 1.0 / (kB * T)
     U_shift = U - np.min(U)
     w = np.exp(-beta * U_shift)
-    Z = np.trapz(w, phi)
+    Z = _trapz(w, phi)
     return w / Z
 
 
@@ -699,7 +703,7 @@ def main():
         beta = 1.0 / (args.kB * args.T)
         # Observed radial density includes r^2 Jacobian.
         pdf_bond = (r_grid ** 2) * np.exp(-beta * U_bond)
-        pdf_bond /= np.trapz(pdf_bond, r_grid)
+        pdf_bond /= _trapz(pdf_bond, r_grid)
 
         hist_r, edges_r = np.histogram(all_bonds, bins=120, density=True)
         cent_r = 0.5 * (edges_r[:-1] + edges_r[1:])
@@ -953,7 +957,7 @@ def main():
             # Implied distributions
             # Convert intrinsic potential back to observed radial density with r^2 factor.
             p_bond = (grid_eval_bond ** 2) * np.exp(-beta * (U_bond_spline - np.min(U_bond_spline)))
-            p_bond /= np.trapz(p_bond, grid_eval_bond)
+            p_bond /= _trapz(p_bond, grid_eval_bond)
             plt.figure()
             plt.plot(cent_bond, hist_bond, color="0.6", linewidth=1.2, label="Empirical P(r)")
             plt.plot(grid_eval_bond, p_bond, "r-", linewidth=2.0, label="Spline-implied P(r)")
@@ -964,7 +968,7 @@ def main():
             savefig(Path(args.plots_dir) / "spline_bond_implied_distribution.png")
 
             p_ang = np.sin(grid_eval_ang) * np.exp(-beta * (U_ang_spline - np.min(U_ang_spline)))
-            p_ang /= np.trapz(p_ang, grid_eval_ang)
+            p_ang /= _trapz(p_ang, grid_eval_ang)
             plt.figure()
             plt.plot(cent_ang, hist_ang, color="0.6", linewidth=1.2, label="Empirical P(θ)")
             plt.plot(grid_eval_ang, p_ang, "r-", linewidth=2.0, label="Spline-implied P(θ)")
@@ -975,7 +979,7 @@ def main():
             savefig(Path(args.plots_dir) / "spline_angle_implied_distribution.png")
 
             p_dih = np.exp(-beta * (U_dih_spline - np.min(U_dih_spline)))
-            p_dih /= np.trapz(p_dih, grid_eval_dih)
+            p_dih /= _trapz(p_dih, grid_eval_dih)
             plt.figure()
             plt.plot(cent_dih, hist_dih, color="0.6", linewidth=1.2, label="Empirical P(φ)")
             plt.plot(grid_eval_dih, p_dih, "r-", linewidth=2.0, label="Spline-implied P(φ)")

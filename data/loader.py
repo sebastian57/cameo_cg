@@ -5,12 +5,44 @@ Loads NPZ datasets with coordinates, forces, species, and masks.
 Handles amino acid to species ID mapping.
 """
 
+import logging
+
 import numpy as np
 import jax
 import jax.numpy as jnp
 from pathlib import Path
 from typing import Dict, Any, Tuple, Optional, Sequence
 from config.types import PathLike, as_path
+
+logger = logging.getLogger(__name__)
+
+# Alternative key names accepted in place of the canonical "R" and "F".
+_COORD_ALIASES = ["coords", "coordinates", "positions", "pos", "xyz"]
+_FORCE_ALIASES = ["forces", "force", "frc", "grads", "gradients"]
+
+
+def _resolve_key(data, canonical: str, aliases: list[str], source: str = "") -> str:
+    """Return the key to use for *canonical*, trying aliases if the canonical is absent.
+
+    Raises KeyError if neither the canonical name nor any alias is found.
+    """
+    if canonical in data:
+        return canonical
+    lower_map = {k.lower(): k for k in data.keys()}
+    for alias in aliases:
+        actual = lower_map.get(alias.lower())
+        if actual is not None:
+            tag = f" in {source}" if source else ""
+            logger.warning(
+                "NPZ key '%s' not found%s; using '%s' instead. "
+                "Rename to '%s' to suppress this warning.",
+                canonical, tag, actual, canonical,
+            )
+            return actual
+    raise KeyError(
+        f"Required key '{canonical}' not found{' in ' + source if source else ''}. "
+        f"Tried aliases: {aliases}. Available keys: {list(data.keys())}"
+    )
 
 
 def load_npz(path: PathLike) -> Dict[str, Any]:
@@ -46,13 +78,15 @@ def load_npz(path: PathLike) -> Dict[str, Any]:
             raise FileNotFoundError(f"No .npz files found in directory: {path}")
 
         datasets = [np.load(f, allow_pickle=True) for f in files]
+        r_keys = [_resolve_key(d, "R", _COORD_ALIASES, str(f)) for f, d in zip(files, datasets)]
+        f_keys = [_resolve_key(d, "F", _FORCE_ALIASES, str(f)) for f, d in zip(files, datasets)]
         source_name_arrays = []
-        for f, d in zip(files, datasets):
-            n_frames_local = int(d["R"].shape[0])
+        for f, d, rk in zip(files, datasets, r_keys):
+            n_frames_local = int(d[rk].shape[0])
             source_name_arrays.append(
                 np.full((n_frames_local,), f.stem, dtype=object)
             )
-        n_atoms_per_file = [int(d["R"].shape[1]) for d in datasets]
+        n_atoms_per_file = [int(d[rk].shape[1]) for d, rk in zip(datasets, r_keys)]
         unique_n_atoms = sorted(set(n_atoms_per_file))
         if len(unique_n_atoms) > 1:
             is_bucketed = all(f.name.startswith("bucket_N") for f in files)
@@ -77,20 +111,28 @@ def load_npz(path: PathLike) -> Dict[str, Any]:
                     arrays.append(default_fn(d))
             return np.concatenate(arrays, axis=0)
 
+        def _cat_mask():
+            arrays = []
+            for d, rk in zip(datasets, r_keys):
+                arrays.append(d["mask"] if "mask" in d else np.ones(d[rk].shape[:2], dtype=np.float32))
+            return np.concatenate(arrays, axis=0)
+
+        def _cat_species():
+            arrays = []
+            for d, rk in zip(datasets, r_keys):
+                arrays.append(d["species"] if "species" in d else np.zeros(d[rk].shape[:2], dtype=np.int32))
+            return np.concatenate(arrays, axis=0)
+
         result = {
-            "R":       cat_or_default("R", lambda d: d["R"]).astype(np.float32),
-            "F":       cat_or_default("F", lambda d: d["F"]).astype(np.float32),
-            "mask":    cat_or_default(
-                "mask", lambda d: np.ones(d["R"].shape[:2], dtype=np.float32)
-            ).astype(np.float32),
-            "species": cat_or_default(
-                "species", lambda d: np.zeros(d["R"].shape[:2], dtype=np.int32)
-            ).astype(np.int32),
+            "R": np.concatenate([d[rk] for d, rk in zip(datasets, r_keys)], axis=0).astype(np.float32),
+            "F": np.concatenate([d[fk] for d, fk in zip(datasets, f_keys)], axis=0).astype(np.float32),
+            "mask":    _cat_mask().astype(np.float32),
+            "species": _cat_species().astype(np.int32),
             "source_name": np.concatenate(source_name_arrays, axis=0),
             "Z":       datasets[0]["Z"].astype(np.int32) if "Z" in datasets[0] else None,
             "resid":   datasets[0]["resid"].astype(np.int32) if "resid" in datasets[0] else None,
             "resname": datasets[0]["resname"] if "resname" in datasets[0] else None,
-            "N_max":   int(datasets[0]["N_max"][0]) if "N_max" in datasets[0] else datasets[0]["R"].shape[1],
+            "N_max":   int(datasets[0]["N_max"][0]) if "N_max" in datasets[0] else datasets[0][r_keys[0]].shape[1],
             "aa_to_id": datasets[0]["aa_to_id"].item() if "aa_to_id" in datasets[0] else None,
         }
 
@@ -98,23 +140,20 @@ def load_npz(path: PathLike) -> Dict[str, Any]:
 
     data = np.load(path, allow_pickle=True)
 
-    # Required keys
-    required = ["R", "F"]
-    missing = [k for k in required if k not in data]
-    if missing:
-        raise KeyError(f"Missing required keys in NPZ: {missing}")
+    r_key = _resolve_key(data, "R", _COORD_ALIASES, str(path))
+    f_key = _resolve_key(data, "F", _FORCE_ALIASES, str(path))
 
     result = {
-        "R": data["R"].astype(np.float32),
-        "F": data["F"].astype(np.float32),
+        "R": data[r_key].astype(np.float32),
+        "F": data[f_key].astype(np.float32),
         "Z": data["Z"].astype(np.int32) if "Z" in data else None,
         "resid": data["resid"].astype(np.int32) if "resid" in data else None,
         "resname": data["resname"] if "resname" in data else None,
         "species": data["species"].astype(np.int32) if "species" in data else None,
-        "N_max": data["N_max"] if "N_max" in data else data["R"].shape[1],
-        "mask": data["mask"] if "mask" in data else np.ones(data["R"].shape[:2], dtype=np.float32),
+        "N_max": data["N_max"] if "N_max" in data else data[r_key].shape[1],
+        "mask": data["mask"] if "mask" in data else np.ones(data[r_key].shape[:2], dtype=np.float32),
         "aa_to_id": data["aa_to_id"].item() if "aa_to_id" in data else None,
-        "source_name": np.full((int(data["R"].shape[0]),), path.stem, dtype=object),
+        "source_name": np.full((int(data[r_key].shape[0]),), path.stem, dtype=object),
     }
 
     # Handle N_max being an array

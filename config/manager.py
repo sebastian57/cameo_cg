@@ -360,7 +360,10 @@ class ConfigManager:
         return cfg
 
     def get_prior_params(self) -> Dict[str, Any]:
-        return self.get("model", "priors", default={})
+        model_priors = self.get("model", "priors", default=None)
+        if model_priors is not None:
+            return model_priors
+        return self.get("priors", default={})
 
     _DEFAULT_PRIOR_WEIGHTS: Dict[str, float] = {
         "bond": 0.5,
@@ -368,19 +371,27 @@ class ConfigManager:
         "repulsive": 0.25,
         "dihedral": 0.15,
         "excluded_volume": 1.0,
+        "wca": 0.0,
+        "fene": 0.0,
+        "leash": 0.0,
         "dh": 0.0,
         "stickiness": 0.0,
         "salt_bridge": 0.0,
     }
 
     def get_prior_weights(self) -> Dict[str, float]:
-        user = self.get("model", "priors", "weights", default={})
+        user = self.get("model", "priors", "weights", default=None)
+        if user is None:
+            user = self.get("priors", "weights", default={})
         merged = dict(self._DEFAULT_PRIOR_WEIGHTS)
         merged.update(user)
         return merged
 
     def get_min_repulsive_sep(self) -> int:
-        return int(self.get("model", "priors", "min_repulsive_sep", default=6))
+        value = self.get("model", "priors", "min_repulsive_sep", default=None)
+        if value is None:
+            value = self.get("priors", "min_repulsive_sep", default=6)
+        return int(value)
 
     def use_spline_priors_enabled(self) -> bool:
         """True if spline priors are on (explicit flag or spline_file present)."""

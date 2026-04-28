@@ -74,6 +74,7 @@ TERM_ORDER = [
     "E_repulsive",
     "E_dihedral",
     "E_excluded_volume",
+    "E_wca",
     "E_dh",
     "E_stickiness",
     "E_salt_bridge",

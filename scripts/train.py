@@ -211,6 +211,7 @@ from data.preprocessor import CoordinatePreprocessor
 from models.combined_model import CombinedModel
 from training.prior_residual import apply_prior_force_residual_targets, pretrain_prior_for_residual
 from training.trainer import Trainer
+from training.dsm import add_dsm_noise_fields, dsm_enabled
 from export.exporter import ModelExporter
 from analysis_tests.visualizer import LossPlotter
 from utils.logging import data_logger, model_logger, training_logger, export_logger
@@ -730,11 +731,70 @@ def _build_loader_kwargs(split: dict) -> dict:
     """Build NumpyDataLoader kwargs while preserving auxiliary arrays."""
     loader_kwargs = {"copy": False}
     for key, value in split.items():
-        if key in ("R", "F", "mask", "species", "segment_id", "force_loss_mask", "force_loss_weights"):
+        if key in (
+            "R",
+            "F",
+            "mask",
+            "species",
+            "segment_id",
+            "force_loss_mask",
+            "force_loss_weights",
+            "DSM",
+            "dsm_eps",
+            "dsm_sigma",
+            "dsm_loss_mask",
+        ):
             loader_kwargs[key] = value
         elif key.startswith("meta_") or key in ("n_valid", "n_segments"):
             loader_kwargs[key] = value
     return loader_kwargs
+
+
+def _max_pairwise_distance_percentile(R: np.ndarray, mask: np.ndarray, percentile: float) -> float:
+    """Compute a percentile of per-frame maximum valid pair distances."""
+    values = []
+    for coords, frame_mask in zip(np.asarray(R), np.asarray(mask)):
+        valid = np.flatnonzero(frame_mask > 0)
+        if valid.shape[0] <= 1:
+            continue
+        xyz = np.asarray(coords[valid], dtype=np.float64)
+        disp = xyz[:, None, :] - xyz[None, :, :]
+        dist = np.sqrt(np.sum(disp * disp, axis=-1))
+        values.append(float(np.max(dist)))
+    if not values:
+        return 0.0
+    return float(np.percentile(np.asarray(values, dtype=np.float64), percentile))
+
+
+def _configure_auto_leash_d_safe(config: ConfigManager, train_split: dict) -> None:
+    """Fill model.priors.leash.d_safe from training frames when requested."""
+    leash_cfg = config.get("model", "priors", "leash", default={}) or {}
+    if not isinstance(leash_cfg, dict):
+        return
+    d_safe = leash_cfg.get("d_safe", None)
+    if d_safe is not None:
+        try:
+            if float(d_safe) > 0.0:
+                return
+        except (TypeError, ValueError):
+            pass
+    weights = config.get_prior_weights()
+    enabled = bool(leash_cfg.get("enabled", False)) or float(weights.get("leash", 0.0)) != 0.0
+    if not enabled:
+        return
+
+    factor = float(leash_cfg.get("auto_factor", 1.5))
+    percentile = float(leash_cfg.get("auto_percentile", 99.9))
+    base = _max_pairwise_distance_percentile(train_split["R"], train_split["mask"], percentile)
+    auto_d_safe = float(factor * base)
+    config.set("model", "priors", "leash", "d_safe", auto_d_safe)
+    data_logger.info(
+        "[SafetyPrior] Set model.priors.leash.d_safe=%.6g from %.3f x p%.3f(max_pair_distance=%.6g).",
+        auto_d_safe,
+        factor,
+        percentile,
+        base,
+    )
 
 
 def _build_validation_split(dataset: dict, start: int, stop: int) -> dict:
@@ -1179,6 +1239,11 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         config=config,
         seed=split_seed,
     )
+    _configure_auto_leash_d_safe(
+        config, tiled_train_source if tiled_train_source is not None else train_split
+    )
+    if dsm_enabled(config):
+        train_split = add_dsm_noise_fields(train_split, config, seed=split_seed)
     _configure_runtime_avg_num_neighbors(config, train_split, split_seed)
     config.save(config_path)
     training_logger.info(f"[Config] Updated runtime config saved to: {config_path}")
@@ -1238,11 +1303,15 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
                 config=config,
                 seed=split_seed,
             )
+            if dsm_enabled(config):
+                val_split = add_dsm_noise_fields(val_split, config, seed=split_seed + 100000)
             val_loader = NumpyDataLoader(**_build_loader_kwargs(val_split))
     elif N_val == 0 or val_fraction == 0.0:
         val_loader = train_loader
     else:
         val_split = _build_validation_split(dataset, N_train, N_train + N_val)
+        if dsm_enabled(config):
+            val_split = add_dsm_noise_fields(val_split, config, seed=split_seed + 100000)
         val_loader = NumpyDataLoader(**_build_loader_kwargs(val_split))
 
     loaders = DataLoaders(
@@ -1552,6 +1621,11 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
             config=config,
             seed=split_seed,
         )
+        _configure_auto_leash_d_safe(
+            config, tiled_train_source if tiled_train_source is not None else train_split
+        )
+        if dsm_enabled(config):
+            train_split = add_dsm_noise_fields(train_split, config, seed=split_seed)
         _configure_runtime_avg_num_neighbors(config, train_split, split_seed)
         config.save(config_path)
         training_logger.info(
@@ -1602,15 +1676,17 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
                     config=config,
                     seed=split_seed,
                 )
+                if dsm_enabled(config):
+                    val_split = add_dsm_noise_fields(val_split, config, seed=split_seed + 100000)
                 val_loader = NumpyDataLoader(**_build_loader_kwargs(val_split))
         else:
-            val_loader = (
-                NumpyDataLoader(
-                    **_build_loader_kwargs(
-                        _build_validation_split(dataset, N_train, N_train + N_val)
-                    )
-                ) if N_val > 0 else train_loader
-            )
+            if N_val > 0:
+                val_split = _build_validation_split(dataset, N_train, N_train + N_val)
+                if dsm_enabled(config):
+                    val_split = add_dsm_noise_fields(val_split, config, seed=split_seed + 100000)
+                val_loader = NumpyDataLoader(**_build_loader_kwargs(val_split))
+            else:
+                val_loader = train_loader
 
         train_data = {
             "R": jnp.asarray(train_split["R"]),

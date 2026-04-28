@@ -78,6 +78,9 @@ class EnergyComponents(TypedDict, total=False):
     E_rep: Optional[float]
     E_dih: Optional[float]
     E_excluded_volume: Optional[float]
+    E_wca: Optional[float]
+    E_fene: Optional[float]
+    E_leash: Optional[float]
     E_dh: Optional[float]
     E_stickiness: Optional[float]
     E_salt_bridge: Optional[float]
@@ -144,6 +147,10 @@ class PriorParams(TypedDict, total=False):
     k_theta: float  # Angle force constant (unused)
     epsilon: float  # LJ epsilon
     sigma: float  # LJ sigma
+    wca_epsilon: float  # WCA epsilon
+    wca_sigma: float  # WCA sigma
+    wca_r_cut: float  # WCA zero-energy guard distance
+    wca_r_floor: float  # WCA numerical distance floor
     a: jax.Array  # Angle Fourier coefficients
     b: jax.Array  # Angle Fourier coefficients
     k_dih: jax.Array  # Dihedral force constants

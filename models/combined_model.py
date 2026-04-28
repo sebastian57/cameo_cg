@@ -254,6 +254,9 @@ class CombinedModel:
                 "E_repulsive": prior_components["E_repulsive"],
                 "E_dihedral": prior_components["E_dihedral"],
                 "E_excluded_volume": prior_components["E_excluded_volume"],
+                "E_wca": prior_components.get("E_wca", 0.0),
+                "E_fene": prior_components.get("E_fene", 0.0),
+                "E_leash": prior_components.get("E_leash", 0.0),
                 "E_dh": prior_components.get("E_dh", 0.0),
                 "E_stickiness": prior_components.get("E_stickiness", 0.0),
                 "E_salt_bridge": prior_components.get("E_salt_bridge", 0.0),
@@ -303,13 +306,16 @@ class CombinedModel:
                     comps["E_repulsive"],
                     comps["E_dihedral"],
                     comps["E_excluded_volume"],
+                    comps.get("E_wca", 0.0),
+                    comps.get("E_fene", 0.0),
+                    comps.get("E_leash", 0.0),
                 )
 
             # Single forward pass; vjp_fn holds stored residuals for backward.
             _, vjp_fn = jax.vjp(all_energies, R)
 
             # Each vjp_fn call is a backward-only pass (no re-forward).
-            def _force(idx, n=7):
+            def _force(idx, n=10):
                 ct = tuple(1.0 if i == idx else 0.0 for i in range(n))
                 return -vjp_fn(ct)[0]
 
@@ -321,6 +327,9 @@ class CombinedModel:
                 "F_repulsive":       _force(4),
                 "F_dihedral":        _force(5),
                 "F_excluded_volume": _force(6),
+                "F_wca":             _force(7),
+                "F_fene":            _force(8),
+                "F_leash":           _force(9),
             }
         else:
             def all_energies(R_):

@@ -304,12 +304,19 @@ def _energy_mode(
     if mode == "full":
         return prior.compute_total_energy_from_params(params=p, R=R, mask=mask, species=species)
 
+    wca_weight = prior.weights.get("wca", 0.0)
+    E_wca = (
+        wca_weight * prior.compute_wca_energy(R, mask, params=p)
+        if wca_weight != 0.0
+        else jnp.array(0.0, dtype=R.dtype)
+    )
     E_old = (
         prior.weights["bond"] * prior.compute_bond_energy(R, mask, params=p)
         + prior.weights["angle"] * prior.compute_angle_energy(R, mask, species=species, params=p)
         + prior.weights["repulsive"] * prior.compute_repulsive_energy(R, mask, params=p)
         + prior.weights["dihedral"] * prior.compute_dihedral_energy(R, mask, params=p)
         + prior.weights.get("excluded_volume", 1.0) * prior.compute_excluded_volume_energy(R, mask, params=p)
+        + E_wca
     )
     if mode == "old_only":
         return E_old
