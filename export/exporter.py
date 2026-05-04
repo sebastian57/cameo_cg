@@ -149,7 +149,13 @@ class ModelExporter(exporter.Exporter):
         self.naive_equivalence_per_atom_atol = float(naive_equivalence_per_atom_atol)
         self._export_debug_logged = False
 
-    def energy_fn(self, pos: jax.Array, species: jax.Array, graph) -> jax.Array:
+    def energy_fn(
+        self,
+        pos: jax.Array,
+        species: jax.Array,
+        graph,
+        valid_mask: Optional[jax.Array] = None,
+    ) -> jax.Array:
         """Compute per-atom energies for LAMMPS."""
         if not self._export_debug_logged:
             export_logger.info(
@@ -176,7 +182,10 @@ class ModelExporter(exporter.Exporter):
         )
 
         species_model = jnp.maximum(species - 1, 0)
-        mask = jnp.ones(pos.shape[0], dtype=jnp.float32)
+        if valid_mask is None:
+            mask = jnp.ones(pos.shape[0], dtype=jnp.float32)
+        else:
+            mask = jnp.asarray(valid_mask, dtype=jnp.float32)
 
         e = self.apply_fn(
             self.params,
@@ -196,6 +205,51 @@ class ModelExporter(exporter.Exporter):
         )
 
         return _ensure_per_atom_energy(e, pos.shape[0])
+
+    def _energy_fn(self, position, species, n_local, n_ghost, newton, *graph_args):
+        # Expects particles to be sorted by local, ghost, and padding atoms.
+        valid_mask = jnp.arange(position.shape[0]) < (n_local + n_ghost)
+        ghost_mask = jnp.arange(position.shape[0]) < n_local
+
+        graph, build_statistics = self.graph_type.create_from_args(
+            self.r_cutoff,
+            self.nbr_order,
+            position,
+            species,
+            ghost_mask,
+            valid_mask,
+            newton,
+            *graph_args,
+        )
+        graph = jax.lax.stop_gradient(graph)
+
+        def force_and_aux(pos):
+            per_atom_energies = self.energy_fn(
+                pos,
+                species,
+                graph,
+                valid_mask=valid_mask,
+            )
+
+            assert per_atom_energies.shape == ghost_mask.shape, (
+                f"Per particle energies have shape {per_atom_energies.shape}, "
+                f"but should have shape {ghost_mask.shape}."
+            )
+
+            total_energy = exporter.md_util.high_precision_sum(
+                jnp.where(valid_mask, per_atom_energies, jnp.float32(0.0))
+            )
+            local_energy = exporter.md_util.high_precision_sum(
+                jnp.where(ghost_mask, per_atom_energies, jnp.float32(0.0))
+            )
+
+            force_energy = jnp.where(newton, local_energy, total_energy)
+            force_energy = jnp.negative(force_energy)
+
+            aux = local_energy, *build_statistics
+            return force_energy, aux
+
+        return jax.grad(force_and_aux, has_aux=True)(position)
 
     def _current_tp_methods(self) -> tuple[str, ...]:
         methods = getattr(self.ml_model, "export_tp_methods", ()) if self.ml_model is not None else ()
@@ -232,13 +286,18 @@ class ModelExporter(exporter.Exporter):
             self.sample_species_model,
             neighbor=self.sample_neighbors,
         )
-        naive_energy = compute_with_apply(
+        naive_energy_raw = compute_with_apply(
             naive_apply_model,
             ml_params,
             self.sample_positions,
             mask,
             self.sample_species_model,
             neighbor=self.sample_neighbors,
+        )
+        # naive_apply_model may return per-atom energies (ndim==1); sum to scalar.
+        naive_energy_arr = jnp.asarray(naive_energy_raw)
+        naive_energy = (
+            jnp.sum(naive_energy_arr) if naive_energy_arr.ndim > 0 else naive_energy_arr
         )
         diff = float(jnp.abs(ref_energy - naive_energy))
         n_atoms = int(self.sample_positions.shape[0])
@@ -440,6 +499,7 @@ class ModelExporter(exporter.Exporter):
 
         if apply_fn is None:
             compute_with_apply = getattr(ml_model, "_compute_energy_with_apply", None)
+            compute_per_atom_with_apply = getattr(ml_model, "_compute_per_atom_energy_with_apply", None)
 
             def default_apply_fn(
                 params_,
@@ -462,7 +522,16 @@ class ModelExporter(exporter.Exporter):
                     e_ml = jnp.asarray(0.0, dtype=jnp.float32)
                 else:
                     ml_params = params_.get("ml", params_) if isinstance(params_, dict) else params_
-                    if compute_with_apply is not None:
+                    if not model.use_priors and compute_per_atom_with_apply is not None:
+                        e_ml = compute_per_atom_with_apply(
+                            apply_model_,
+                            ml_params,
+                            R_,
+                            mask_,
+                            species_,
+                            neighbor,
+                        )
+                    elif compute_with_apply is not None:
                         e_ml = compute_with_apply(
                             apply_model_,
                             ml_params,
@@ -500,7 +569,21 @@ class ModelExporter(exporter.Exporter):
                             mask_,
                             species=species_,
                         )
-                    return e_prior if model.prior_only else e_ml + e_prior
+                    if model.prior_only:
+                        return e_prior
+                    # e_ml may be a per-atom array (ndim==1) when using the
+                    # per-atom export apply path.  Adding a scalar e_prior to a
+                    # per-atom array would broadcast it across all n_atoms slots,
+                    # overcounting by a factor of n_atoms.  Instead, distribute
+                    # e_prior evenly over valid atoms so padded slots stay zero
+                    # and the total remains correct.
+                    e_ml_arr = jnp.asarray(e_ml)
+                    if e_ml_arr.ndim == 1:
+                        valid_float = (mask_ > 0).astype(e_ml_arr.dtype)
+                        n_valid = jnp.maximum(jnp.sum(valid_float), jnp.ones((), dtype=e_ml_arr.dtype))
+                        e_prior_per_atom = jnp.asarray(e_prior, dtype=e_ml_arr.dtype) / n_valid * valid_float
+                        return e_ml_arr + e_prior_per_atom
+                    return e_ml + e_prior
 
                 return e_ml
 
@@ -522,9 +605,14 @@ class ModelExporter(exporter.Exporter):
             naive_equivalence_atol = None
             naive_equivalence_per_atom_atol = 1.0e-6
 
+        # Use per-atom apply function for export if the model exposes one.
+        # The per-atom version returns energies of shape (n_atoms,) with zeros
+        # for padded/masked atoms, so the export wrapper sums only real atoms.
+        export_apply_model = getattr(ml_model, "model_export_apply_fn", None) or ml_model.model_apply_fn
+
         return cls(
             apply_fn=apply_fn,
-            apply_model=ml_model.model_apply_fn,
+            apply_model=export_apply_model,
             nneigh_fn=ml_model.nneigh_fn,
             displacement=ml_model.displacement,
             box=box,

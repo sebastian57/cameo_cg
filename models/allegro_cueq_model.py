@@ -306,6 +306,24 @@ class AllegroModelCuEq(BaseMLModel):
             mlp_dtype=self.mlp_dtype,
             **self.allegro_config,
         )
+        # Per-atom version for export: per_particle=True in the closure so the
+        # function returns shape (n_atoms,) instead of a scalar total.  The
+        # scalar version (_apply_allegro_for_training) is kept for training
+        # where jax.grad needs a scalar output.
+        _, self.apply_allegro_per_atom = allegro_neighborlist_pp(
+            displacement=self.displacement,
+            r_cutoff=self.cutoff,
+            n_species=self.n_species,
+            positions_test=R0_safe,
+            neighbor_test=self.nbrs_init,
+            max_edge_multiplier=self.max_edge_multiplier,
+            max_edges=self.max_edges,
+            mode="energy",
+            per_particle=True,
+            logging=enable_logging,
+            mlp_dtype=self.mlp_dtype,
+            **self.allegro_config,
+        )
 
         self._apply_allegro_for_training = self.apply_allegro
         if self.remat_level > 0:
@@ -318,7 +336,7 @@ class AllegroModelCuEq(BaseMLModel):
             self._apply_allegro_for_training = jax.checkpoint(
                 self.apply_allegro, policy=_policy
             )
-        self._export_apply_cache["current"] = self.apply_allegro
+        self._export_apply_cache["current"] = self.apply_allegro_per_atom
 
         self._R0 = R0_safe
         self._species0 = species_safe
@@ -419,6 +437,61 @@ class AllegroModelCuEq(BaseMLModel):
         )
         return jnp.asarray(E, dtype=jnp.float32)
 
+    def _compute_per_atom_energy_with_apply(
+        self,
+        apply_fn: Any,
+        params: Any,
+        R: jax.Array,
+        mask: jax.Array,
+        species: jax.Array,
+        neighbor: Optional[Any] = None,
+        segment_id: Optional[jax.Array] = None,
+    ) -> jax.Array:
+        """Compute per-atom energies with a custom apply_fn for export."""
+        valid_mask = mask > 0
+        R_base = jnp.asarray(R, dtype=self.compute_dtype)
+        R_masked = R_base
+
+        if neighbor is None:
+            base_nbrs = self.nbrs_init
+            ref_position = getattr(base_nbrs, "reference_position", None)
+            target_dtype = getattr(ref_position, "dtype", self.compute_dtype)
+            nbrs = self.nneigh_fn.update(
+                jnp.asarray(R_masked, dtype=target_dtype),
+                base_nbrs,
+                mask=valid_mask.astype(jnp.bool_),
+            )
+        else:
+            nbr_error = getattr(neighbor, "error", None)
+            if nbr_error is None:
+                nbrs = neighbor
+            else:
+                ref_position = getattr(neighbor, "reference_position", None)
+                target_dtype = getattr(ref_position, "dtype", self.compute_dtype)
+                nbrs = self.nneigh_fn.update(
+                    jnp.asarray(R_masked, dtype=target_dtype),
+                    neighbor,
+                    mask=valid_mask.astype(jnp.bool_),
+                )
+
+        nbrs = custom_partition.mask_neighbor_list(
+            nbrs,
+            mask=valid_mask.astype(jnp.bool_),
+            segment_id=jnp.asarray(segment_id, dtype=jnp.int32) if segment_id is not None else None,
+        )
+
+        species_masked = jnp.where(valid_mask, species, 0).astype(jnp.int32)
+        R_model = jnp.asarray(R_masked, dtype=self.compute_dtype)
+
+        E = apply_fn(
+            params,
+            R_model,
+            nbrs,
+            species_masked,
+            mask=valid_mask.astype(jnp.bool_),
+        )
+        return jnp.asarray(E, dtype=jnp.float32)
+
     def compute_energy(
         self,
         params: Any,
@@ -446,10 +519,15 @@ class AllegroModelCuEq(BaseMLModel):
             methods.append("uniform_1d")
         return tuple(methods)
 
+    @property
+    def model_export_apply_fn(self):
+        """Per-atom apply function for use in the MLIR export path."""
+        return self.apply_allegro_per_atom
+
     def build_export_apply_fn(self, *, tp_method_override: Optional[str] = None):
         """Rebuild the raw apply_fn for export-time backend overrides."""
         if tp_method_override is None:
-            return self.apply_allegro
+            return self.apply_allegro_per_atom
 
         normalized_override = _normalize_export_tp_token(tp_method_override)
         if normalized_override != "naive":
@@ -499,6 +577,7 @@ class AllegroModelCuEq(BaseMLModel):
             max_edge_multiplier=self.max_edge_multiplier,
             max_edges=self.max_edges,
             mode="energy",
+            per_particle=True,
             logging=self._enable_logging,
             mlp_dtype=self.mlp_dtype,
             **export_allegro_config,
