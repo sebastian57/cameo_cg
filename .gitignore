@@ -17,7 +17,7 @@ CLEANUP_PLAN.md
 !env_setup/LAMMPS_build.md
 !env_setup/interactive_job.md
 !env_setup/SETUP_ENV.md
-
+!debug_status.md
 # --- logs / outputs ---
 outputs/
 train_*.log
