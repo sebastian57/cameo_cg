@@ -949,6 +949,44 @@ def _log_train_split_profile(train_split: dict, config: ConfigManager) -> None:
         )
 
 
+def _shard_tiles_by_rank(tiled: dict, rank: int, world_size: int) -> dict:
+    """
+    Shard tiled dataset across ranks for true data parallelism.
+    
+    Each rank gets a contiguous subset of tiles to process.
+    
+    Args:
+        tiled: Tiled dataset dict with R, F, mask, species, and metadata arrays
+        rank: Current rank (0 to world_size-1)
+        world_size: Total number of ranks
+    
+    Returns:
+        Sharded tiled dataset dict containing only this rank's tiles
+    """
+    n_tiles = int(tiled["R"].shape[0])
+    tiles_per_rank = n_tiles // world_size
+    start_idx = rank * tiles_per_rank
+    end_idx = start_idx + tiles_per_rank if rank < world_size - 1 else n_tiles
+    
+    # Log the sharding
+    data_logger.info(
+        "[Tiling][Rank %d] Sharding tiles: rank %d/%d gets tiles %d-%d (out of %d total)",
+        rank, rank, world_size, start_idx, end_idx - 1, n_tiles
+    )
+    
+    # Shard all arrays in the tiled dict
+    sharded = {}
+    for key, value in tiled.items():
+        if isinstance(value, np.ndarray) and value.shape[0] == n_tiles:
+            # This array has tiles as the first dimension - shard it
+            sharded[key] = value[start_idx:end_idx]
+        else:
+            # Keep non-tiled data as-is
+            sharded[key] = value
+    
+    return sharded
+
+
 def _build_train_split(
     dataset: dict,
     n_train: int,
@@ -1002,6 +1040,10 @@ def _build_train_split(
     t_tile_build_end = time.perf_counter()
     tiled = _attach_batch_metadata(tiled, np.arange(tiled["R"].shape[0], dtype=np.int32))
     t_tile_meta_end = time.perf_counter()
+
+    # Shard tiles across ranks for data parallelism
+    if _WORLD_SIZE > 1:
+        tiled = _shard_tiles_by_rank(tiled, _RANK, _WORLD_SIZE)
 
     data_logger.info(
         "[Tiling] Built %d tiles from %d structures "
