@@ -1,10 +1,10 @@
 #!/bin/bash
 
 #SBATCH --account=cameo
-#SBATCH --nodes=1
+#SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-task=4
-#SBATCH --time=02:00:00
+#SBATCH --time=00:15:00
 #SBATCH --partition=booster
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
@@ -402,24 +402,38 @@ if [[ ${SLURM_NNODES:-1} -gt 1 ]]; then
     echo "============================================================"
     srun --ntasks-per-node=1 bash -c 'echo "Node=$(hostname) SLURM_PROCID=$SLURM_PROCID SLURM_NTASKS=$SLURM_NTASKS"'
 
-    COORD_NODE=$(scontrol show hostname "$SLURM_JOB_NODELIST" | head -1)
-    COORD_PORT=$((29400 + (SLURM_JOB_ID % 1000)))
-    TCP_PROBE_PORT=$((20000 + (SLURM_JOB_ID % 20000)))
+    # Check if coordinator is manually set via environment variable
+    if [[ -n "${CHEMTRAIN_COORDINATOR_HOST:-}" ]]; then
+        echo "Using pre-set coordinator from CHEMTRAIN_COORDINATOR_HOST: ${CHEMTRAIN_COORDINATOR_HOST}"
+        export CHEMTRAIN_COORDINATOR_PORT="${CHEMTRAIN_COORDINATOR_PORT:-$((29400 + (SLURM_JOB_ID % 1000)))}"
+    else
+        COORD_NODE=$(scontrol show hostname "$SLURM_JOB_NODELIST" | head -1)
+        COORD_PORT=$((29400 + (SLURM_JOB_ID % 1000)))
+        TCP_PROBE_PORT=$((20000 + (SLURM_JOB_ID % 20000)))
+    
+        COORD_CANDIDATES=("${COORD_NODE}")
+        
+        # Try DNS suffixes for this cluster (adjust if needed for your site)
+        for host_suffix in "${COORD_NODE}i.juwels" "${COORD_NODE}.juwels"; do
+            COORD_IP_GETENT="$(getent ahostsv4 "${host_suffix}" 2>/dev/null | awk 'NR==1 {print $1}' || true)"
+            if [[ -n "${COORD_IP_GETENT}" ]]; then
+                COORD_CANDIDATES+=("${host_suffix}" "${COORD_IP_GETENT}")
+                break  # If DNS works, use that
+            fi
+        done
+        
+        # Fallback: get IP directly from coordinator node via srun
+        COORD_IP_REMOTE=$(srun --nodes=1 --ntasks=1 -w "${COORD_NODE}" \
+            bash -lc "hostname -I | awk '{print \$1}'" 2>/dev/null | tail -n1 || echo "")
+        if [[ -n "${COORD_IP_REMOTE}" ]]; then
+            COORD_CANDIDATES+=("${COORD_IP_REMOTE}")
+        fi
 
-    COORD_CANDIDATES=("${COORD_NODE}i.juwels" "${COORD_NODE}.juwels" "${COORD_NODE}")
-    for host_suffix in "${COORD_NODE}i.juwels" "${COORD_NODE}.juwels"; do
-        COORD_IP_GETENT=$(getent ahostsv4 "${host_suffix}" 2>/dev/null | awk 'NR==1 {print $1}')
-        [[ -n "${COORD_IP_GETENT}" ]] && COORD_CANDIDATES+=("${COORD_IP_GETENT}")
-    done
-    COORD_IP_REMOTE=$(srun --nodes=1 --ntasks=1 -w "${COORD_NODE}" \
-        bash -lc "hostname -I | awk '{print \$1}'" 2>/dev/null | tail -n1)
-    [[ -n "${COORD_IP_REMOTE}" ]] && COORD_CANDIDATES+=("${COORD_IP_REMOTE}")
-
-    check_host_all_nodes_tcp() {
-        local host="$1"
-        echo "Testing TCP reachability to ${host}:${TCP_PROBE_PORT}"
-        srun --overlap --nodes=1 --ntasks=1 -w "${COORD_NODE}" bash -lc "
-            python3 -u -c '
+        check_host_all_nodes_tcp() {
+            local host="$1"
+            echo "Testing TCP reachability to ${host}:${TCP_PROBE_PORT}"
+            srun --overlap --nodes=1 --ntasks=1 -w "${COORD_NODE}" bash -lc "
+                python3 -u -c '
 import socket, time, sys
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -433,10 +447,10 @@ while time.time() < deadline:
     except socket.timeout: pass
 s.close()
 '" >/dev/null 2>&1 &
-        local listener_pid=$!
-        sleep 1
-        srun --overlap --ntasks-per-node=1 bash -lc "
-            python3 -u -c '
+            local listener_pid=$!
+            sleep 1
+            srun --overlap --ntasks-per-node=1 bash -lc "
+                python3 -u -c '
 import socket, sys
 try:
     sock = socket.create_connection((\"${host}\", ${TCP_PROBE_PORT}), timeout=5.0)
@@ -444,29 +458,35 @@ try:
 except Exception as e:
     sys.exit(1)
 '"
-        local rc=$?
-        kill "${listener_pid}" >/dev/null 2>&1 || true
-        wait "${listener_pid}" >/dev/null 2>&1 || true
-        return "${rc}"
-    }
+            local rc=$?
+            kill "${listener_pid}" >/dev/null 2>&1 || true
+            wait "${listener_pid}" >/dev/null 2>&1 || true
+            return "${rc}"
+        }
 
-    COORD_HOST_SELECTED=""
-    declare -A _seen_coord
-    for cand in "${COORD_CANDIDATES[@]}"; do
-        [[ -z "${cand}" || -n "${_seen_coord[$cand]:-}" ]] && continue
-        _seen_coord[$cand]=1
-        if check_host_all_nodes_tcp "${cand}"; then
-            COORD_HOST_SELECTED="${cand}"
-            break
+        COORD_HOST_SELECTED=""
+        declare -A _seen_coord
+        for cand in "${COORD_CANDIDATES[@]}"; do
+            [[ -z "${cand}" || -n "${_seen_coord[$cand]:-}" ]] && continue
+            _seen_coord[$cand]=1
+            if check_host_all_nodes_tcp "${cand}"; then
+                COORD_HOST_SELECTED="${cand}"
+                break
+            fi
+        done
+        if [[ -z "${COORD_HOST_SELECTED}" ]]; then
+            echo "ERROR: No coordinator address reachable from all nodes."
+            echo "Debug info:"
+            echo "  COORD_NODE: ${COORD_NODE}"
+            echo "  Candidates tried: ${COORD_CANDIDATES[@]}"
+            echo "  SLURM_JOB_NODELIST: ${SLURM_JOB_NODELIST}"
+            echo "Troubleshooting: Check DNS setup or try setting CHEMTRAIN_COORDINATOR_HOST manually"
+            exit 1
         fi
-    done
-    if [[ -z "${COORD_HOST_SELECTED}" ]]; then
-        echo "ERROR: No coordinator address reachable from all nodes."
-        exit 1
+        export CHEMTRAIN_COORDINATOR_HOST="${COORD_HOST_SELECTED}"
+        export CHEMTRAIN_COORDINATOR_PORT="${COORD_PORT}"
+        echo "Selected coordinator: ${CHEMTRAIN_COORDINATOR_HOST}:${CHEMTRAIN_COORDINATOR_PORT}"
     fi
-    export CHEMTRAIN_COORDINATOR_HOST="${COORD_HOST_SELECTED}"
-    export CHEMTRAIN_COORDINATOR_PORT="${COORD_PORT}"
-    echo "Selected coordinator: ${CHEMTRAIN_COORDINATOR_HOST}:${CHEMTRAIN_COORDINATOR_PORT}"
     echo "============================================================"
 fi
 
