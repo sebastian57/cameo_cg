@@ -82,6 +82,28 @@ def _normalize_export_mode(mode: Any) -> str:
     return normalized
 
 
+def _normalize_species_input_convention(convention: Any) -> str:
+    normalized = str(convention).strip().lower().replace("-", "_")
+    aliases = {
+        "model": "model",
+        "model_species": "model",
+        "zero_based": "model",
+        "zero_indexed": "model",
+        "connector": "model",
+        "chemtrain_deploy": "model",
+        "lammps": "lammps",
+        "lammps_types": "lammps",
+        "one_based": "lammps",
+        "one_indexed": "lammps",
+    }
+    if normalized not in aliases:
+        raise ValueError(
+            f"Unsupported export.species_input_convention={convention!r}. "
+            "Expected one of: model, lammps."
+        )
+    return aliases[normalized]
+
+
 class ModelExporter(exporter.Exporter):
     """
     Exporter for ML models to MLIR format.
@@ -116,6 +138,7 @@ class ModelExporter(exporter.Exporter):
         sample_neighbors: Optional[Any] = None,
         sample_species_model: Optional[jax.Array] = None,
         export_mode: str = "auto",
+        species_input_convention: str = "model",
         also_export_naive: bool = False,
         naive_equivalence_atol: Optional[float] = None,
         naive_equivalence_per_atom_atol: float = 1.0e-6,
@@ -142,6 +165,9 @@ class ModelExporter(exporter.Exporter):
             None if sample_species_model is None else jnp.asarray(sample_species_model, dtype=jnp.int32)
         )
         self.export_mode = _normalize_export_mode(export_mode)
+        self.species_input_convention = _normalize_species_input_convention(
+            species_input_convention
+        )
         self.also_export_naive = bool(also_export_naive)
         self.naive_equivalence_atol = (
             None if naive_equivalence_atol is None else float(naive_equivalence_atol)
@@ -181,7 +207,10 @@ class ModelExporter(exporter.Exporter):
             None,
         )
 
-        species_model = jnp.maximum(species - 1, 0)
+        if self.species_input_convention == "lammps":
+            species_model = jnp.maximum(species - 1, 0)
+        else:
+            species_model = jnp.maximum(species, 0)
         if valid_mask is None:
             mask = jnp.ones(pos.shape[0], dtype=jnp.float32)
         else:
@@ -350,14 +379,21 @@ class ModelExporter(exporter.Exporter):
 
         positions = jnp.asarray(self.sample_positions, dtype=jnp.float32)
         species_model = jnp.asarray(self.sample_species_model, dtype=jnp.int32)
-        species_lammps = jnp.where(species_model >= 0, species_model + 1, jnp.ones_like(species_model))
+        if self.species_input_convention == "lammps":
+            species_export = jnp.where(
+                species_model >= 0,
+                species_model + 1,
+                jnp.ones_like(species_model),
+            )
+        else:
+            species_export = jnp.maximum(species_model, 0)
         senders, receivers, edge_buffer = self._neighborlist_to_sparse_buffers(
             self.sample_neighbors,
             positions.shape[0],
         )
         return (
             positions,
-            species_lammps,
+            species_export,
             jnp.asarray(int(positions.shape[0]), dtype=jnp.int32),
             jnp.asarray(0, dtype=jnp.int32),
             jnp.asarray(False, dtype=jnp.bool_),
@@ -405,9 +441,10 @@ class ModelExporter(exporter.Exporter):
         resolved_mode = self._resolve_export_mode()
         tp_methods = self._current_tp_methods()
         export_logger.info(
-            "Export strategy: requested_mode=%s resolved_mode=%s tp_methods=%s also_export_naive=%s",
+            "Export strategy: requested_mode=%s resolved_mode=%s species_input_convention=%s tp_methods=%s also_export_naive=%s",
             self.export_mode,
             resolved_mode,
+            self.species_input_convention,
             tp_methods if tp_methods else ("n/a",),
             self.also_export_naive,
         )
@@ -590,10 +627,14 @@ class ModelExporter(exporter.Exporter):
             apply_fn = default_apply_fn
 
         export_mode = "auto"
+        species_input_convention = "model"
         also_export_naive = False
         config = getattr(model, "config", None)
         if config is not None:
             export_mode = _normalize_export_mode(config.get("export", "mode", default="auto"))
+            species_input_convention = _normalize_species_input_convention(
+                config.get("export", "species_input_convention", default="model")
+            )
             also_export_naive = bool(config.get("export", "also_export_naive", default=False))
             naive_equivalence_atol = config.get("export", "naive_equivalence_atol", default=None)
             naive_equivalence_per_atom_atol = config.get(
@@ -630,6 +671,7 @@ class ModelExporter(exporter.Exporter):
             sample_neighbors=getattr(ml_model, "nbrs_init", None),
             sample_species_model=getattr(ml_model, "_species0", None),
             export_mode=export_mode,
+            species_input_convention=species_input_convention,
             also_export_naive=also_export_naive,
             naive_equivalence_atol=naive_equivalence_atol,
             naive_equivalence_per_atom_atol=naive_equivalence_per_atom_atol,

@@ -200,6 +200,7 @@ model:
 # -----------------------------------------------------------------------------
 export:
   mode: auto                    # auto | symbolic | fixed_size
+  species_input_convention: model # model: connector passes zero-based species | lammps: MLIR subtracts one-based LAMMPS types
   also_export_naive: false      # for uniform_1d cueq: also emit <model>_symbolic.mlir via tp_method=naive
 
 # -----------------------------------------------------------------------------

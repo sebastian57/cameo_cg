@@ -279,6 +279,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--species-input-convention",
+        choices=("model", "lammps"),
+        default=None,
+        help=(
+            "Override export.species_input_convention. Use 'model' for the "
+            "current chemtrain-deploy connector, which passes zero-based species "
+            "after subtracting LAMMPS atom types. Use 'lammps' when MLIR should "
+            "accept one-based LAMMPS atom types directly."
+        ),
+    )
+    parser.add_argument(
         "--naive-equivalence-atol",
         type=float,
         default=None,
@@ -306,6 +317,12 @@ def main() -> None:
     export_config = _build_export_config(config, args.mode)
     if args.export_mode is not None:
         export_config.set("export", "mode", args.export_mode)
+    if args.species_input_convention is not None:
+        export_config.set(
+            "export",
+            "species_input_convention",
+            args.species_input_convention,
+        )
     if args.naive_equivalence_atol is not None:
         export_config.set("export", "naive_equivalence_atol", float(args.naive_equivalence_atol))
 
