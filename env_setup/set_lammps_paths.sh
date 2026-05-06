@@ -35,8 +35,12 @@ fi
 
 _chemtrain_repo_root="$(${_python_bin} - <<'PYIN'
 from pathlib import Path
-import chemtrain
-print(Path(chemtrain.__file__).resolve().parents[1])
+import importlib.util
+
+spec = importlib.util.find_spec("chemtrain")
+if spec is None or spec.origin is None:
+    raise SystemExit(1)
+print(Path(spec.origin).resolve().parents[1])
 PYIN
 )"
 
@@ -56,6 +60,22 @@ export JCN_PJRT_PATH="${JCN_PJRT_PATH:-${_default_pjrt_path}}"
 
 if [[ -d "${JCN_PJRT_PATH}" ]]; then
     export LD_LIBRARY_PATH="${JCN_PJRT_PATH}:${LD_LIBRARY_PATH:-}"
+fi
+
+_nvidia_nvrtc_lib="$(${_python_bin} - <<'PYIN'
+from pathlib import Path
+import site
+
+for root in site.getsitepackages():
+    candidate = Path(root) / "nvidia" / "cuda_nvrtc" / "lib"
+    if candidate.is_dir():
+        print(candidate)
+        break
+PYIN
+)"
+
+if [[ -n "${_nvidia_nvrtc_lib}" && -d "${_nvidia_nvrtc_lib}" ]]; then
+    export LD_LIBRARY_PATH="${_nvidia_nvrtc_lib}:${LD_LIBRARY_PATH:-}"
 fi
 
 if [[ ! -d "${CHEMTRAIN_DEPLOY_ROOT}" ]]; then
