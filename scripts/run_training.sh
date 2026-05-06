@@ -1,10 +1,10 @@
 #!/bin/bash
 
 #SBATCH --account=cameo
-#SBATCH --nodes=2
+#SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-task=4
-#SBATCH --time=00:15:00
+#SBATCH --time=10:00:00
 #SBATCH --partition=booster
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null

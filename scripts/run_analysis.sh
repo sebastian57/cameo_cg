@@ -5,7 +5,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-task=4
 #SBATCH --time=02:00:00
-#SBATCH --partition=develbooster
+#SBATCH --partition=booster
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
 

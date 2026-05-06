@@ -121,6 +121,20 @@ Why those values were necessary:
   Matches A100 GPUs and avoids placeholder architectures such as `compute_120`
   that older NVCC releases cannot compile.
 
+### Jupiter Booster profile
+
+`jupiter-booster` is the working profile for the GH200/Hopper deployment on
+Jupiter Booster. It uses the same connector/toolchain defaults as
+`juwels-booster`, but targets the GH200 GPU architecture:
+
+- `use_clang = False`
+- `cuda_version = 12.9.1`
+- `cudnn_version = 9.5.0`
+- `cuda_compute_capabilities = sm_90`
+
+Use this profile on nodes where `nvidia-smi --query-gpu=compute_cap` reports
+`9.0`.
+
 ## Full Working Rebuild Procedure on JUWELS Booster
 
 ### 1. Activate the environment
@@ -355,6 +369,7 @@ Fix:
 
 - set `cuda_compute_capabilities` explicitly
 - on JUWELS Booster use `sm_80`
+- on Jupiter Booster / GH200 use `sm_90`
 
 ### cuDNN compile-time vs runtime mismatch
 

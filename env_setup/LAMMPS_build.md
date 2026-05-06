@@ -7,4 +7,4 @@ cmake ../cmake \
   -DPKG_KSPACE=ON \
   -DPKG_GPU=ON \
   -DGPU_API=cuda \
-  -DGPU_ARCH=sm_80
+  -DGPU_ARCH=sm_90

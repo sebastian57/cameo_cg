@@ -1286,7 +1286,11 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     )
     if dsm_enabled(config):
         train_split = add_dsm_noise_fields(train_split, config, seed=split_seed)
-    _configure_runtime_avg_num_neighbors(config, train_split, split_seed)
+    _configure_runtime_avg_num_neighbors(
+        config,
+        tiled_train_source if tiled_train_source is not None else train_split,
+        split_seed,
+    )
     config.save(config_path)
     training_logger.info(f"[Config] Updated runtime config saved to: {config_path}")
 
@@ -1668,7 +1672,11 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
         )
         if dsm_enabled(config):
             train_split = add_dsm_noise_fields(train_split, config, seed=split_seed)
-        _configure_runtime_avg_num_neighbors(config, train_split, split_seed)
+        _configure_runtime_avg_num_neighbors(
+            config,
+            tiled_train_source if tiled_train_source is not None else train_split,
+            split_seed,
+        )
         config.save(config_path)
         training_logger.info(
             "[Config][Bucket %d] Updated runtime config saved to: %s",
