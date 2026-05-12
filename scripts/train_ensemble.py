@@ -315,8 +315,8 @@ def main(config_file: str, job_id: str = None):
 
     if not data_path_obj.is_absolute():
         script_dir = Path(__file__).parent
-        clean_code_base_dir = script_dir.parent
-        data_path_obj = clean_code_base_dir / data_path
+        repo_root = script_dir.parent
+        data_path_obj = repo_root / data_path
         data_logger.info(f"Resolved relative path: {data_path} -> {data_path_obj}")
 
     # Use base_seed for data loading (consistent across ensemble)

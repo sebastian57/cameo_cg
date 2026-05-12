@@ -4,7 +4,7 @@ import sys
 import numpy as np
 from pathlib import Path
 
-# Logger — matches clean_code_base [Name] format from utils/logging.py
+# Logger matches the shared utils/logging.py format.
 logger = logging.getLogger("PadCombine")
 logger.propagate = False
 _handler = logging.StreamHandler(sys.stdout)

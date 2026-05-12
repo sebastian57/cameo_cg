@@ -40,7 +40,8 @@ warnings.filterwarnings("ignore")
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"  # Suppress TensorFlow logs if present
 # =============================================================================
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+REPO_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(REPO_ROOT))
 
 import jax
 from utils.jax_setup import apply_jax_compat_shims
@@ -123,10 +124,10 @@ def main():
         spline_path = Path(spline_path_str)
 
         if not spline_path.is_absolute():
-            # Try in order: CWD, clean_code_base, config file's directory
+            # Try in order: CWD, repo root, config file's directory.
             candidates = [
                 Path.cwd() / spline_path_str,
-                clean_code_base / spline_path_str,
+                REPO_ROOT / spline_path_str,
                 Path(args.config).parent / spline_path_str,
             ]
             for candidate in candidates:
@@ -136,7 +137,7 @@ def main():
 
         if not spline_path.exists():
             print(f"\nERROR: Spline file not found: {spline_path_str}")
-            print(f"  Searched in: CWD, {clean_code_base}, config dir")
+            print(f"  Searched in: CWD, {REPO_ROOT}, config dir")
             sys.exit(1)
 
         # Patch config with the resolved absolute path so PriorEnergy
@@ -280,7 +281,7 @@ def main():
     data_path = config.get_data_path()
     data_path_obj = Path(data_path)
     if not data_path_obj.is_absolute():
-        data_path_obj = clean_code_base / data_path
+        data_path_obj = REPO_ROOT / data_path
 
     loader = DatasetLoader(str(data_path_obj), max_frames=None, seed=config.get_seed())
     print(f"  Total frames: {len(loader)}")

@@ -38,6 +38,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from config.manager import ConfigManager
+from data.loader import _COORD_ALIASES, _resolve_key
 
 FIELDNAMES = [
     'run_dir_name',
@@ -263,16 +264,13 @@ def _load_mask(data_path: Path) -> np.ndarray:
     def _mask_from_npz(data: Any, source: Path) -> np.ndarray:
         if 'mask' in data:
             return np.asarray(data['mask'], dtype=np.float32)
-        if 'R' not in data:
-            raise KeyError(
-                f"Dataset at {source} is missing both 'mask' and fallback 'R' arrays."
-            )
+        r_key = _resolve_key(data, 'R', _COORD_ALIASES, str(source))
         print(
             f"[analyze_suite] WARNING: dataset {source} has no 'mask'; "
             "using all-ones mask derived from R.shape[:2].",
             flush=True,
         )
-        return np.ones(np.asarray(data['R']).shape[:2], dtype=np.float32)
+        return np.ones(np.asarray(data[r_key]).shape[:2], dtype=np.float32)
 
     if data_path.is_dir():
         masks = []

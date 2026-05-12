@@ -14,7 +14,7 @@ import mdtraj as md
 import tempfile
 import os
 
-# Logger — matches clean_code_base [Name] format from utils/logging.py
+# Logger matches the shared utils/logging.py format.
 logger = logging.getLogger("CG1Bead")
 logger.propagate = False
 _handler = logging.StreamHandler(sys.stdout)

@@ -22,13 +22,10 @@ from pathlib import Path
 warnings.filterwarnings("ignore")
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
-# ---------------------------------------------------------------------------
-# Path setup  –  clean_code_base must be importable
-# ---------------------------------------------------------------------------
 SCRIPT_DIR   = Path(__file__).resolve().parent
-CLEAN_BASE   = SCRIPT_DIR.parent          # clean_code_base/
-if str(CLEAN_BASE) not in sys.path:
-    sys.path.insert(0, str(CLEAN_BASE))
+REPO_ROOT = SCRIPT_DIR.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 # ---------------------------------------------------------------------------
 # JAX / jax_md compatibility patch (before any jax_md import)
@@ -173,7 +170,7 @@ def main():
     # ------------------------------------------------------------------
     data_path = Path(config.get_data_path())
     if not data_path.is_absolute():
-        data_path = CLEAN_BASE / data_path
+        data_path = REPO_ROOT / data_path
 
     loader = DatasetLoader(str(data_path), max_frames=None, seed=config.get_seed())
     print(f"Total frames : {len(loader)}   N_max : {loader.N_max}")

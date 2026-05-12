@@ -1264,10 +1264,12 @@ class AllegroReadout(hk.Module):
                 "h_in": h_in_array,
                 "h_lin": h_lin_array,
                 "h_out": energies.array,
-                "scalar_fan_in": int(fan_in),
-                "scalar_mu_l2": float(scalar_mu_l2),
-                "scalar_mu_max_abs": float(scalar_mu_max_abs),
-                "mu_dot_w": float(mu_dot_w),
+                "scalar_features": scalar_features,
+                "scalar_features_enveloped": scalar_features * envelope[:, None],
+                "scalar_fan_in": jnp.asarray(fan_in, dtype=jnp.int32),
+                "scalar_mu_l2": scalar_mu_l2,
+                "scalar_mu_max_abs": scalar_mu_max_abs,
+                "mu_dot_w": mu_dot_w,
             }
 
         return energies
@@ -1540,6 +1542,7 @@ class Allegro(hk.Module):
         num_nodes: int,
         return_fast_forces: bool = False,
         compute_energy: bool = True,
+        return_al_features: bool = False,
     ) -> Union[cuex.RepArray, jnp.ndarray, Tuple[cuex.RepArray, jnp.ndarray]]:
         """Predict per-edge energies and optionally fast per-node forces.
 
@@ -1551,6 +1554,8 @@ class Allegro(hk.Module):
             num_nodes: Number of nodes (concrete value, not traced)
             return_fast_forces: If True, also compute fast per-node force head.
             compute_energy: If False, skip readout and only compute fast forces.
+            return_al_features: If True, return final invariant edge features
+                used by the readout linear head.
 
         Returns:
             Per-edge energies, or per-node fast forces, or both.
@@ -1585,10 +1590,26 @@ class Allegro(hk.Module):
                 source_V = V
             fast_forces = self.fast_force_head(source_V, senders, receivers, num_nodes)
 
+        if return_al_features and not compute_energy:
+            raise ValueError("return_al_features=True requires compute_energy=True.")
+
         if compute_energy:
-            energies = self.readout_layer(vectors, x, V)
+            readout = self.readout_layer(
+                vectors,
+                x,
+                V,
+                return_intermediates=return_al_features,
+            )
+            if return_al_features:
+                energies, al_aux = readout
+            else:
+                energies = readout
             if return_fast_forces:
+                if return_al_features:
+                    return energies, fast_forces, al_aux
                 return energies, fast_forces
+            if return_al_features:
+                return energies, al_aux
             return energies
 
         if return_fast_forces:
@@ -1639,7 +1660,7 @@ def allegro_neighborlist_pp(
     r_cutoff = jnp.array(r_cutoff, dtype=jnp.float32)
 
     assert avg_num_neighbors is not None, "avg_num_neighbors is required"
-    if mode not in ("energy", "energy_and_fast_forces", "fast_forces"):
+    if mode not in ("energy", "energy_and_fast_forces", "fast_forces", "al_features"):
         raise NotImplementedError(f"Mode {mode} not implemented")
 
     # Keep wrapper API compatible with allegro_cueq_v2 and ignore wrapper-only args.
@@ -1759,6 +1780,28 @@ def allegro_neighborlist_pp(
             if per_particle:
                 return per_atom_energies
             return md_util.high_precision_sum(per_atom_energies)
+
+        if mode == "al_features":
+            per_edge_energies, al_aux = net(
+                vectors_rep,
+                senders,
+                receivers,
+                species,
+                n_nodes,
+                return_fast_forces=False,
+                compute_energy=True,
+                return_al_features=True,
+            )
+            distances = jnp.linalg.norm(vectors, axis=-1) * r_cutoff
+            return {
+                "edge_features": al_aux["scalar_features_enveloped"],
+                "edge_features_unenveloped": al_aux["scalar_features"],
+                "per_edge_energy": per_edge_energies.array.squeeze(-1),
+                "senders": senders,
+                "receivers": receivers,
+                "distances": distances,
+                "valid_edges": valid_edges,
+            }
 
         if mode == "energy_and_fast_forces":
             per_edge_energies, fast_forces = net(

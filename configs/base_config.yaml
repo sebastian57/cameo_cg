@@ -317,6 +317,7 @@ training:
     sigma_max: 2.0
     kT: 0.636                  # kcal/mol at ~320 K
     seed_offset: 1729
+    refresh_interval_steps: 0  # 0 = fixed DSM noise; >0 regenerates training DSM noise every N optimizer steps
 
   # --- Precision ---
   enable_mixed_precision: false

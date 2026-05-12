@@ -23,6 +23,7 @@ from chemtrain.data.data_loaders import DataLoaders
 from config.types import PretrainResult, TrainingResults, StageResult
 from .optimizers import create_optimizer_from_config
 from .dsm import add_dsm_noise_fields, dsm_config, dsm_enabled, dsm_error, make_dsm_quantity
+from .diagnostics import log_neighbor_debug_once
 from utils.logging import training_logger
 from data.loader import build_tiled_dataset, attach_batch_metadata
 
@@ -106,6 +107,10 @@ class Trainer:
         if self._dsm_cfg["enabled"]:
             self.gammas = dict(self.gammas)
             self.gammas["DSM"] = float(self._dsm_cfg["lambda"])
+        self._dsm_refresh_interval_steps = int(self._dsm_cfg.get("refresh_interval_steps", 0))
+        self._dsm_refresh_count = 0
+        self._dsm_optimizer_steps = 0
+        self._seed = seed if seed is not None else config.get_seed()
         self.checkpoint_path = Path(config.get_checkpoint_path())
         self.checkpoint_path.mkdir(parents=True, exist_ok=True)
         self._rank = jax.process_index()
@@ -168,6 +173,7 @@ class Trainer:
             self._tiled_train_source = {
                 key: np.asarray(value) for key, value in tiled_train_source.items()
             }
+        self._dsm_standard_train_source = None
 
         # Runtime precision + JIT buffer donation policy.
         self._mixed_precision_enabled = config.mixed_precision_enabled()
@@ -344,6 +350,14 @@ class Trainer:
                 training_logger.warning(f"Could not extract training data: {e}. Prior pre-training may not work.")
                 self._train_data = None
 
+        if self._dsm_cfg["enabled"] and self._batch_mode != "tiled":
+            dsm_keys = {"DSM", "dsm_eps", "dsm_sigma", "dsm_loss_mask"}
+            self._dsm_standard_train_source = {
+                key: np.asarray(value)
+                for key, value in self._loader_reference_data(self.train_loader).items()
+                if key not in dsm_keys
+            }
+
         training_logger.info(
             "[Training] Force loss normalization: %s",
             self._force_loss_normalization,
@@ -360,13 +374,13 @@ class Trainer:
         self._initialize_dataset_profile()
 
         # Initialize model parameters
-        # Use provided seed or fall back to config seed
-        if seed is not None:
-            self._seed = seed
-        else:
-            self._seed = config.get_seed()
         self.params = model.initialize_params(jax.random.PRNGKey(self._seed))
         training_logger.info(f"Initialized model with seed={self._seed}")
+        if self._dsm_refresh_interval_steps > 0:
+            training_logger.info(
+                "[DSM] Training noise refresh enabled every %d optimizer steps.",
+                self._dsm_refresh_interval_steps,
+            )
         if self._tile_rebuild_each_epoch:
             training_logger.info(
                 "[Tiling] Epoch-wise tile rebuild enabled (shuffle=%s, sort_by_size=%s, target_beads=%s, bucket_beads=%s)",
@@ -1049,149 +1063,11 @@ class Trainer:
             return str(value)
 
     def _log_neighbor_debug_once(self) -> None:
-        """
-        One-time rank-0 neighbor summary for capacity, occupancy and overflow.
-
-        This emulates the training path once:
-          nbrs_init -> util.neighbor_update -> mask_neighbor_list -> ml_model.update
-        and logs dense->sparse conversion stats when applicable.
-        """
         if not self._neighbor_debug_enabled or self._neighbor_debug_logged:
             return
         if self._neighbor_debug_rank0_only and self._rank != 0:
             return
-
-        ml_model = getattr(self.model, "ml_model", None)
-        if ml_model is None:
-            return
-        if not hasattr(ml_model, "summarize_neighborlist"):
-            training_logger.warning(
-                "[NeighborDebug] ML model has no summarize_neighborlist(); skipping."
-            )
-            self._neighbor_debug_logged = True
-            return
-        if not hasattr(ml_model, "nneigh_fn") or not hasattr(ml_model, "nbrs_init"):
-            training_logger.warning(
-                "[NeighborDebug] ML model has no neighbor function/init list; skipping."
-            )
-            self._neighbor_debug_logged = True
-            return
-
-        R_src = getattr(self.train_loader, "R", None)
-        mask_src = getattr(self.train_loader, "mask", None)
-        species_src = getattr(self.train_loader, "species", None)
-        if R_src is None or mask_src is None:
-            training_logger.warning(
-                "[NeighborDebug] train_loader is missing R/mask arrays; skipping."
-            )
-            self._neighbor_debug_logged = True
-            return
-
-        from chemtrain import util as chemtrain_util
-        from chemtrain.ensemble import evaluation as chemtrain_eval
-        from jax_md_mod import custom_partition
-        from jax_md import partition
-
-        compute_dtype = getattr(ml_model, "compute_dtype", jnp.float32)
-        R0 = jnp.asarray(R_src[0], dtype=compute_dtype)
-        mask0 = jnp.asarray(mask_src[0]) > 0
-        if species_src is not None:
-            species0 = jnp.asarray(species_src[0], dtype=jnp.int32)
-        else:
-            species0 = jnp.zeros((R0.shape[0],), dtype=jnp.int32)
-
-        # 1) chemtrain reference update + masking
-        state0 = chemtrain_eval.SimpleState(R0)
-        nbrs_updated = chemtrain_util.neighbor_update(ml_model.nbrs_init, state0)
-        nbrs_masked = custom_partition.mask_neighbor_list(nbrs_updated, mask0)
-        stats_masked = ml_model.summarize_neighborlist(nbrs_masked, mask0)
-
-        # 2) model-side update (the same update path used by compute_energy)
-        ref_position = getattr(nbrs_masked, "reference_position", None)
-        target_dtype = getattr(ref_position, "dtype", compute_dtype)
-        nbrs_post = ml_model.nneigh_fn.update(
-            jnp.asarray(R0, dtype=target_dtype),
-            nbrs_masked,
-        )
-        stats_post = ml_model.summarize_neighborlist(nbrs_post, mask0)
-
-        if stats_masked["format"] == "dense":
-            training_logger.info(
-                "[NeighborDebug][runtime][dense] "
-                "N_max=%d M_slots(masked)=%d max_neighbors=%d mean_neighbors=%.2f "
-                "util_max=%.3f M_slots(post_update)=%d util_max(post)=%.3f "
-                "shape_changed=%s error(masked)=%s did_buffer_overflow(masked)=%s overflow(masked)=%s "
-                "error(post)=%s did_buffer_overflow(post)=%s overflow(post)=%s",
-                stats_masked["n_atoms"],
-                stats_masked["capacity"],
-                stats_masked["max_neighbors"],
-                stats_masked["mean_neighbors"],
-                stats_masked["utilization"],
-                stats_post["capacity"],
-                stats_post["utilization"],
-                stats_masked["idx_shape"] != stats_post["idx_shape"],
-                stats_masked["error"],
-                stats_masked["did_buffer_overflow"],
-                stats_masked["overflow"],
-                stats_post["error"],
-                stats_post["did_buffer_overflow"],
-                stats_post["overflow"],
-            )
-        else:
-            training_logger.info(
-                "[NeighborDebug][runtime][sparse] "
-                "N_max=%d E_capacity(masked)=%d E_valid=%d util=%.3f "
-                "E_capacity(post_update)=%d E_valid(post)=%d util(post)=%.3f "
-                "shape_changed=%s error(masked)=%s did_buffer_overflow(masked)=%s overflow(masked)=%s "
-                "error(post)=%s did_buffer_overflow(post)=%s overflow(post)=%s",
-                stats_masked["n_atoms"],
-                stats_masked["capacity"],
-                stats_masked["e_valid"],
-                stats_masked["utilization"],
-                stats_post["capacity"],
-                stats_post["e_valid"],
-                stats_post["utilization"],
-                stats_masked["idx_shape"] != stats_post["idx_shape"],
-                stats_masked["error"],
-                stats_masked["did_buffer_overflow"],
-                stats_masked["overflow"],
-                stats_post["error"],
-                stats_post["did_buffer_overflow"],
-                stats_post["overflow"],
-            )
-
-        # 3) Dense -> sparse conversion diagnostics (if this backend uses it)
-        if getattr(nbrs_post, "format", None) == partition.Dense:
-            from jax_md_mod.model import sparse_graph
-
-            cutoff = jnp.asarray(getattr(ml_model, "cutoff"), dtype=jnp.float32)
-            species_valid = jnp.where(mask0, species0, 0).astype(jnp.int32)
-            max_edges = getattr(ml_model, "max_edges", None)
-            dense_shape = tuple(int(x) for x in np.asarray(jax.device_get(nbrs_post.idx)).shape)
-            graph, capped = sparse_graph.sparse_graph_from_neighborlist(
-                ml_model.displacement,
-                jnp.asarray(R0, dtype=jnp.float32),
-                nbrs_post,
-                cutoff,
-                species=species_valid,
-                max_edges=max_edges,
-                species_mask=mask0,
-            )
-            e_capacity = int(np.asarray(jax.device_get(graph.idx_i)).shape[0])
-            n_edges = int(np.asarray(jax.device_get(graph.n_edges)).item())
-            training_logger.info(
-                "[NeighborDebug][dense_to_sparse] dense_shape=%s max_edges=%s "
-                "sparse_idx_i_shape=%s sparse_idx_j_shape=%s E_capacity=%d n_edges=%d capped=%s",
-                dense_shape,
-                str(max_edges),
-                tuple(int(x) for x in np.asarray(jax.device_get(graph.idx_i)).shape),
-                tuple(int(x) for x in np.asarray(jax.device_get(graph.idx_j)).shape),
-                e_capacity,
-                n_edges,
-                self._coerce_neighbor_meta(capped),
-            )
-
-        self._neighbor_debug_logged = True
+        self._neighbor_debug_logged = log_neighbor_debug_once(self)
 
     def _edge_count_for_structure(self, R_sample: Any, mask_sample: Optional[Any]) -> Optional[Tuple[int, int, int]]:
         """
@@ -1604,6 +1480,61 @@ class Trainer:
 
         trainer.add_task("pre_epoch", _refresh_tiles)
 
+    def _build_refreshed_dsm_split(self, refresh_idx: int) -> Dict[str, np.ndarray]:
+        """Rebuild the training split used for DSM noise refresh."""
+        if self._batch_mode == "tiled":
+            if self._tiled_train_source is None:
+                raise ValueError("Missing tiled_train_source for DSM tile refresh.")
+            return self._build_epoch_tiled_split(refresh_idx)
+
+        if self._dsm_standard_train_source is None:
+            raise ValueError("Missing standard training source for DSM noise refresh.")
+        split = {
+            key: np.asarray(value)
+            for key, value in self._dsm_standard_train_source.items()
+        }
+        return add_dsm_noise_fields(split, self.config, seed=int(self._seed + refresh_idx))
+
+    def _install_dsm_step_refresh(self, trainer: Any) -> None:
+        """Regenerate DSM noise, and tiled packing when needed, every N optimizer steps."""
+        if not self._dsm_cfg["enabled"] or self._dsm_refresh_interval_steps <= 0:
+            return
+        if self._batch_mode == "tiled" and self._tiled_train_source is None:
+            training_logger.warning(
+                "[DSM] refresh_interval_steps=%d requested, but tiled_train_source is missing; "
+                "keeping fixed DSM noise.",
+                self._dsm_refresh_interval_steps,
+            )
+            return
+        if self._batch_mode != "tiled" and self._dsm_standard_train_source is None:
+            training_logger.warning(
+                "[DSM] refresh_interval_steps=%d requested, but standard train source is missing; "
+                "keeping fixed DSM noise.",
+                self._dsm_refresh_interval_steps,
+            )
+            return
+
+        def _refresh_after_batch(chemtrain_trainer, *args, **kwargs):
+            self._dsm_optimizer_steps += 1
+            if self._dsm_optimizer_steps % self._dsm_refresh_interval_steps != 0:
+                return
+
+            self._dsm_refresh_count += 1
+            refresh_idx = int(self._dsm_refresh_count)
+            train_split = self._build_refreshed_dsm_split(refresh_idx)
+            train_loader = NumpyDataLoader(**self._split_loader_kwargs(train_split))
+            chemtrain_trainer.set_loader(train_loader, stage="training")
+            self.train_loader = train_loader
+            self._set_dataset_profile(train_split, log=False)
+            training_logger.info(
+                "[DSM] Refreshed training noise%s after optimizer_step=%d (refresh=%d).",
+                " and rebuilt tiles" if self._batch_mode == "tiled" else "",
+                self._dsm_optimizer_steps,
+                refresh_idx,
+            )
+
+        trainer.add_task("post_batch", _refresh_after_batch)
+
     def _force_matching_error_fns(self) -> Optional[Dict[str, Callable]]:
         """Return custom per-target error functions for chemtrain."""
         fns = {}
@@ -1630,7 +1561,7 @@ class Trainer:
             return None
         return {
             "DSM": make_dsm_quantity(
-                self.model.energy_fn_template,
+                self.model.dsm_energy_fn_template,
                 kT=float(self._dsm_cfg["kT"]),
             )
         }
@@ -1786,6 +1717,7 @@ class Trainer:
         )
         self._install_batch_fetch_profiler(trainer, stage="training")
         self._install_epochwise_tile_rebuild(trainer, stage_start_epoch=start_epoch)
+        self._install_dsm_step_refresh(trainer)
         self._log_neighbor_debug_once()
 
         # Restore optimizer state from checkpoint if available.

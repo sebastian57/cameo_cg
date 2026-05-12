@@ -4,7 +4,8 @@
 #
 # Usage:
 #   scripts/submit_suite.sh --input_dir <config_dir> --name <suite_name> \
-#       [--max_concurrent 4] [--nodes 1] [--output_root local_work/outputs]
+#       [--max_concurrent 4] [--nodes 1] [--time 20:00:00] \
+#       [--output_root local_work/outputs]
 #
 # Each *.yaml in <config_dir> becomes one array task.
 # =============================================================================
@@ -43,6 +44,7 @@ INPUT_DIR=""
 SUITE_NAME=""
 MAX_CONCURRENT="${MAX_CONCURRENT:-4}"
 NODES=1
+TIME_LIMIT="${TIME_LIMIT:-20:00:00}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${PROJECT_ROOT}/local_work/outputs}"
 
 while [[ $# -gt 0 ]]; do
@@ -51,16 +53,17 @@ while [[ $# -gt 0 ]]; do
         --name)       SUITE_NAME="$2";      shift 2 ;;
         --max_concurrent) MAX_CONCURRENT="$2"; shift 2 ;;
         --nodes)      NODES="$2";           shift 2 ;;
+        --time|--time_limit) TIME_LIMIT="$2"; shift 2 ;;
         --output_root) OUTPUT_ROOT="$2";    shift 2 ;;
         *)
             echo "Unknown argument: $1"
-            echo "Usage: $0 --input_dir <config_dir> --name <suite_name> [--max_concurrent <n>] [--nodes <n>] [--output_root <dir>]"
+            echo "Usage: $0 --input_dir <config_dir> --name <suite_name> [--max_concurrent <n>] [--nodes <n>] [--time <HH:MM:SS>] [--output_root <dir>]"
             exit 1 ;;
     esac
 done
 
 if [[ -z "${INPUT_DIR}" || -z "${SUITE_NAME}" ]]; then
-    echo "Usage: $0 --input_dir <config_dir> --name <suite_name> [--max_concurrent <n>] [--nodes <n>] [--output_root <dir>]"
+    echo "Usage: $0 --input_dir <config_dir> --name <suite_name> [--max_concurrent <n>] [--nodes <n>] [--time <HH:MM:SS>] [--output_root <dir>]"
     exit 1
 fi
 
@@ -106,11 +109,13 @@ echo "  Group output:     ${GROUP_OUTPUT_DIR}"
 echo "  Config count:     ${#configs[@]}"
 echo "  Array spec:       ${ARRAY_SPEC}"
 echo "  Nodes per job:    ${NODES}"
+echo "  Time limit:       ${TIME_LIMIT}"
 echo "============================================================"
 
 sbatch \
     --chdir "${PROJECT_ROOT}" \
     --nodes "${NODES}" \
+    --time "${TIME_LIMIT}" \
     --array "${ARRAY_SPEC}" \
     --output "${GROUP_OUTPUT_DIR}/slurm-bootstrap-%A_%a.out" \
     --export=ALL,PARENT_OUTPUT_DIR="${GROUP_OUTPUT_DIR}",CONFIG_LIST_FILE="${MANIFEST_PATH}",CAMEO_CG_PROJECT_ROOT="${PROJECT_ROOT}" \

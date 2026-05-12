@@ -17,6 +17,12 @@ def dsm_config(config) -> Dict[str, Any]:
     cfg = config.get("training", "dsm", default={}) or {}
     if not isinstance(cfg, dict):
         cfg = {}
+    refresh_interval_steps = int(cfg.get("refresh_interval_steps", 0))
+    if refresh_interval_steps < 0:
+        raise ValueError(
+            "training.dsm.refresh_interval_steps must be >= 0, "
+            f"got {refresh_interval_steps}."
+        )
     return {
         "enabled": bool(cfg.get("enabled", False)),
         "lambda": float(cfg.get("lambda", cfg.get("lambda_dsm", 1.0))),
@@ -24,6 +30,7 @@ def dsm_config(config) -> Dict[str, Any]:
         "sigma_max": float(cfg.get("sigma_max", 2.0)),
         "kT": float(cfg.get("kT", 0.636)),
         "seed_offset": int(cfg.get("seed_offset", 1729)),
+        "refresh_interval_steps": refresh_interval_steps,
     }
 
 

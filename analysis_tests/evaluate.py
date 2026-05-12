@@ -244,15 +244,13 @@ def main():
     logging.info("LOADING DATA")
     logging.info("=" * 60)
 
-    # Resolve data path relative to clean_code_base directory if it's relative
     data_path = config.get_data_path()
     data_path_obj = Path(data_path)
 
     if not data_path_obj.is_absolute():
-        # Get the directory where this script is located (clean_code_base/scripts)
         script_dir = Path(__file__).parent
-        clean_code_base_dir = script_dir.parent
-        data_path_obj = clean_code_base_dir / data_path
+        repo_root = script_dir.parent
+        data_path_obj = repo_root / data_path
         data_logger.info(f"Resolved relative path: {data_path} -> {data_path_obj}")
 
     # Load dataset (same preprocessing as training)

@@ -1,207 +1,26 @@
-"""
-Unified Training Script for Allegro Coarse-Grained Protein Force Fields
-
-Uses JAX distributed + chemtrain's shard_map for true multi-node training.
-
-ARCHITECTURE (1 process per NODE, not per GPU!):
-    - 1 node (4 GPUs) = 1 process with 4 local GPUs
-    - 2 nodes (8 GPUs) = 2 processes, each with 4 local GPUs = 8 total GPUs
-
-    After jax.distributed.initialize():
-    - jax.devices() returns ALL 8 GPUs across both nodes
-    - chemtrain creates: Mesh(jax.devices(), axis_names=('batch'))
-    - This mesh spans ALL 8 GPUs for unified training
-    - lax.pmean(grad, 'batch') aggregates gradients across ALL 8 GPUs
-    - Result: ONE training run using ALL 8 GPUs together!
-
-    global_batch_size = batch_per_device * total_gpus_across_all_nodes
-
-Memory model:
-    - Data is loaded ONCE per node (not per GPU)
-    - shard_map splits batches across ALL GPUs in the mesh
-    - Gradients are synchronized across ALL nodes via lax.pmean
-
-Usage:
-    Single-node (1 process, 4 GPUs):
-        sbatch scripts/run_training.sh config.yaml
-
-    Multi-node (2 processes, 8 total GPUs):
-        sbatch --nodes=2 scripts/run_training.sh config.yaml
-
-IMPORTANT: JAX distributed initialization must happen before any other JAX operations.
-           This is why the initialization code is at the top of this file.
-"""
-
-# =============================================================================
-# CRITICAL: JAX DISTRIBUTED INITIALIZATION (must be first!)
-# =============================================================================
-# JAX distributed must be initialized BEFORE any other JAX operations.
-# This includes before importing modules that use jax.numpy, etc.
-# =============================================================================
+"""Training entry point for CAMEO coarse-grained force-field models."""
 
 import os
 import sys
-import jax
-from typing import Optional, Dict
+from pathlib import Path
+from typing import Dict, Optional
 
 sys.path.insert(0, str(os.path.join(os.path.dirname(__file__), "..")))
-from utils.jax_setup import apply_jax_compat_shims, apply_numpy_dataloader_patch
+from utils.jax_setup import apply_numpy_dataloader_patch
+from utils.distributed import initialize_jax_distributed, sync_all_ranks
 
-apply_jax_compat_shims()
+_DISTRIBUTED = initialize_jax_distributed()
+_IS_DISTRIBUTED = _DISTRIBUTED.is_distributed
+_RANK = _DISTRIBUTED.rank
+_WORLD_SIZE = _DISTRIBUTED.world_size
 
-def _initialize_jax_distributed():
-    """
-    Initialize JAX distributed training.
-
-    MUST be called before any other JAX operations!
-
-    Architecture: 1 process per NODE (not per GPU!)
-        - Each process sees 4 local GPUs (CUDA_VISIBLE_DEVICES=0,1,2,3)
-        - After initialization, jax.devices() returns ALL GPUs across ALL nodes
-        - chemtrain's shard_map creates a mesh spanning ALL devices
-        - lax.pmean synchronizes gradients across ALL devices in the mesh
-        - Result: TRUE multi-node training with unified gradient updates
-
-    Returns:
-        Tuple of (is_distributed, rank, world_size)
-        - rank: which NODE this process is (0, 1, 2, ...)
-        - world_size: total number of NODES (each with 4 GPUs)
-    """
-    # Check if running under SLURM with multiple tasks
-    slurm_ntasks = os.environ.get("SLURM_NTASKS")
-    slurm_procid = os.environ.get("SLURM_PROCID")
-    slurm_job_id = os.environ.get("SLURM_JOB_ID")
-    slurm_nodelist = os.environ.get("SLURM_STEP_NODELIST") or os.environ.get("SLURM_JOB_NODELIST")
-
-    if slurm_job_id and slurm_ntasks and int(slurm_ntasks) > 1:
-        # Multi-node SLURM job
-        # IMPORTANT: JAX automatic detection assumes 1 GPU per task, which doesn't work
-        # for our "1 process per node with 4 GPUs" architecture. Use manual initialization.
-        num_processes = int(slurm_ntasks)
-        process_id = int(slurm_procid) if slurm_procid else 0
-
-        # Coordinator host/port selection:
-        # 1) honor explicit launcher-provided env vars
-        # 2) fallback to SLURM nodelist parsing (legacy behavior)
-        coordinator_host_env = os.environ.get("CHEMTRAIN_COORDINATOR_HOST")
-        coordinator_port_env = os.environ.get("CHEMTRAIN_COORDINATOR_PORT")
-
-        coordinator_source = "env"
-        coordinator_host = coordinator_host_env
-        if not coordinator_host:
-            coordinator_source = "slurm_nodelist"
-            # Get coordinator host from SLURM nodelist
-            # Use subprocess to parse nodelist since scontrol may not be available
-            import subprocess
-            try:
-                result = subprocess.run(
-                    ["scontrol", "show", "hostname", slurm_nodelist],
-                    capture_output=True, text=True, check=True
-                )
-                coordinator_host = result.stdout.strip().split('\n')[0] + ".juwels"
-            except Exception as e:
-                print(f"[SLURM] Warning: Could not parse nodelist, using first node from {slurm_nodelist}: {e}")
-                # Fallback: extract first node manually (handles simple cases like "node[001-002]")
-                import re
-                match = re.match(r'([a-zA-Z]+)(\d+)', slurm_nodelist.replace('[', '').replace(']', ''))
-                if match:
-                    coordinator_host = f"{match.group(1)}{match.group(2)}.juwels"
-                else:
-                    coordinator_host = f"{slurm_nodelist.split(',')[0].split('[')[0]}.juwels"
-
-        # Use launcher-provided port if available, else job-specific default.
-        if coordinator_port_env:
-            coordinator_port = int(coordinator_port_env)
-        else:
-            coordinator_port = 29400 + (int(slurm_job_id) % 1000)
-
-        # Derive local device count from CUDA_VISIBLE_DEVICES
-        # Strip whitespace: SLURM may set CUDA_VISIBLE_DEVICES with trailing spaces
-        cuda_vis = os.environ.get("CUDA_VISIBLE_DEVICES", "0,1,2,3").strip()
-        n_local_gpus = len(cuda_vis.split(","))
-        local_ids = list(range(n_local_gpus))
-
-        print(f"[SLURM] Detected multi-node job: {num_processes} tasks")
-        print(f"[SLURM] Process {process_id}/{num_processes}")
-        print(f"[SLURM] Coordinator ({coordinator_source}): {coordinator_host}:{coordinator_port}")
-        print(f"[SLURM] CUDA_VISIBLE_DEVICES={cuda_vis} -> {n_local_gpus} local GPUs")
-        print(f"[Rank {process_id}] SLURM_NODELIST: {slurm_nodelist}", flush=True)
-        print(f"[Rank {process_id}] Hostname: {os.uname().nodename}", flush=True)
-        print(f"[Rank {process_id}] About to call jax.distributed.initialize()...", flush=True)
-
-        try:
-            print(f"[Rank {process_id}] Attempting jax.distributed.initialize()...", flush=True)
-            jax.distributed.initialize(
-                coordinator_address=f"{coordinator_host}:{coordinator_port}",
-                num_processes=num_processes,
-                process_id=process_id,
-                local_device_ids=local_ids,
-                initialization_timeout=int(os.environ.get("JAX_INIT_TIMEOUT", "1800")),
-            )
-            print(f"[Rank {process_id}] Successfully initialized!", flush=True)
-        except Exception as e:
-            print(f"[Rank {process_id}] FATAL: jax.distributed.initialize() failed: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
-            sys.exit(1)
-
-        rank = jax.process_index()
-        world_size = jax.process_count()
-
-        print(f"[Rank {rank}/{world_size}] JAX distributed initialized")
-
-        # Verify device counts - with 1 process per NODE, n_local should be 4 (GPUs per node)
-        n_local = jax.local_device_count()
-        n_global = jax.device_count()
-        expected_local = 4  # GPUs per node on JUWELS Booster
-
-        print(f"[Rank {rank}] Local GPUs: {n_local}, Total GPUs: {n_global}")
-        print(f"[Rank {rank}] CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')}")
-
-        # Verify: with 1 process per NODE, we expect n_local=4 and n_global=num_processes*4
-        if n_local != expected_local:
-            print(f"WARNING: Expected {expected_local} local GPUs per process (1 process per node), got {n_local}")
-        expected_global = world_size * expected_local
-        if n_global != expected_global:
-            print(f"WARNING: Expected {expected_global} total GPUs ({world_size} nodes × {expected_local} GPUs), got {n_global}")
-
-        is_distributed = True
-    else:
-        # Single-node or not under SLURM - single process mode
-        rank = 0
-        world_size = 1
-        is_distributed = False
-
-        n_local = jax.local_device_count()
-        print(f"[Single-process mode] Local devices: {n_local}")
-
-    # Print all devices
-    print(f"[Rank {rank}] Local devices: {jax.local_devices()}")
-    if is_distributed:
-        print(f"[Rank {rank}] All devices: {jax.devices()}")
-
-    enable_x64 = os.environ.get("JAX_ENABLE_X64", "0").strip().lower() in ("1", "true")
-    jax.config.update("jax_enable_x64", enable_x64)
-
-    return is_distributed, rank, world_size
-
-
-# Initialize JAX distributed FIRST, before any other imports that use JAX
-_IS_DISTRIBUTED, _RANK, _WORLD_SIZE = _initialize_jax_distributed()
-
-# =============================================================================
-# Now safe to import modules that use JAX
-# =============================================================================
-
-import sys
 import copy
 import pickle
 import time
 import json
-from pathlib import Path
+import jax
 import numpy as np
 import jax.numpy as jnp
-from jax.experimental import multihost_utils
 from jax_sgmc.data.numpy_loader import NumpyDataLoader
 from chemtrain.data.data_loaders import DataLoaders
 
@@ -212,6 +31,8 @@ from models.combined_model import CombinedModel
 from training.prior_residual import apply_prior_force_residual_targets, pretrain_prior_for_residual
 from training.trainer import Trainer
 from training.dsm import add_dsm_noise_fields, dsm_enabled
+from training.diagnostics import find_training_log, write_dataset_summary
+from training.path_utils import repo_root_from_file, resolve_from_config_or_repo
 from export.exporter import ModelExporter
 from analysis_tests.visualizer import LossPlotter
 from utils.logging import data_logger, model_logger, training_logger, export_logger
@@ -219,9 +40,7 @@ import logging
 
 
 def _sync_all_ranks(tag: str) -> None:
-    """Synchronize all distributed ranks at a named barrier."""
-    if _WORLD_SIZE > 1:
-        multihost_utils.sync_global_devices(tag)
+    sync_all_ranks(_DISTRIBUTED, tag)
 
 
 def _make_export_model(
@@ -354,108 +173,6 @@ def _shuffle_dataset_for_split(dataset: dict, seed: int) -> dict:
         seed,
     )
     return shuffled
-
-
-def _log_dataset_protein_debug(
-    *,
-    dataset: dict,
-    id_to_aa: Optional[Dict[int, str]],
-    dataset_path: Path,
-    export_dir: Path,
-) -> None:
-    """Log protein-level bead stats and species frequencies for debugging."""
-    if "mask" not in dataset or "species" not in dataset:
-        return
-
-    mask = np.asarray(dataset["mask"], dtype=np.float32) > 0
-    species = np.asarray(dataset["species"], dtype=np.int32)
-    n_frames = int(mask.shape[0])
-    n_valid = np.asarray(np.sum(mask, axis=1), dtype=np.int32)
-
-    source_name = dataset.get("source_name")
-    if source_name is None:
-        source_name = np.full((n_frames,), dataset_path.stem, dtype=object)
-    else:
-        source_name = np.asarray(source_name)
-        if source_name.shape[0] != n_frames:
-            source_name = np.full((n_frames,), dataset_path.stem, dtype=object)
-    source_name = source_name.astype(str)
-
-    valid_species = species[mask]
-    if valid_species.size == 0:
-        data_logger.warning("[DataDebug] No valid beads found; skipping protein/species summary.")
-        return
-
-    species_ids, species_counts = np.unique(valid_species, return_counts=True)
-    species_summary = []
-    for sid, count in zip(species_ids.tolist(), species_counts.tolist()):
-        label = id_to_aa.get(int(sid), f"id{int(sid)}") if id_to_aa else f"id{int(sid)}"
-        species_summary.append(
-            {
-                "species_id": int(sid),
-                "label": str(label),
-                "count": int(count),
-            }
-        )
-
-    data_logger.info(
-        "[DataDebug] Global valid bead count=%d across %d frames (mean_valid_beads=%.2f).",
-        int(valid_species.size),
-        n_frames,
-        float(np.mean(n_valid)),
-    )
-    data_logger.info(
-        "[DataDebug] Global species counts: %s",
-        ", ".join(
-            f"{row['species_id']}:{row['label']}={row['count']}" for row in species_summary
-        ),
-    )
-
-    proteins = np.unique(source_name)
-    protein_rows = []
-    for protein in proteins.tolist():
-        protein_mask = source_name == protein
-        frame_count = int(np.sum(protein_mask))
-        if frame_count == 0:
-            continue
-        valid_per_frame = n_valid[protein_mask]
-        protein_species = species[protein_mask][mask[protein_mask]]
-        ps_ids, ps_counts = np.unique(protein_species, return_counts=True)
-        per_species = {
-            str(int(sid)): int(count)
-            for sid, count in zip(ps_ids.tolist(), ps_counts.tolist())
-        }
-        protein_rows.append(
-            {
-                "protein": str(protein),
-                "frames": frame_count,
-                "beads_per_frame_min": int(np.min(valid_per_frame)),
-                "beads_per_frame_mean": float(np.mean(valid_per_frame)),
-                "beads_per_frame_max": int(np.max(valid_per_frame)),
-                "total_valid_beads": int(np.sum(valid_per_frame, dtype=np.int64)),
-                "species_counts": per_species,
-            }
-        )
-        data_logger.info(
-            "[DataDebug][Protein] name=%s frames=%d beads/frame(min/mean/max)=%d/%.1f/%d total_valid_beads=%d",
-            protein,
-            frame_count,
-            int(np.min(valid_per_frame)),
-            float(np.mean(valid_per_frame)),
-            int(np.max(valid_per_frame)),
-            int(np.sum(valid_per_frame, dtype=np.int64)),
-        )
-
-    summary = {
-        "dataset_path": str(dataset_path),
-        "n_frames": n_frames,
-        "global_valid_beads": int(valid_species.size),
-        "global_species_counts": species_summary,
-        "proteins": protein_rows,
-    }
-    out_path = export_dir / "dataset_debug_summary.json"
-    out_path.write_text(json.dumps(summary, indent=2))
-    data_logger.info("[DataDebug] Wrote dataset summary: %s", out_path)
 
 
 def _validate_tiled_mode_constraints(config: ConfigManager) -> None:
@@ -1150,21 +867,18 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     config.save(config_path)
     training_logger.info(f"[Config] Saved to: {config_path}")
 
-    # ===== Load and preprocess data =====
     logging.info("\n" + "=" * 60)
     logging.info("LOADING DATA")
     logging.info("=" * 60)
 
-    # Resolve data path relative to clean_code_base directory if it's relative
     data_path = config.get_data_path()
-    data_path_obj = Path(data_path)
-
-    if not data_path_obj.is_absolute():
-        # Get the directory where this script is located (clean_code_base/scripts)
-        script_dir = Path(__file__).parent
-        clean_code_base_dir = script_dir.parent
-        data_path_obj = clean_code_base_dir / data_path
-        data_logger.info(f"Resolved relative path: {data_path} -> {data_path_obj}")
+    data_path_obj = resolve_from_config_or_repo(
+        data_path,
+        config.config_path,
+        repo_root_from_file(__file__),
+    )
+    if Path(data_path) != data_path_obj:
+        data_logger.info("Resolved data.path: %s -> %s", data_path, data_path_obj)
 
     # Guard against accidentally using bucketed data with the single-dataset path.
     if data_path_obj.is_dir():
@@ -1176,12 +890,10 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
                 f"{data_path_obj} [job_id]"
             )
 
-    # Load dataset (shuffling and limiting frames happens in constructor)
     max_frames = config.get_max_frames()
     seed = config.get_seed()
     loader = DatasetLoader(str(data_path_obj), max_frames=max_frames, seed=seed)
 
-    # Get dataset info
     N_max = loader.N_max
     species0 = loader.species[0]
     n_species_global = int(np.max(loader.species)) + 1
@@ -1191,7 +903,6 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     data_logger.info(f"Species: {species0}")
     data_logger.info(f"Total frames: {len(loader)}")
 
-    # ===== Compute box from data =====
     cutoff = config.get_cutoff()
     buffer_mult = config.get_buffer_multiplier()
     park_mult = config.get_park_multiplier()
@@ -1201,10 +912,8 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         park_multiplier=park_mult
     )
 
-    # Compute box extent from all data
     extent, R_shift = preprocessor.compute_box_extent(loader.R, loader.mask)
 
-    # Preprocess all coordinates
     dataset = loader.get_all()
     dataset["R"] = preprocessor.center_and_park(dataset["R"], dataset["mask"], extent, R_shift)
 
@@ -1224,7 +933,7 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         park_mult=park_mult,
         fitted_params=fitted_prior_params,
     )
-    _log_dataset_protein_debug(
+    write_dataset_summary(
         dataset=dataset,
         id_to_aa=loader.id_to_aa,
         dataset_path=data_path_obj,
@@ -1477,42 +1186,12 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     logging.info("GENERATING PLOTS")
     logging.info("=" * 60)
 
-    # Resolve training log from canonical run directories first, then legacy fallbacks.
-    log_file = None
-    log_candidates = []
-    log_name = f"train_{job_id}.log"
-
-    run_output_dir = Path(config.get_output_dir())
-    run_slurm_dir = Path(config.get_slurm_dir())
-    run_dir_from_export = export_dir.parent
-
-    for base in (run_output_dir, run_slurm_dir, run_dir_from_export):
-        log_candidates.extend(
-            [
-                base / log_name,
-                base / f"slurm-{job_id}.out",
-                base / f"slurm-{job_id}.err",
-            ]
-        )
-
-    log_candidates.extend(
-        [
-            Path("outputs") / log_name,
-            Path(log_name),
-            Path("outputs") / f"slurm-{job_id}.out",
-            Path(f"slurm-{job_id}.out"),
-        ]
+    log_file = find_training_log(
+        job_id=job_id,
+        output_dir=Path(config.get_output_dir()),
+        slurm_dir=Path(config.get_slurm_dir()),
+        export_dir=export_dir,
     )
-
-    seen = set()
-    for candidate in log_candidates:
-        resolved = candidate.resolve(strict=False)
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        if candidate.exists():
-            log_file = candidate
-            break
 
     if log_file is not None:
         plotter = LossPlotter(str(log_file), config=config)
@@ -1589,7 +1268,6 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
     config.save(config_path)
     training_logger.info(f"[Config] Saved to: {config_path}")
 
-    # Load all buckets
     bucketed = BucketedDatasetLoader(bucket_dir, max_frames=config.get_max_frames(),
                                      seed=config.get_seed())
     training_logger.info(bucketed.summary())
@@ -1620,8 +1298,6 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
             dataset["R"], dataset["mask"], extent, R_shift
         )
 
-        # pretrain_prior + prior_residual is not supported in multi-protein mode
-        # (each bucket is a different protein with different N_max/topology).
         if config.pretrain_prior_enabled() and config.prior_residual_enabled():
             training_logger.warning(
                 "[PriorResidual] pretrain_prior=true is not supported in multi-protein "
@@ -1643,7 +1319,6 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
         )
         box = extent
 
-        # Data loaders
         split_seed = int(config.get_seed()) + int(bucket_idx)
         dataset = _shuffle_dataset_for_split(dataset, seed=split_seed)
 
@@ -1744,7 +1419,7 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
             "mask": jnp.asarray(train_split["mask"]),
             "species": jnp.asarray(train_split["species"]),
             "force_loss_mask": jnp.asarray(train_split["force_loss_mask"]),
-        "force_loss_weights": jnp.asarray(train_split["force_loss_weights"]),
+            "force_loss_weights": jnp.asarray(train_split["force_loss_weights"]),
         }
         if "segment_id" in train_split:
             train_data["segment_id"] = jnp.asarray(train_split["segment_id"])
@@ -1759,7 +1434,6 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
             tiled_train_source=tiled_train_source,
         )
 
-        # Warm-start from previous bucket's params
         if prev_params is not None:
             trainer.params = prev_params
             trainer.best_params = prev_params
@@ -1773,11 +1447,7 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
 
         training_logger.info(f"Bucket {bucket_idx} done: {results}")
 
-    # Export using final bucket's params (largest N_max)
     final_n_max, final_loader = bucketed.buckets[-1]
-    # Use the model-initialization species vector from the last bucket.
-    # In tiled mode this carries the tiled particle axis; in standard mode it
-    # is identical to final_loader.species[0].
     final_species0 = species0
 
     training_logger.info(f"\nExporting model (N_max={final_n_max})…")

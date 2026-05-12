@@ -12,29 +12,20 @@ from typing import Dict, Any, Optional, Union
 
 
 class ConfigManager:
-    """
-    Manages configuration for training, models, and system parameters.
+    """Load and access training configuration."""
 
-    Loads YAML configuration files and provides convenient accessor methods
-    with default values and type checking.
-
-    Example:
-        >>> config = ConfigManager("config.yaml")
-        >>> cutoff = config.get_model_param("cutoff", default=10.0)
-        >>> batch_size = config.get_training_param("batch_per_device", default=4)
-    """
+    ML_MODEL_ALIASES = {
+        "allegro": "allegro",
+        "allegro_cueq": "allegro_cueq",
+        "allegro_cueq_opt": "allegro_cueq",
+        "allegro_cueq_b1": "allegro_cueq",
+        "allegro_cueq_fast": "allegro_cueq_fast",
+        "allegro_cueq_fast_1103": "allegro_cueq_fast",
+        "mace": "mace",
+        "painn": "painn",
+    }
 
     def __init__(self, config_path: Union[str, Path]):
-        """
-        Load configuration from YAML file.
-
-        Args:
-            config_path: Path to YAML configuration file
-
-        Raises:
-            FileNotFoundError: If config file doesn't exist
-            yaml.YAMLError: If config file is not valid YAML
-        """
         self.config_path = Path(config_path)
         if not self.config_path.exists():
             raise FileNotFoundError(f"Config file not found: {config_path}")
@@ -45,12 +36,6 @@ class ConfigManager:
         self._validate_config()
 
     def _validate_config(self):
-        """
-        Validate that required configuration sections exist.
-
-        Raises:
-            ValueError: If required sections are missing
-        """
         required_sections = ['data', 'model', 'training', 'optimizer']
         missing = [s for s in required_sections if s not in self._config]
         if missing:
@@ -69,20 +54,6 @@ class ConfigManager:
         d[keys[-1]] = value
 
     def get(self, *keys: str, default: Any = None) -> Any:
-        """
-        Get nested config value by keys.
-
-        Args:
-            *keys: Sequence of keys to traverse (e.g., "model", "cutoff")
-            default: Default value if key path doesn't exist
-
-        Returns:
-            Configuration value or default
-
-        Example:
-            >>> config.get("model", "cutoff", default=10.0)
-            12.0
-        """
         value = self._config
         for key in keys:
             if isinstance(value, dict) and key in value:
@@ -90,10 +61,6 @@ class ConfigManager:
             else:
                 return default
         return value
-
-    # ===== Convenience Accessors =====
-
-    # ----- Debug Section -----
 
     @staticmethod
     def _env_bool(var: str) -> Optional[bool]:
@@ -124,8 +91,6 @@ class ConfigManager:
     def debug_model_logging(self) -> bool:
         return bool(self.get("debug", "model_logging", default=False))
 
-    # ----- General -----
-
     def get_seed(self) -> int:
         return self.get("seed", default=42)
 
@@ -134,8 +99,6 @@ class ConfigManager:
 
     def get_model_id(self) -> str:
         return self.get("model_id", default="default")
-
-    # ----- Data Section -----
 
     def get_data_path(self) -> str:
         return self.get("data", "path", default=None)
@@ -506,6 +469,15 @@ class ConfigManager:
             )
         return raw
 
+    def get_dsm_refresh_interval_steps(self) -> int:
+        value = int(self.get("training", "dsm", "refresh_interval_steps", default=0))
+        if value < 0:
+            raise ValueError(
+                "training.dsm.refresh_interval_steps must be >= 0, "
+                f"got {value}."
+            )
+        return value
+
     def prior_residual_enabled(self) -> bool:
         """Residual mode: F_target = F_ref - F_prior (precomputed)."""
         return bool(self.get("training", "prior_residual", "enabled", default=False))
@@ -664,33 +636,11 @@ class ConfigManager:
         return self.get("model", "prior_only", default=False)
 
     def get_ml_model_type(self) -> str:
-        """
-        Get which ML model backbone to use.
-
-        Returns:
-            Canonical model type:
-            - "allegro"
-            - "allegro_cueq"
-            - "allegro_cueq_fast"
-            - "mace"
-            - "painn"
-        """
         raw = str(self.get("model", "ml_model", default="allegro"))
         normalized = raw.strip().lower().replace("-", "_")
-
-        aliases = {
-            "allegro": "allegro",
-            "allegro_cueq": "allegro_cueq",
-            "allegro_cueq_opt": "allegro_cueq",
-            "allegro_cueq_b1": "allegro_cueq",
-            "allegro_cueq_fast": "allegro_cueq_fast",
-            "allegro_cueq_fast_1103": "allegro_cueq_fast",
-            "mace": "mace",
-            "painn": "painn",
-        }
-        canonical = aliases.get(normalized)
+        canonical = self.ML_MODEL_ALIASES.get(normalized)
         if canonical is None:
-            allowed = ", ".join(sorted(aliases.keys()))
+            allowed = ", ".join(sorted(self.ML_MODEL_ALIASES.keys()))
             raise ValueError(
                 f"Unsupported model.ml_model='{raw}'. "
                 f"Expected one of: {allowed}"

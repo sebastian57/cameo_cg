@@ -7,7 +7,7 @@ from pathlib import Path
 
 KCAL_MOL_TO_EV = 0.04336425351090843
 
-# Logger — matches clean_code_base [Name] format from utils/logging.py
+# Logger matches the shared utils/logging.py format.
 logger = logging.getLogger("H5Transform")
 logger.propagate = False
 _handler = logging.StreamHandler(sys.stdout)

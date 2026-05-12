@@ -324,6 +324,22 @@ class AllegroModelCuEq(BaseMLModel):
             mlp_dtype=self.mlp_dtype,
             **self.allegro_config,
         )
+        if ml_model_type == "allegro_cueq_fast":
+            _, self.apply_allegro_al_features = allegro_neighborlist_pp(
+                displacement=self.displacement,
+                r_cutoff=self.cutoff,
+                n_species=self.n_species,
+                positions_test=R0_safe,
+                neighbor_test=self.nbrs_init,
+                max_edge_multiplier=self.max_edge_multiplier,
+                max_edges=self.max_edges,
+                mode="al_features",
+                logging=enable_logging,
+                mlp_dtype=self.mlp_dtype,
+                **self.allegro_config,
+            )
+        else:
+            self.apply_allegro_al_features = None
 
         self._apply_allegro_for_training = self.apply_allegro
         if self.remat_level > 0:
@@ -510,6 +526,62 @@ class AllegroModelCuEq(BaseMLModel):
             species,
             neighbor,
             segment_id=segment_id,
+        )
+
+    def compute_al_features(
+        self,
+        params: Any,
+        R: jax.Array,
+        mask: jax.Array,
+        species: jax.Array,
+        neighbor: Optional[Any] = None,
+        segment_id: Optional[jax.Array] = None,
+    ) -> dict[str, jax.Array]:
+        """Return final invariant edge features for active-learning scoring."""
+        if self.apply_allegro_al_features is None:
+            raise NotImplementedError(
+                "Active-learning feature extraction is currently implemented "
+                "for ml_model='allegro_cueq_fast' only."
+            )
+
+        valid_mask = mask > 0
+        R_base = jnp.asarray(R, dtype=self.compute_dtype)
+
+        if neighbor is None:
+            base_nbrs = self.nbrs_init
+            ref_position = getattr(base_nbrs, "reference_position", None)
+            target_dtype = getattr(ref_position, "dtype", self.compute_dtype)
+            nbrs = self.nneigh_fn.update(
+                jnp.asarray(R_base, dtype=target_dtype),
+                base_nbrs,
+                mask=valid_mask.astype(jnp.bool_),
+            )
+        else:
+            nbr_error = getattr(neighbor, "error", None)
+            if nbr_error is None:
+                nbrs = neighbor
+            else:
+                ref_position = getattr(neighbor, "reference_position", None)
+                target_dtype = getattr(ref_position, "dtype", self.compute_dtype)
+                nbrs = self.nneigh_fn.update(
+                    jnp.asarray(R_base, dtype=target_dtype),
+                    neighbor,
+                    mask=valid_mask.astype(jnp.bool_),
+                )
+
+        nbrs = custom_partition.mask_neighbor_list(
+            nbrs,
+            mask=valid_mask.astype(jnp.bool_),
+            segment_id=jnp.asarray(segment_id, dtype=jnp.int32) if segment_id is not None else None,
+        )
+
+        species_masked = jnp.where(valid_mask, species, 0).astype(jnp.int32)
+        return self.apply_allegro_al_features(
+            params,
+            jnp.asarray(R_base, dtype=self.compute_dtype),
+            nbrs,
+            species_masked,
+            mask=valid_mask.astype(jnp.bool_),
         )
 
     @property

@@ -4,21 +4,11 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-task=4
-#SBATCH --time=10:00:00
+#SBATCH --time=20:00:00
 #SBATCH --partition=booster
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
 
-# =============================================================================
-# Unified SLURM script for training (single run or array suite)
-# =============================================================================
-#
-# ARCHITECTURE:
-#   - 1 process per NODE (not per GPU!)
-#   - Each process sees 4 local GPUs
-#   - chemtrain uses pmap internally to distribute across local GPUs
-#   - JAX distributed coordinates gradient sync across NODES
-#
 # Usage:
 #   Single-run:
 #     sbatch scripts/run_training.sh config.yaml
@@ -36,9 +26,6 @@
 #     sbatch --array 0-N%4 \
 #       --export=ALL,CONFIG_LIST_FILE=manifest.txt,PARENT_OUTPUT_DIR=... \
 #       scripts/run_training.sh
-#
-# =============================================================================
-
 set -Eeuo pipefail
 
 RUN_TRAINING_TRACE="${RUN_TRAINING_TRACE:-0}"
@@ -413,12 +400,14 @@ if [[ ${SLURM_NNODES:-1} -gt 1 ]]; then
     
         COORD_CANDIDATES=("${COORD_NODE}")
         
-        # Try DNS suffixes for this cluster (adjust if needed for your site)
-        for host_suffix in "${COORD_NODE}i.juwels" "${COORD_NODE}.juwels"; do
+        IFS=':' read -r -a COORD_SUFFIXES <<< "${CHEMTRAIN_COORDINATOR_HOST_SUFFIXES:-}"
+        for suffix in "${COORD_SUFFIXES[@]}"; do
+            [[ -z "${suffix}" ]] && continue
+            host_suffix="${COORD_NODE}${suffix}"
             COORD_IP_GETENT="$(getent ahostsv4 "${host_suffix}" 2>/dev/null | awk 'NR==1 {print $1}' || true)"
             if [[ -n "${COORD_IP_GETENT}" ]]; then
                 COORD_CANDIDATES+=("${host_suffix}" "${COORD_IP_GETENT}")
-                break  # If DNS works, use that
+                break
             fi
         done
         
@@ -529,7 +518,7 @@ echo "Config:       ${RUNTIME_CONFIG}"
 echo "Run dir:      ${RUN_OUTPUT_DIR}"
 echo "Job tag:      ${JOB_TAG}"
 echo "Nodes:        ${SLURM_NNODES:-1}"
-echo "GPUs/node:    4"
+echo "GPUs/task:    ${SLURM_GPUS_PER_TASK:-${SLURM_GPUS_ON_NODE:-unknown}}"
 echo "Grad accum:   ${CHEMTRAIN_GRAD_ACCUM_STEPS} (${CHEMTRAIN_GRAD_ACCUM_MODE})"
 echo "============================================================"
 

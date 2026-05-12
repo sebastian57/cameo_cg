@@ -7,7 +7,7 @@
 # node allocation even when the script only uses CUDA_VISIBLE_DEVICES=0.
 #SBATCH --gpus-per-task=4
 #SBATCH --time=01:00:00
-#SBATCH --partition=develbooster
+#SBATCH --partition=booster
 #SBATCH --output=slurm-reexport-%j.out
 
 # =============================================================================

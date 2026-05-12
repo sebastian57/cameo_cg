@@ -33,7 +33,7 @@ from jax_md import space
 jax.config.update("jax_enable_x64", False)
 import jax.numpy as jnp
 
-# Logger — matches clean_code_base [Name] format from utils/logging.py
+# Logger matches the shared utils/logging.py format.
 logger = logging.getLogger("PriorFit")
 logger.propagate = False
 _handler = logging.StreamHandler(sys.stdout)

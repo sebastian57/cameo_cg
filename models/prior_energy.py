@@ -238,6 +238,17 @@ def _stickiness_alpha_from_free(
     return alpha
 
 
+def _same_segment_mask(indices: jax.Array, segment_id: Optional[jax.Array]) -> jax.Array:
+    """Return true where all topology indices belong to the same packed segment."""
+    if segment_id is None:
+        return jnp.ones((indices.shape[0],), dtype=jnp.bool_)
+    segment_id = jnp.asarray(segment_id, dtype=jnp.int32)
+    seg = segment_id[indices]
+    valid = jnp.all(seg >= 0, axis=1)
+    same = jnp.all(seg == seg[:, :1], axis=1)
+    return valid & same
+
+
 def compute_dh_energy(
     R: jax.Array,
     mask: jax.Array,
@@ -248,6 +259,7 @@ def compute_dh_energy(
     k_dh: jax.Array,
     lambda_d: jax.Array,
     w_by_sep: jax.Array,
+    segment_id: Optional[jax.Array] = None,
 ) -> jax.Array:
     """Debye-Huckel energy over a pair set."""
     if pairs.shape[0] == 0:
@@ -255,6 +267,7 @@ def compute_dh_energy(
 
     pi, pj = pairs[:, 0], pairs[:, 1]
     valid = (mask[pi] * mask[pj]) > 0
+    valid = valid & _same_segment_mask(pairs, segment_id)
 
     dR = R[pi] - R[pj]
     r = _safe_norm(dR)
@@ -285,6 +298,7 @@ def compute_stickiness_energy(
     alpha: jax.Array,
     r0: jax.Array,
     sigma: jax.Array,
+    segment_id: Optional[jax.Array] = None,
 ) -> jax.Array:
     """Typed nonbonded stickiness energy over a pair set."""
     if pairs.shape[0] == 0:
@@ -292,6 +306,7 @@ def compute_stickiness_energy(
 
     pi, pj = pairs[:, 0], pairs[:, 1]
     valid = (mask[pi] * mask[pj]) > 0
+    valid = valid & _same_segment_mask(pairs, segment_id)
 
     dR = R[pi] - R[pj]
     r = _safe_norm(dR)
@@ -321,6 +336,7 @@ def compute_salt_bridge_energy(
     delta_sb: jax.Array,
     r0_sb: jax.Array,
     sigma_sb: jax.Array,
+    segment_id: Optional[jax.Array] = None,
 ) -> jax.Array:
     """Short-range salt-bridge correction for opposite-charge pairs."""
     if pairs.shape[0] == 0:
@@ -328,6 +344,7 @@ def compute_salt_bridge_energy(
 
     pi, pj = pairs[:, 0], pairs[:, 1]
     valid = (mask[pi] * mask[pj]) > 0
+    valid = valid & _same_segment_mask(pairs, segment_id)
 
     dR = R[pi] - R[pj]
     r = _safe_norm(dR)
@@ -358,6 +375,7 @@ def compute_fene_energy(
     k: jax.Array,
     wall_energy: jax.Array,
     eps: jax.Array,
+    segment_id: Optional[jax.Array] = None,
 ) -> jax.Array:
     """FENE energy for consecutive sequence bonds."""
     if bonds.shape[0] == 0:
@@ -365,6 +383,7 @@ def compute_fene_energy(
 
     bi, bj = bonds[:, 0], bonds[:, 1]
     valid = (mask[bi] * mask[bj]) > 0
+    valid = valid & _same_segment_mask(bonds, segment_id)
 
     dR = R[bi] - R[bj]
     r = _safe_norm(dR)
@@ -393,6 +412,7 @@ def compute_leash_energy(
     pairs: jax.Array,
     d_safe: jax.Array,
     k_safe: jax.Array,
+    segment_id: Optional[jax.Array] = None,
 ) -> jax.Array:
     """Flat-bottom pair-distance leash energy."""
     if pairs.shape[0] == 0:
@@ -400,6 +420,7 @@ def compute_leash_energy(
 
     pi, pj = pairs[:, 0], pairs[:, 1]
     valid = (mask[pi] * mask[pj]) > 0
+    valid = valid & _same_segment_mask(pairs, segment_id)
 
     dR = R[pi] - R[pj]
     r = _safe_norm(dR)
@@ -925,7 +946,8 @@ class PriorEnergy:
         self,
         R: jax.Array,
         mask: jax.Array,
-        params: Optional[Dict[str, jax.Array]] = None
+        params: Optional[Dict[str, jax.Array]] = None,
+        segment_id: Optional[jax.Array] = None,
     ) -> jax.Array:
         """
         Compute bond stretching energy.
@@ -947,6 +969,7 @@ class PriorEnergy:
 
         # Mask: both atoms must be valid
         bond_valid = (mask[bi] * mask[bj]) > 0
+        bond_valid = bond_valid & _same_segment_mask(self.bonds, segment_id)
 
         # Compute distances (free-space: displacement is subtraction)
         dR = Ri - Rj
@@ -967,7 +990,8 @@ class PriorEnergy:
         R: jax.Array,
         mask: jax.Array,
         species: Optional[jax.Array] = None,
-        params: Optional[Dict[str, jax.Array]] = None
+        params: Optional[Dict[str, jax.Array]] = None,
+        segment_id: Optional[jax.Array] = None,
     ) -> jax.Array:
         """
         Compute angle bending energy.
@@ -989,6 +1013,7 @@ class PriorEnergy:
 
         # Mask: all three atoms must be valid
         angle_valid = (mask[ia] * mask[ib] * mask[ic]) > 0
+        angle_valid = angle_valid & _same_segment_mask(self.angles, segment_id)
 
         # Compute angles
         theta = _compute_angles(R, self.angles, self.displacement)
@@ -1027,7 +1052,8 @@ class PriorEnergy:
         self,
         R: jax.Array,
         mask: jax.Array,
-        params: Optional[Dict[str, jax.Array]] = None
+        params: Optional[Dict[str, jax.Array]] = None,
+        segment_id: Optional[jax.Array] = None,
     ) -> jax.Array:
         """
         Compute soft-sphere repulsive energy for non-bonded pairs.
@@ -1047,6 +1073,7 @@ class PriorEnergy:
 
         # Mask: both atoms must be valid
         rep_valid = (mask[pi] * mask[pj]) > 0
+        rep_valid = rep_valid & _same_segment_mask(self.rep_pairs, segment_id)
 
         # Compute distances (free-space: displacement is subtraction)
         Rp_i, Rp_j = R[pi], R[pj]
@@ -1075,7 +1102,8 @@ class PriorEnergy:
         self,
         R: jax.Array,
         mask: jax.Array,
-        params: Optional[Dict[str, jax.Array]] = None
+        params: Optional[Dict[str, jax.Array]] = None,
+        segment_id: Optional[jax.Array] = None,
     ) -> jax.Array:
         """
         Compute soft excluded volume for nearby residues (sequence separation 2-5).
@@ -1103,6 +1131,7 @@ class PriorEnergy:
 
         # Mask: both atoms must be valid
         ex_valid = (mask[pi] * mask[pj]) > 0
+        ex_valid = ex_valid & _same_segment_mask(self.excluded_vol_pairs, segment_id)
 
         Rp_i, Rp_j = R[pi], R[pj]
         dR_ex = Rp_i - Rp_j
@@ -1125,7 +1154,8 @@ class PriorEnergy:
         self,
         R: jax.Array,
         mask: jax.Array,
-        params: Optional[Dict[str, jax.Array]] = None
+        params: Optional[Dict[str, jax.Array]] = None,
+        segment_id: Optional[jax.Array] = None,
     ) -> jax.Array:
         """
         Compute a zero-above-cutoff WCA clash-guard energy.
@@ -1141,6 +1171,7 @@ class PriorEnergy:
 
         pi, pj = self.wca_pairs[:, 0], self.wca_pairs[:, 1]
         valid = (mask[pi] * mask[pj]) > 0
+        valid = valid & _same_segment_mask(self.wca_pairs, segment_id)
 
         dR = R[pi] - R[pj]
         r = _safe_norm(dR)
@@ -1163,6 +1194,7 @@ class PriorEnergy:
         R: jax.Array,
         mask: jax.Array,
         params: Optional[Dict[str, jax.Array]] = None,
+        segment_id: Optional[jax.Array] = None,
     ) -> jax.Array:
         """Compute FENE safety bonds for consecutive residues."""
         p = params if params is not None else self.params
@@ -1175,6 +1207,7 @@ class PriorEnergy:
             k=p["fene_k"],
             wall_energy=p["fene_wall_energy"],
             eps=p["fene_eps"],
+            segment_id=segment_id,
         )
 
     def compute_leash_energy(
@@ -1182,6 +1215,7 @@ class PriorEnergy:
         R: jax.Array,
         mask: jax.Array,
         params: Optional[Dict[str, jax.Array]] = None,
+        segment_id: Optional[jax.Array] = None,
     ) -> jax.Array:
         """Compute flat-bottom pair-distance leash energy."""
         p = params if params is not None else self.params
@@ -1191,6 +1225,7 @@ class PriorEnergy:
             pairs=self.leash_pairs,
             d_safe=p["leash_d_safe"],
             k_safe=p["leash_k_safe"],
+            segment_id=segment_id,
         )
 
     def compute_dh_energy(
@@ -1199,6 +1234,7 @@ class PriorEnergy:
         mask: jax.Array,
         species: Optional[jax.Array] = None,
         params: Optional[Dict[str, jax.Array]] = None,
+        segment_id: Optional[jax.Array] = None,
     ) -> jax.Array:
         """Compute Debye-Huckel energy for configured local sequence pairs."""
         if not self.dh_enabled:
@@ -1222,6 +1258,7 @@ class PriorEnergy:
             k_dh=p["k_DH"],
             lambda_d=p["lambda_D"],
             w_by_sep=p["dh_w_by_sep"],
+            segment_id=segment_id,
         )
 
     def compute_stickiness_energy(
@@ -1230,6 +1267,7 @@ class PriorEnergy:
         mask: jax.Array,
         species: Optional[jax.Array] = None,
         params: Optional[Dict[str, jax.Array]] = None,
+        segment_id: Optional[jax.Array] = None,
     ) -> jax.Array:
         """Compute typed nonbonded stickiness energy."""
         if not self.stickiness_enabled:
@@ -1253,6 +1291,7 @@ class PriorEnergy:
             alpha=alpha,
             r0=p["stick_r0"],
             sigma=p["stick_sigma"],
+            segment_id=segment_id,
         )
 
     def compute_salt_bridge_energy(
@@ -1261,6 +1300,7 @@ class PriorEnergy:
         mask: jax.Array,
         species: Optional[jax.Array] = None,
         params: Optional[Dict[str, jax.Array]] = None,
+        segment_id: Optional[jax.Array] = None,
     ) -> jax.Array:
         """Compute short-range salt-bridge correction energy."""
         if not self.salt_bridge_enabled:
@@ -1278,13 +1318,15 @@ class PriorEnergy:
             delta_sb=p["salt_delta"],
             r0_sb=p["salt_r0"],
             sigma_sb=p["salt_sigma"],
+            segment_id=segment_id,
         )
 
     def compute_dihedral_energy(
         self,
         R: jax.Array,
         mask: jax.Array,
-        params: Optional[Dict[str, jax.Array]] = None
+        params: Optional[Dict[str, jax.Array]] = None,
+        segment_id: Optional[jax.Array] = None,
     ) -> jax.Array:
         """
         Compute dihedral torsion energy.
@@ -1305,6 +1347,7 @@ class PriorEnergy:
 
         # Mask: all four atoms must be valid
         dih_valid = (mask[i] * mask[j] * mask[k] * mask[l]) > 0
+        dih_valid = dih_valid & _same_segment_mask(self.dihedrals, segment_id)
 
         # Compute dihedral angles
         phi = _compute_dihedrals(R, self.dihedrals, self.displacement)
@@ -1333,7 +1376,8 @@ class PriorEnergy:
         R: jax.Array,
         mask: jax.Array,
         species: Optional[jax.Array] = None,
-        params: Optional[Dict[str, jax.Array]] = None
+        params: Optional[Dict[str, jax.Array]] = None,
+        segment_id: Optional[jax.Array] = None,
     ) -> Dict[str, jax.Array]:
         """
         Compute all energy components.
@@ -1361,32 +1405,42 @@ class PriorEnergy:
         """
         # Compute raw energies
         p = params if params is not None else self.params
-        E_bond_raw = self.compute_bond_energy(R, mask, params=p)
-        E_angle_raw = self.compute_angle_energy(R, mask, species=species, params=p)
-        E_rep_raw = self.compute_repulsive_energy(R, mask, params=p)
-        E_dih_raw = self.compute_dihedral_energy(R, mask, params=p)
-        E_ex_raw = self.compute_excluded_volume_energy(R, mask, params=p)
+        E_bond_raw = self.compute_bond_energy(R, mask, params=p, segment_id=segment_id)
+        E_angle_raw = self.compute_angle_energy(
+            R, mask, species=species, params=p, segment_id=segment_id
+        )
+        E_rep_raw = self.compute_repulsive_energy(R, mask, params=p, segment_id=segment_id)
+        E_dih_raw = self.compute_dihedral_energy(R, mask, params=p, segment_id=segment_id)
+        E_ex_raw = self.compute_excluded_volume_energy(
+            R, mask, params=p, segment_id=segment_id
+        )
         E_wca_weight = self.weights.get("wca", 0.0)
         E_wca_raw = (
-            self.compute_wca_energy(R, mask, params=p)
+            self.compute_wca_energy(R, mask, params=p, segment_id=segment_id)
             if E_wca_weight != 0.0
             else jnp.array(0.0, dtype=R.dtype)
         )
         E_fene_weight = self.weights.get("fene", 0.0)
         E_fene_raw = (
-            self.compute_fene_energy(R, mask, params=p)
+            self.compute_fene_energy(R, mask, params=p, segment_id=segment_id)
             if E_fene_weight != 0.0
             else jnp.array(0.0, dtype=R.dtype)
         )
         E_leash_weight = self.weights.get("leash", 0.0)
         E_leash_raw = (
-            self.compute_leash_energy(R, mask, params=p)
+            self.compute_leash_energy(R, mask, params=p, segment_id=segment_id)
             if E_leash_weight != 0.0
             else jnp.array(0.0, dtype=R.dtype)
         )
-        E_dh_raw = self.compute_dh_energy(R, mask, species=species, params=p)
-        E_stick_raw = self.compute_stickiness_energy(R, mask, species=species, params=p)
-        E_sb_raw = self.compute_salt_bridge_energy(R, mask, species=species, params=p)
+        E_dh_raw = self.compute_dh_energy(
+            R, mask, species=species, params=p, segment_id=segment_id
+        )
+        E_stick_raw = self.compute_stickiness_energy(
+            R, mask, species=species, params=p, segment_id=segment_id
+        )
+        E_sb_raw = self.compute_salt_bridge_energy(
+            R, mask, species=species, params=p, segment_id=segment_id
+        )
 
         # Apply weights
         E_bond = self.weights["bond"] * E_bond_raw
@@ -1435,7 +1489,8 @@ class PriorEnergy:
         R: jax.Array,
         mask: jax.Array,
         species: Optional[jax.Array] = None,
-        params: Optional[Dict[str, jax.Array]] = None
+        params: Optional[Dict[str, jax.Array]] = None,
+        segment_id: Optional[jax.Array] = None,
     ) -> jax.Array:
         """
         Compute total prior energy (weighted sum of all terms).
@@ -1449,14 +1504,17 @@ class PriorEnergy:
         Returns:
             Total energy (scalar)
         """
-        return self.compute_energy(R, mask, species=species, params=params)["E_total"]
+        return self.compute_energy(
+            R, mask, species=species, params=params, segment_id=segment_id
+        )["E_total"]
 
     def compute_total_energy_from_params(
         self,
         params: Dict[str, jax.Array],
         R: jax.Array,
         mask: jax.Array,
-        species: Optional[jax.Array] = None
+        species: Optional[jax.Array] = None,
+        segment_id: Optional[jax.Array] = None,
     ) -> jax.Array:
         """
         Compute total prior energy with given parameters.
@@ -1472,7 +1530,9 @@ class PriorEnergy:
         Returns:
             Total energy (scalar)
         """
-        return self.compute_total_energy(R, mask, species=species, params=params)
+        return self.compute_total_energy(
+            R, mask, species=species, params=params, segment_id=segment_id
+        )
 
     def __repr__(self) -> str:
         mode = "spline" if self.uses_splines else "parametric"

@@ -680,11 +680,10 @@ if __name__ == "__main__":
     import argparse
     from pathlib import Path
 
-    # Add clean_code_base to path for imports when running standalone
     script_dir = Path(__file__).parent
-    clean_code_base = script_dir.parent
-    if str(clean_code_base) not in sys.path:
-        sys.path.insert(0, str(clean_code_base))
+    repo_root = script_dir.parent
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
 
     parser = argparse.ArgumentParser(description="Plot training loss curves from log files.")
     parser.add_argument("log_file", help="Path to training log file")

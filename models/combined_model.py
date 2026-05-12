@@ -96,11 +96,21 @@ class CombinedModel:
             self.prior = PriorEnergy(
                 config, self.topology, self.ml_model.displacement, id_to_aa=id_to_aa
             )
+            self._residual_dsm_prior = None
             model_logger.info(f"Mode: Prior + {self.ml_model_type.upper()}")
             model_logger.info(f"Prior weights: {self.prior.weights}")
         else:
             self.prior = None
+            self._residual_dsm_prior = (
+                PriorEnergy(config, self.topology, self.ml_model.displacement, id_to_aa=id_to_aa)
+                if config.prior_residual_enabled()
+                else None
+            )
             model_logger.info(f"Mode: Pure {self.ml_model_type.upper()} (no priors)")
+            if self._residual_dsm_prior is not None:
+                model_logger.info(
+                    "DSM residual-prior mode: DSM forces will use ML + frozen prior energy."
+                )
 
     def initialize_params(self, rng_key: jax.random.PRNGKey) -> Dict[str, Any]:
         """
@@ -153,10 +163,12 @@ class CombinedModel:
             R_masked = jnp.where(mask_3d > 0, R, R_detached)
             if self.train_priors and "prior" in params:
                 return self.prior.compute_total_energy(
-                    R_masked, mask, species=species, params=params["prior"]
+                    R_masked, mask, species=species, params=params["prior"], segment_id=segment_id
                 )
             else:
-                return self.prior.compute_total_energy(R_masked, mask, species=species)
+                return self.prior.compute_total_energy(
+                    R_masked, mask, species=species, segment_id=segment_id
+                )
 
         E_ml = self.ml_model.compute_energy(
             params['ml'], R, mask, species, neighbor, segment_id=segment_id
@@ -170,10 +182,12 @@ class CombinedModel:
             R_masked = jnp.where(mask_3d > 0, R, R_detached)
             if self.train_priors and "prior" in params:
                 E_prior = self.prior.compute_total_energy(
-                    R_masked, mask, species=species, params=params["prior"]
+                    R_masked, mask, species=species, params=params["prior"], segment_id=segment_id
                 )
             else:
-                E_prior = self.prior.compute_total_energy(R_masked, mask, species=species)
+                E_prior = self.prior.compute_total_energy(
+                    R_masked, mask, species=species, segment_id=segment_id
+                )
             return E_ml + E_prior
         else:
             return E_ml
@@ -197,6 +211,31 @@ class CombinedModel:
         """
         return self.compute_energy(
             params, R, mask, species, neighbor, segment_id=segment_id
+        )
+
+    def compute_al_features(
+        self,
+        params: Dict[str, Any],
+        R: jax.Array,
+        mask: jax.Array,
+        species: jax.Array,
+        neighbor: Optional[Any] = None,
+        segment_id: Optional[jax.Array] = None,
+    ) -> Dict[str, jax.Array]:
+        """Return ML-backbone edge features used by active-learning scoring."""
+        if self.prior_only:
+            raise ValueError("Active-learning features require an ML model.")
+        if not hasattr(self.ml_model, "compute_al_features"):
+            raise NotImplementedError(
+                f"ML model {type(self.ml_model).__name__} does not expose active-learning features."
+            )
+        return self.ml_model.compute_al_features(
+            params["ml"],
+            R,
+            mask,
+            species,
+            neighbor,
+            segment_id=segment_id,
         )
 
     def compute_components(
@@ -366,6 +405,46 @@ class CombinedModel:
                 params, R, mask, species, neighbor=neighbor, segment_id=segment_id
             )
             return E
+
+        return energy_fn
+
+    def dsm_energy_fn_template(self, params: Dict[str, Any]):
+        """
+        Energy template for DSM targets.
+
+        In ordinary ML-only or direct ML+prior training this is identical to
+        ``energy_fn_template``.  In prior-residual mode the force-matching
+        target is the residual force, but DSM should regularize the exported
+        total potential, so this template adds the frozen prior energy back in.
+        """
+        if self._residual_dsm_prior is None:
+            return self.energy_fn_template(params)
+
+        def energy_fn(R: jax.Array, neighbor: Any, **kwargs) -> jax.Array:
+            mask = kwargs["mask"]
+            species = kwargs["species"]
+            segment_id = kwargs.get("segment_id")
+
+            species = jnp.where(mask > 0, species, 0).astype(jnp.int32)
+            E_ml = self.ml_model.compute_energy(
+                params["ml"],
+                R,
+                mask,
+                species,
+                neighbor,
+                segment_id=segment_id,
+            )
+
+            R_detached = jax.lax.stop_gradient(R)
+            mask_3d = mask[:, None]
+            R_masked = jnp.where(mask_3d > 0, R, R_detached)
+            E_prior = self._residual_dsm_prior.compute_total_energy(
+                R_masked,
+                mask,
+                species=species,
+                segment_id=segment_id,
+            )
+            return E_ml + E_prior
 
         return energy_fn
 
