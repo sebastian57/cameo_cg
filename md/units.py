@@ -112,12 +112,22 @@ def to_akma(md_cfg: Dict[str, Any]) -> Dict[str, Any]:
     for field, (to_fn, _, unit_in, unit_out) in _CONVERTERS.items():
         if field not in md_cfg:
             continue
-        raw   = float(md_cfg[field])
-        akma  = to_fn(raw)
-        converted[field] = akma
-        conversions_applied.append(
-            f"  {field}: {raw:.6g} {unit_in}  →  {akma:.6g} {unit_out}"
-        )
+        raw_val = md_cfg[field]
+        if isinstance(raw_val, (list, tuple)):
+            akma = [to_fn(float(v)) for v in raw_val]
+            converted[field] = akma
+            raw_s  = "[" + ", ".join(f"{v:.6g}" for v in raw_val) + "]"
+            akma_s = "[" + ", ".join(f"{v:.6g}" for v in akma) + "]"
+            conversions_applied.append(
+                f"  {field}: {raw_s} {unit_in}  →  {akma_s} {unit_out}"
+            )
+        else:
+            raw   = float(raw_val)
+            akma  = to_fn(raw)
+            converted[field] = akma
+            conversions_applied.append(
+                f"  {field}: {raw:.6g} {unit_in}  →  {akma:.6g} {unit_out}"
+            )
 
     if conversions_applied:
         md_logger.info("[Units] Converted physical → AKMA:")

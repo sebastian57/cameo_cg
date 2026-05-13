@@ -52,7 +52,11 @@ class MDRunner:
         self.dt                = float(md_config.get("dt", 0.02045))
         self.kT                = float(md_config.get("kT", 0.5961))
         self.gamma             = float(md_config.get("gamma", 0.000977))
-        self.mass              = float(md_config.get("mass", 12.011))
+        mass_raw = md_config.get("mass", 12.011)
+        if isinstance(mass_raw, (list, tuple)):
+            self.mass: Any = [float(m) for m in mass_raw]
+        else:
+            self.mass = float(mass_raw)
         self.output_every      = int(md_config.get("output_every", 10))
 
         # Equilibration
@@ -90,9 +94,13 @@ class MDRunner:
 
         self._step_fn = jax.jit(_step_fn)
 
+        if isinstance(self.mass, list):
+            mass_str = "[" + ", ".join(f"{m:.3f}" for m in self.mass) + "] amu (per-species)"
+        else:
+            mass_str = f"{self.mass:.3f} amu"
         md_logger.info(
             f"MDRunner: integrator={self.integrator} n_steps={self.n_steps} "
-            f"dt={self.dt:.5f} AKMA kT={self.kT:.4f} kcal/mol mass={self.mass:.3f} amu"
+            f"dt={self.dt:.5f} AKMA kT={self.kT:.4f} kcal/mol mass={mass_str}"
         )
         if self.integrator == "nvt_langevin":
             md_logger.info(f"  gamma={self.gamma:.6f} AKMA^-1 (τ ≈ {1/self.gamma:.1f} AKMA)")
@@ -131,7 +139,11 @@ class MDRunner:
         valid_mask = jnp.asarray(mask > 0, dtype=jnp.bool_)
         n_valid    = int(jnp.sum(valid_mask))
         n_dof      = 3 * n_valid - 3
-        mass_arr   = jnp.full((R0.shape[0], 1), self.mass)
+        if isinstance(self.mass, list):
+            mass_table = jnp.array(self.mass, dtype=jnp.float32)  # (n_species,)
+            mass_arr   = mass_table[species][..., None]            # (N, 1)
+        else:
+            mass_arr   = jnp.full((R0.shape[0], 1), self.mass)
 
         ml   = self.model.ml_model
         nbrs = ml.nbrs_init

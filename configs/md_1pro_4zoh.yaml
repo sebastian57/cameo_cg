@@ -9,6 +9,9 @@
 md:
   units: physical               # physical (default) | akma
 
+  # ---- Model overrides ----
+  # override_use_priors: false  # set true for prior-residual models to add F_prior back at runtime
+
   # ---- Pointers ----
   training_config_path: local_work/outputs/1pro_4zoh_full/exports/1pro_4zoh_full_ml_only_config.yaml
   params_path:          local_work/outputs/1pro_4zoh_full/exports/1pro_4zoh_full_ml_only_params.pkl
@@ -30,7 +33,7 @@ md:
   dt:         1.0               # fs
   kT:         300.0             # K
   gamma:      50.0              # ps  (friction timescale τ = 1/γ)
-  mass:       12.011            # amu
+  mass:       12.011            # amu — scalar (all beads) or list [m0, m1, ...] (one per species ID in order)
 
   # ---- Trajectory output (coordinates + forces) ----
   output_dir:      local_work/md_runs/1pro_4zoh

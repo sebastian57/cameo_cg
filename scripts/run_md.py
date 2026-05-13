@@ -90,6 +90,18 @@ def main(config_file: str, job_id: str = None) -> None:
     md_logger.info(f"Training config: {training_config_path}")
     training_config = ConfigManager(str(training_config_path))
 
+    # For prior-residual models (use_priors=false, ML learned F_ref - F_prior):
+    # set override_use_priors: true to add F_prior back at MD runtime so the
+    # total force is F_ML + F_prior = F_ref.  Prior params come from the config
+    # (fixed), not the PKL.
+    if md_cfg.get("override_use_priors", False):
+        training_config.set("model", "use_priors", True)
+        training_config.set("model", "train_priors", False)
+        md_logger.info(
+            "[Config] override_use_priors=true: prior energy added to ML energy. "
+            "Use for prior-residual models (F_total = F_ML + F_prior)."
+        )
+
     # ------------------------------------------------------------------
     # 2. Load initial conditions from dataset.
     # ------------------------------------------------------------------
