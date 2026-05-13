@@ -11,6 +11,7 @@ The MD config YAML contains only an `md:` section that points to:
 All model architecture is loaded from the training config — no duplication.
 """
 
+import csv
 import os
 import sys
 import pickle
@@ -38,6 +39,20 @@ from md.dump import write_lammps_dump
 from utils.logging import md_logger
 
 
+def _project_root(config_file: str) -> Path:
+    """Resolve the project root: CAMEO_CG_PROJECT_ROOT env var, else two levels up from config."""
+    env = os.environ.get("CAMEO_CG_PROJECT_ROOT", "").strip()
+    if env:
+        return Path(env)
+    return Path(config_file).resolve().parent.parent
+
+
+def _resolve(path_str: str, root: Path) -> Path:
+    """Resolve a path: absolute paths pass through; relative paths anchor to root."""
+    p = Path(path_str)
+    return p if p.is_absolute() else (root / p)
+
+
 def main(config_file: str, job_id: str = None) -> None:
     """Run an MD simulation from a YAML config file.
 
@@ -48,6 +63,9 @@ def main(config_file: str, job_id: str = None) -> None:
     if job_id is None:
         job_id = os.environ.get("SLURM_JOB_ID", "local")
 
+    root = _project_root(config_file)
+    md_logger.info(f"Project root: {root}  (CAMEO_CG_PROJECT_ROOT={os.environ.get('CAMEO_CG_PROJECT_ROOT', 'not set')})")
+
     with open(config_file) as fh:
         md_cfg_raw = yaml.safe_load(fh)
     md_cfg = md_cfg_raw.get("md")
@@ -57,18 +75,14 @@ def main(config_file: str, job_id: str = None) -> None:
     # ------------------------------------------------------------------
     # 1. Load model architecture from the companion training config.
     # ------------------------------------------------------------------
-    training_config_path = Path(md_cfg["training_config_path"])
-    if not training_config_path.is_absolute():
-        training_config_path = Path(config_file).resolve().parent.parent / training_config_path
+    training_config_path = _resolve(md_cfg["training_config_path"], root)
     md_logger.info(f"Training config: {training_config_path}")
     training_config = ConfigManager(str(training_config_path))
 
     # ------------------------------------------------------------------
     # 2. Load initial conditions from dataset.
     # ------------------------------------------------------------------
-    dataset_path = Path(md_cfg["dataset_path"])
-    if not dataset_path.is_absolute():
-        dataset_path = Path(config_file).resolve().parent.parent / dataset_path
+    dataset_path = _resolve(md_cfg["dataset_path"], root)
 
     md_logger.info(f"Dataset: {dataset_path}")
     loader    = DatasetLoader(str(dataset_path))
@@ -114,9 +128,7 @@ def main(config_file: str, job_id: str = None) -> None:
     # ------------------------------------------------------------------
     # 4. Load trained params.
     # ------------------------------------------------------------------
-    params_path = Path(md_cfg["params_path"])
-    if not params_path.is_absolute():
-        params_path = Path(config_file).resolve().parent.parent / params_path
+    params_path = _resolve(md_cfg["params_path"], root)
     md_logger.info(f"Params: {params_path}")
     with open(params_path, "rb") as fh:
         params = pickle.load(fh)
@@ -128,9 +140,7 @@ def main(config_file: str, job_id: str = None) -> None:
     # 5. Convert physical units → AKMA, then run MD.
     # ------------------------------------------------------------------
     md_cfg = to_akma(md_cfg)
-    output_dir = Path(md_cfg.get("output_dir", "local_work/md_runs"))
-    if not output_dir.is_absolute():
-        output_dir = Path(config_file).resolve().parent.parent / output_dir
+    output_dir = _resolve(md_cfg.get("output_dir", "local_work/md_runs"), root)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     runner = MDRunner(model, params, md_cfg)
@@ -151,7 +161,33 @@ def main(config_file: str, job_id: str = None) -> None:
     )
 
     # ------------------------------------------------------------------
-    # 7. Optionally convert to LAMMPS dump for OVITO.
+    # 7. Write observables CSV.
+    # ------------------------------------------------------------------
+    obs_keys = [k for k in md_cfg.get("observables", []) if f"obs_{k}" in traj]
+    if obs_keys:
+        obs_filename = md_cfg.get(
+            "observables_filename",
+            Path(filename).stem + "_observables.csv",
+        )
+        obs_path_raw = md_cfg.get("observables_path", None)
+        if obs_path_raw:
+            obs_path = Path(obs_path_raw)
+            if not obs_path.is_absolute():
+                obs_path = output_dir / obs_path
+        else:
+            obs_path = output_dir / obs_filename
+
+        obs_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(obs_path, "w", newline="") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(obs_keys)
+            n_rows = len(traj[f"obs_{obs_keys[0]}"])
+            for i in range(n_rows):
+                writer.writerow([float(traj[f"obs_{k}"][i]) for k in obs_keys])
+        md_logger.info(f"Observables CSV: {obs_path}  ({n_rows} rows, cols: {obs_keys})")
+
+    # ------------------------------------------------------------------
+    # 8. Optionally convert to LAMMPS dump for OVITO.
     # ------------------------------------------------------------------
     if md_cfg.get("dump_for_ovito", False):
         dump_path = output_path.with_suffix(".dump")

@@ -1,7 +1,5 @@
 # MD simulation config for 1pro_4zoh (Cα CG model, 53 beads)
 #
-# Model architecture is loaded from training_config_path — nothing to repeat here.
-#
 # Units (units: physical, the default):
 #   dt      — fs   (femtoseconds)
 #   kT      — K    (Kelvin)
@@ -19,19 +17,35 @@ md:
   # ---- Initial conditions ----
   frame_idx: 0
 
+  # ---- Equilibration (steps are not recorded) ----
+  equilibrate:    false
+  n_equil_steps:  1000          # steps to discard before production
+
   # ---- Integrator ----
   integrator: nvt_langevin      # nvt_langevin | nve
-  n_steps: 10000
-  dt:    1.0                    # fs
-  kT:    300.0                  # K
-  gamma: 50.0                   # ps  (friction timescale τ = 1/γ)
-  mass:  12.011                 # amu
+  n_steps:    10000
+  dt:         1.0               # fs
+  kT:         300.0             # K
+  gamma:      50.0              # ps  (friction timescale τ = 1/γ)
+  mass:       12.011            # amu
 
-  # ---- Output ----
+  # ---- Trajectory output (coordinates + forces) ----
   output_dir:      local_work/md_runs/1pro_4zoh
   output_filename: traj_nvt_10000steps.npz
-  output_every: 50              # steps
+  output_every:    50           # save full frames every N steps
   seed: 42
+
+  # ---- Scalar observables (written to CSV) ----
+  observables_every: 10         # log scalars every N steps (can differ from output_every)
+  observables:                  # quantities to include in the CSV
+    - step
+    - T
+    - KE
+    - PE
+    - E_total
+    - pressure
+    - box_volume
+  # observables_path: ~         # null = auto: <output_dir>/<stem>_observables.csv
 
   # ---- Visualization ----
   dump_for_ovito: true          # write a .dump file alongside the NPZ

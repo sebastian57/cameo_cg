@@ -5,7 +5,7 @@ All quantities in AKMA units (Å, kcal/mol, amu); 1 AKMA time unit ≈ 48.88 fs.
 """
 
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import jax
 import jax.numpy as jnp
@@ -17,6 +17,9 @@ from utils.logging import md_logger
 
 # Boltzmann constant in kcal/mol/K (AKMA unit system)
 _kB_KCAL = 1.9872041e-3
+
+# All observable keys in the default output order.
+_ALL_OBSERVABLES = ["step", "T", "KE", "PE", "E_total", "pressure", "box_volume"]
 
 
 class MDRunner:
@@ -44,13 +47,22 @@ class MDRunner:
         self.model = model
         self.params = params
 
-        self.integrator   = str(md_config.get("integrator", "nvt_langevin"))
-        self.n_steps      = int(md_config.get("n_steps", 1000))
-        self.dt           = float(md_config.get("dt", 0.02045))
-        self.kT           = float(md_config.get("kT", 0.5961))
-        self.gamma        = float(md_config.get("gamma", 0.000977))
-        self.mass         = float(md_config.get("mass", 12.011))
-        self.output_every = int(md_config.get("output_every", 10))
+        self.integrator        = str(md_config.get("integrator", "nvt_langevin"))
+        self.n_steps           = int(md_config.get("n_steps", 1000))
+        self.dt                = float(md_config.get("dt", 0.02045))
+        self.kT                = float(md_config.get("kT", 0.5961))
+        self.gamma             = float(md_config.get("gamma", 0.000977))
+        self.mass              = float(md_config.get("mass", 12.011))
+        self.output_every      = int(md_config.get("output_every", 10))
+
+        # Equilibration
+        self.equilibrate       = bool(md_config.get("equilibrate", False))
+        self.n_equil_steps     = int(md_config.get("n_equil_steps", 0))
+
+        # Scalar observables (logged to CSV, independent cadence from trajectory)
+        self.observables_every = int(md_config.get("observables_every", self.output_every))
+        raw_obs = md_config.get("observables", _ALL_OBSERVABLES)
+        self.observables       = list(raw_obs)   # ordered list of keys to record
 
         if self.integrator not in ("nvt_langevin", "nve"):
             raise ValueError(
@@ -58,6 +70,8 @@ class MDRunner:
             )
 
         energy_fn = model.energy_fn_template(params)
+        # Cache energy_fn so _potential_energy doesn't rebuild it each call.
+        self._energy_fn = energy_fn
 
         shift_fn = model.ml_model.shift
 
@@ -76,6 +90,11 @@ class MDRunner:
         )
         if self.integrator == "nvt_langevin":
             md_logger.info(f"  gamma={self.gamma:.6f} AKMA^-1 (τ ≈ {1/self.gamma:.1f} AKMA)")
+        if self.equilibrate and self.n_equil_steps > 0:
+            md_logger.info(f"  equilibration: {self.n_equil_steps} steps (not recorded)")
+        md_logger.info(
+            f"  observables: {self.observables}  every {self.observables_every} steps"
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -88,83 +107,121 @@ class MDRunner:
         species: jax.Array,
         rng_key: jax.Array,
     ) -> Dict[str, np.ndarray]:
-        """Run the simulation and return a trajectory dictionary.
+        """Run equilibration (optional) + production and return trajectory + observables.
 
         Args:
             R0:      Initial positions, shape (N, 3).
             mask:    Validity mask, shape (N,).  1 = real atom, 0 = padding.
             species: Species IDs, shape (N,).
-            rng_key: JAX PRNGKey for momentum initialisation (NVT) or NVE.
+            rng_key: JAX PRNGKey for momentum initialisation.
 
         Returns:
-            Dict with keys:
-              R       — positions          (n_frames, N, 3)
-              F       — forces             (n_frames, N, 3)
-              KE      — kinetic energy     (n_frames,)
-              PE      — potential energy   (n_frames,)
-              T       — temperature in K   (n_frames,)
-              step    — step indices       (n_frames,)
-              box     — simulation box     (3,)
-              species — species IDs (0-indexed, constant across frames)  (N,)
-              mask    — validity mask      (N,)
+            Dict with trajectory keys (R, F, T, KE, PE, step, box, species, mask)
+            and observable keys prefixed with 'obs_' (obs_step, obs_T, obs_KE,
+            obs_PE, obs_E_total, obs_pressure, obs_box_volume — subset determined
+            by config 'observables' list).
         """
         valid_mask = jnp.asarray(mask > 0, dtype=jnp.bool_)
         n_valid    = int(jnp.sum(valid_mask))
-        n_dof      = 3 * n_valid - 3         # 3D, subtract COM translation
+        n_dof      = 3 * n_valid - 3
         mass_arr   = jnp.full((R0.shape[0], 1), self.mass)
 
-        ml = self.model.ml_model   # AllegroModelCuEq (or equivalent)
+        ml   = self.model.ml_model
         nbrs = ml.nbrs_init
 
-        # Warm-up: init state and JIT-compile.
+        # ── Compile ────────────────────────────────────────────────────
         md_logger.info("Compiling integrator (first step may be slow) …")
-        t0 = time.perf_counter()
+        t0    = time.perf_counter()
         state = self._init_fn(
-            rng_key, R0,
-            mass=mass_arr,
-            neighbor=nbrs,
-            mask=valid_mask,
-            species=species,
+            rng_key, R0, mass=mass_arr,
+            neighbor=nbrs, mask=valid_mask, species=species,
         )
-        # Force JIT compilation now, before the timed loop.
-        nbrs = ml.nneigh_fn.update(state.position, nbrs, mask=valid_mask)
+        nbrs  = ml.nneigh_fn.update(state.position, nbrs, mask=valid_mask)
         state = self._step_fn(state, neighbor=nbrs, mask=valid_mask, species=species)
         jax.block_until_ready(state.position)
         md_logger.info(f"  compilation + first step: {time.perf_counter() - t0:.1f} s")
 
-        # Re-init from scratch so step 0 is genuinely the initial frame.
+        # Re-init so we start fresh.
         rng_key, subkey = jax.random.split(rng_key)
         state = self._init_fn(
-            subkey, R0,
-            mass=mass_arr,
-            neighbor=nbrs,
-            mask=valid_mask,
-            species=species,
+            subkey, R0, mass=mass_arr,
+            neighbor=nbrs, mask=valid_mask, species=species,
         )
 
-        # Pre-allocate output lists.
-        n_frames  = self.n_steps // self.output_every + 1
-        out_R  = np.zeros((n_frames, R0.shape[0], 3), dtype=np.float32)
-        out_F  = np.zeros_like(out_R)
-        out_KE = np.zeros(n_frames, dtype=np.float32)
-        out_PE = np.zeros(n_frames, dtype=np.float32)
-        out_T  = np.zeros(n_frames, dtype=np.float32)
-        out_step = np.zeros(n_frames, dtype=np.int32)
+        # ── Equilibration (optional) ────────────────────────────────────
+        if self.equilibrate and self.n_equil_steps > 0:
+            md_logger.info(f"Equilibrating for {self.n_equil_steps} steps …")
+            t_eq = time.perf_counter()
+            for _ in range(self.n_equil_steps):
+                nbrs  = ml.nneigh_fn.update(state.position, nbrs, mask=valid_mask)
+                state = self._step_fn(state, neighbor=nbrs, mask=valid_mask, species=species)
+            jax.block_until_ready(state.position)
+            md_logger.info(
+                f"  equilibration done in {time.perf_counter() - t_eq:.1f} s"
+            )
 
-        def _record(idx, step, s, nbrs_):
-            KE = float(np.asarray(self._kinetic_energy(s)))
-            PE = float(np.asarray(self._potential_energy(s, nbrs_, valid_mask, species)))
-            T  = 2.0 * KE / (n_dof * _kB_KCAL)
+        # ── Pre-allocate trajectory arrays ──────────────────────────────
+        n_traj_frames = self.n_steps // self.output_every + 1
+        out_R    = np.zeros((n_traj_frames, R0.shape[0], 3), dtype=np.float32)
+        out_F    = np.zeros_like(out_R)
+        out_KE   = np.zeros(n_traj_frames, dtype=np.float32)
+        out_PE   = np.zeros(n_traj_frames, dtype=np.float32)
+        out_T    = np.zeros(n_traj_frames, dtype=np.float32)
+        out_step = np.zeros(n_traj_frames, dtype=np.int32)
+
+        # ── Pre-allocate observable arrays ──────────────────────────────
+        n_obs_frames  = self.n_steps // self.observables_every + 1
+        obs_buf: Dict[str, np.ndarray] = {
+            k: np.zeros(n_obs_frames, dtype=np.float32) for k in _ALL_OBSERVABLES
+        }
+        # step is integer
+        obs_buf["step"] = np.zeros(n_obs_frames, dtype=np.int32)
+
+        # ── Record helpers ──────────────────────────────────────────────
+        def _ke(s):
+            p2 = jnp.sum(s.momentum ** 2, axis=-1)
+            return float(np.asarray(
+                jnp.sum(jnp.asarray(0.5, dtype=p2.dtype) * p2 / s.mass[..., 0])
+            ))
+
+        def _pe(s, nb):
+            return float(np.asarray(
+                self._energy_fn(s.position, nb, mask=valid_mask, species=species)
+            ))
+
+        def _record_traj(idx, step, s, nb):
+            ke = _ke(s)
+            pe = _pe(s, nb)
             out_R[idx]    = np.asarray(s.position)
             out_F[idx]    = np.asarray(s.force)
-            out_KE[idx]   = KE
-            out_PE[idx]   = PE
-            out_T[idx]    = T
+            out_KE[idx]   = ke
+            out_PE[idx]   = pe
+            out_T[idx]    = 2.0 * ke / (n_dof * _kB_KCAL)
             out_step[idx] = step
 
-        # Record frame 0 (initial state — before any steps).
-        _record(0, 0, state, nbrs)
-        frame_idx = 1
+        def _record_obs(idx, step, s, nb):
+            ke = _ke(s)
+            pe = _pe(s, nb)
+            obs_buf["step"][idx]       = step
+            obs_buf["KE"][idx]         = ke
+            obs_buf["PE"][idx]         = pe
+            obs_buf["E_total"][idx]    = ke + pe
+            obs_buf["T"][idx]          = 2.0 * ke / (n_dof * _kB_KCAL)
+            if "pressure" in self.observables or "box_volume" in self.observables:
+                R_v = np.asarray(s.position)[np.asarray(valid_mask)]
+                F_v = np.asarray(s.force)[np.asarray(valid_mask)]
+                vol = self._box_volume_np(R_v)
+                obs_buf["box_volume"][idx] = vol
+                if "pressure" in self.observables:
+                    virial = float(np.sum(R_v * F_v))
+                    obs_buf["pressure"][idx] = (2.0 * ke + virial) / (3.0 * max(vol, 1e-10))
+
+        # ── Production loop ─────────────────────────────────────────────
+        # Record step 0.
+        _record_traj(0, 0, state, nbrs)
+        _record_obs(0, 0, state, nbrs)
+        traj_idx = 1
+        obs_idx  = 1
 
         t_loop = time.perf_counter()
         for step in range(1, self.n_steps + 1):
@@ -172,46 +229,59 @@ class MDRunner:
             state = self._step_fn(state, neighbor=nbrs, mask=valid_mask, species=species)
 
             if step % self.output_every == 0:
-                _record(frame_idx, step, state, nbrs)
-                frame_idx += 1
+                _record_traj(traj_idx, step, state, nbrs)
+                traj_idx += 1
+
+            if step % self.observables_every == 0:
+                _record_obs(obs_idx, step, state, nbrs)
+                obs_idx += 1
 
         elapsed = time.perf_counter() - t_loop
         md_logger.info(
             f"MD complete: {self.n_steps} steps in {elapsed:.1f} s "
-            f"({elapsed / self.n_steps * 1000:.2f} ms/step), "
-            f"T_final={out_T[frame_idx - 1]:.1f} K  "
-            f"PE_final={out_PE[frame_idx - 1]:.3f} kcal/mol"
+            f"({elapsed / self.n_steps * 1000:.2f} ms/step)  "
+            f"T_final={obs_buf['T'][obs_idx-1]:.1f} K  "
+            f"PE_final={obs_buf['PE'][obs_idx-1]:.3f} kcal/mol"
         )
 
-        # Box recorded from the model's neighbor list setup (constant for free space).
+        # ── Box (static for free-space) ─────────────────────────────────
         try:
             ref = np.asarray(ml.nbrs_init.reference_position)
             box = ref.max(axis=0) - ref.min(axis=0)
         except Exception:
             box = np.zeros(3, dtype=np.float32)
 
-        return {
-            "R":       out_R[:frame_idx],
-            "F":       out_F[:frame_idx],
-            "KE":      out_KE[:frame_idx],
-            "PE":      out_PE[:frame_idx],
-            "T":       out_T[:frame_idx],
-            "step":    out_step[:frame_idx],
+        # ── Build return dict ────────────────────────────────────────────
+        traj = {
+            "R":       out_R[:traj_idx],
+            "F":       out_F[:traj_idx],
+            "KE":      out_KE[:traj_idx],
+            "PE":      out_PE[:traj_idx],
+            "T":       out_T[:traj_idx],
+            "step":    out_step[:traj_idx],
             "box":     box,
             "species": np.asarray(species, dtype=np.int32),
             "mask":    np.asarray(mask, dtype=np.float32),
         }
 
+        # Only include requested observables, prefixed with 'obs_'.
+        for key in self.observables:
+            if key in obs_buf:
+                traj[f"obs_{key}"] = obs_buf[key][:obs_idx]
+
+        return traj
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _kinetic_energy(self, state) -> jax.Array:
-        """KE = sum_i p_i^2 / (2 m_i)."""
-        p2 = jnp.sum(state.momentum ** 2, axis=-1)         # (N,)
-        return jnp.sum(jnp.asarray(0.5, dtype=p2.dtype) * p2 / state.mass[..., 0])
-
-    def _potential_energy(self, state, nbrs, mask, species) -> jax.Array:
-        """One energy evaluation at the current positions."""
-        energy_fn = self.model.energy_fn_template(self.params)
-        return energy_fn(state.position, nbrs, mask=mask, species=species)
+    @staticmethod
+    def _box_volume_np(R_valid: np.ndarray) -> float:
+        """Bounding-box volume of valid atom positions (sss convention)."""
+        if R_valid.shape[0] == 0:
+            return 1.0
+        lo  = R_valid.min(axis=0)
+        hi  = R_valid.max(axis=0)
+        ext = hi - lo
+        # Guard against degenerate dimensions (all atoms in a plane).
+        return float(np.prod(np.where(ext > 0, ext, 1.0)))
