@@ -92,6 +92,13 @@ class CombinedModel:
         )
         model_logger.info(f"ML backbone: {self.ml_model_type}")
 
+        if config.use_pbc_enabled() and self.use_priors:
+            model_logger.warning(
+                "PBC mode is active with priors enabled. Prior bond/angle/dihedral/repulsive "
+                "distance terms use free-space (Ri - Rj) convention, which is valid when all "
+                "bonded pairs are well within box/2. Disable priors for very small periodic boxes."
+            )
+
         if self.use_priors:
             self.prior = PriorEnergy(
                 config, self.topology, self.ml_model.displacement, id_to_aa=id_to_aa

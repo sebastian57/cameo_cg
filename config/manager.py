@@ -305,6 +305,9 @@ class ConfigManager:
     def neighbor_disable_cell_list_enabled(self) -> bool:
         return bool(self.get("model", "neighbor_disable_cell_list", default=False))
 
+    def use_pbc_enabled(self) -> bool:
+        return bool(self.get("model", "pbc", default=False))
+
     def get_allegro_config(self, size: str = "default") -> Dict[str, Any]:
         """Get Allegro model hyperparameters from model.allegro,
         with cuEq-specific overrides layered on top when applicable."""

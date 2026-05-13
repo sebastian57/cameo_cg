@@ -117,10 +117,18 @@ class AllegroModel(BaseMLModel):
         )
 
         # Setup JAX-MD displacement and neighbor list
-        self.displacement, self.shift = space.free()
-
-        # Match neighbor-list math to selected compute dtype.
         safe_box = jnp.asarray(box, dtype=self.compute_dtype)
+        if config.use_pbc_enabled():
+            self.displacement, self.shift = space.periodic_general(
+                safe_box, fractional_coordinates=False
+            )
+            self._pbc = True
+            model_logger.info(
+                f"  PBC mode       = space.periodic_general, box={jax.device_get(safe_box)}"
+            )
+        else:
+            self.displacement, self.shift = space.free()
+            self._pbc = False
 
         self.nneigh_fn = custom_partition.masked_neighbor_list(
             self.displacement,

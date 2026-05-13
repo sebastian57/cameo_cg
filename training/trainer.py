@@ -1089,7 +1089,7 @@ class Trainer:
         else:
             valid_mask = jnp.asarray(mask_sample) > 0
 
-        if hasattr(ml_model, "_spread_padded_coordinates"):
+        if hasattr(ml_model, "_spread_padded_coordinates") and not getattr(ml_model, "_pbc", False):
             padded_mask = jnp.logical_not(valid_mask)
             R_safe = ml_model._spread_padded_coordinates(R_base, padded_mask)
             R_eval = jnp.where(valid_mask[:, None], R_base, jax.lax.stop_gradient(R_safe))

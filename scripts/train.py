@@ -370,6 +370,74 @@ def _estimate_avg_num_neighbors(
     return float(total_neighbors / float(total_valid_nodes))
 
 
+def _wrap_into_box(R: np.ndarray, box: np.ndarray) -> np.ndarray:
+    """Wrap coordinates into [0, box] for an orthorhombic periodic box.
+
+    Applies numpy modulo so all coordinates land in [0, L_i) for each
+    dimension i.  Does not alter padded atom coordinates — callers should
+    handle those via the mask as usual.
+    """
+    return np.mod(R, box[None, None, :]).astype(np.float32)
+
+
+def _estimate_avg_num_neighbors_pbc(
+    *,
+    R: np.ndarray,
+    mask: np.ndarray,
+    cutoff: float,
+    box: np.ndarray,           # shape (3,) orthorhombic
+    segment_id: Optional[np.ndarray] = None,
+    max_samples: int = 32,
+    seed: int = 0,
+) -> float:
+    """Estimate avg neighbors using minimum-image convention for PBC.
+
+    Identical sampling logic to _estimate_avg_num_neighbors but wraps
+    pairwise differences into [-box/2, box/2] before computing distances.
+    """
+    n_items = int(R.shape[0])
+    if n_items <= 0:
+        return 0.0
+
+    n_pick = min(n_items, max(1, int(max_samples)))
+    if n_pick == n_items:
+        sample_indices = np.arange(n_items, dtype=np.int32)
+    else:
+        rng = np.random.RandomState(seed)
+        sample_indices = np.sort(rng.choice(n_items, size=n_pick, replace=False).astype(np.int32))
+
+    box_np = np.asarray(box, dtype=np.float64)
+    cutoff_sq = float(cutoff) ** 2
+    total_neighbors = 0.0
+    total_valid_nodes = 0
+
+    for idx in sample_indices:
+        valid = np.asarray(mask[idx] > 0, dtype=bool)
+        if not np.any(valid):
+            continue
+
+        coords = np.asarray(R[idx][valid], dtype=np.float64)
+        if coords.shape[0] <= 1:
+            total_valid_nodes += int(coords.shape[0])
+            continue
+
+        diffs = coords[:, None, :] - coords[None, :, :]
+        diffs = diffs - box_np * np.round(diffs / box_np)   # minimum-image
+        dist_sq = np.sum(diffs * diffs, axis=-1)
+        within_cutoff = (dist_sq < cutoff_sq) & (dist_sq > 0.0)
+
+        if segment_id is not None:
+            seg = np.asarray(segment_id[idx][valid], dtype=np.int32)
+            within_cutoff &= seg[:, None] == seg[None, :]
+
+        total_neighbors += float(np.sum(within_cutoff))
+        total_valid_nodes += int(coords.shape[0])
+
+    if total_valid_nodes <= 0:
+        return 0.0
+    return float(total_neighbors / float(total_valid_nodes))
+
+
 def _get_runtime_allegro_config_section(config: ConfigManager) -> dict:
     """Return the config section that the active Allegro backend will read."""
     model_cfg = config._config.setdefault("model", {})
@@ -388,22 +456,44 @@ def _configure_runtime_avg_num_neighbors(
     config: ConfigManager,
     train_split: dict,
     seed: int,
+    *,
+    box: Optional[np.ndarray] = None,
 ) -> None:
-    """Estimate avg_num_neighbors from sampled training structures/tiles and pin it in config."""
+    """Estimate avg_num_neighbors from sampled training structures/tiles and pin it in config.
+
+    When box is provided and model.pbc=true, uses minimum-image convention for
+    accurate neighbor counts in periodic systems.
+    """
     ml_model_type = str(config.get_ml_model_type()).strip().lower()
     if not ml_model_type.startswith("allegro"):
         return
 
-    estimate = _estimate_avg_num_neighbors(
-        R=np.asarray(train_split["R"], dtype=np.float32),
-        mask=np.asarray(train_split["mask"], dtype=np.float32),
-        cutoff=float(config.get_cutoff()),
-        segment_id=np.asarray(train_split["segment_id"], dtype=np.int32)
-        if "segment_id" in train_split
-        else None,
-        max_samples=32,
-        seed=seed,
-    )
+    use_pbc = config.use_pbc_enabled()
+    if use_pbc and box is not None:
+        estimate = _estimate_avg_num_neighbors_pbc(
+            R=np.asarray(train_split["R"], dtype=np.float32),
+            mask=np.asarray(train_split["mask"], dtype=np.float32),
+            cutoff=float(config.get_cutoff()),
+            box=np.asarray(box, dtype=np.float64),
+            segment_id=np.asarray(train_split["segment_id"], dtype=np.int32)
+            if "segment_id" in train_split
+            else None,
+            max_samples=32,
+            seed=seed,
+        )
+        pbc_tag = "[PBC/MIC]"
+    else:
+        estimate = _estimate_avg_num_neighbors(
+            R=np.asarray(train_split["R"], dtype=np.float32),
+            mask=np.asarray(train_split["mask"], dtype=np.float32),
+            cutoff=float(config.get_cutoff()),
+            segment_id=np.asarray(train_split["segment_id"], dtype=np.int32)
+            if "segment_id" in train_split
+            else None,
+            max_samples=32,
+            seed=seed,
+        )
+        pbc_tag = ""
 
     allegro_cfg = _get_runtime_allegro_config_section(config)
     previous = allegro_cfg.get("avg_num_neighbors")
@@ -411,8 +501,9 @@ def _configure_runtime_avg_num_neighbors(
     allegro_cfg["avg_num_neighbors_source"] = "dataset_sample"
     batch_mode = config.get_batch_mode()
     training_logger.info(
-        "[RuntimeConfig] avg_num_neighbors set from sampled training %s: %.3f "
+        "[RuntimeConfig]%s avg_num_neighbors set from sampled training %s: %.3f "
         "(previous config value: %s, samples<=32).",
+        " " + pbc_tag if pbc_tag else "",
         "tiles" if batch_mode == "tiled" else "structures",
         float(estimate),
         previous,
@@ -906,16 +997,31 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     cutoff = config.get_cutoff()
     buffer_mult = config.get_buffer_multiplier()
     park_mult = config.get_park_multiplier()
-    preprocessor = CoordinatePreprocessor(
-        cutoff=cutoff,
-        buffer_multiplier=buffer_mult,
-        park_multiplier=park_mult
-    )
-
-    extent, R_shift = preprocessor.compute_box_extent(loader.R, loader.mask)
+    use_pbc = config.use_pbc_enabled()
 
     dataset = loader.get_all()
-    dataset["R"] = preprocessor.center_and_park(dataset["R"], dataset["mask"], extent, R_shift)
+
+    if use_pbc:
+        # PBC mode: use the box stored in the dataset; wrap coordinates into [0, L].
+        if loader.box is None:
+            raise ValueError(
+                "model.pbc=true requires a 'box' array in the NPZ dataset "
+                "(keys tried: 'box', 'cell', 'lattice'). None found."
+            )
+        box = jnp.asarray(loader.box, dtype=jnp.float32)
+        dataset["R"] = _wrap_into_box(dataset["R"], np.asarray(box))
+        data_logger.info(f"[PBC] Using dataset box: {jax.device_get(box)}")
+    else:
+        preprocessor = CoordinatePreprocessor(
+            cutoff=cutoff,
+            buffer_multiplier=buffer_mult,
+            park_multiplier=park_mult,
+        )
+        extent, R_shift = preprocessor.compute_box_extent(loader.R, loader.mask)
+        dataset["R"] = preprocessor.center_and_park(dataset["R"], dataset["mask"], extent, R_shift)
+        box = extent
+        data_logger.info(f"[Preprocessing] Computed box: {jax.device_get(box)}")
+        data_logger.info(f"[Preprocessing] R_shift: {jax.device_get(R_shift)}")
 
     # LBFGS prior pretraining must happen against raw F_ref, before residuals are subtracted.
     fitted_prior_params = _pretrain_for_residual_if_needed(config, dataset, loader.id_to_aa)
@@ -939,10 +1045,6 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         dataset_path=data_path_obj,
         export_dir=export_dir,
     )
-
-    box = extent
-    data_logger.info(f"[Preprocessing] Computed box: {jax.device_get(box)}")
-    data_logger.info(f"[Preprocessing] R_shift: {jax.device_get(R_shift)}")
 
     # Spline priors are an add-on mode; LBFGS pretraining is only valid for
     # parametric prior parameters. Disable pretraining if both are enabled.
@@ -999,6 +1101,7 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         config,
         tiled_train_source if tiled_train_source is not None else train_split,
         split_seed,
+        box=np.asarray(box) if use_pbc else None,
     )
     config.save(config_path)
     training_logger.info(f"[Config] Updated runtime config saved to: {config_path}")
@@ -1292,11 +1395,23 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
             f"{'=' * 60}"
         )
 
-        extent, R_shift = preprocessor.compute_box_extent(loader.R, loader.mask)
         dataset = loader.get_all()
-        dataset["R"] = preprocessor.center_and_park(
-            dataset["R"], dataset["mask"], extent, R_shift
-        )
+        use_pbc_mp = config.use_pbc_enabled()
+        if use_pbc_mp:
+            if loader.box is None:
+                raise ValueError(
+                    f"model.pbc=true requires a 'box' array in bucket "
+                    f"'{loader.npz_path.name}'. None found."
+                )
+            box = jnp.asarray(loader.box, dtype=jnp.float32)
+            dataset["R"] = _wrap_into_box(dataset["R"], np.asarray(box))
+            data_logger.info(f"[PBC][Bucket {bucket_idx}] Using dataset box: {jax.device_get(box)}")
+        else:
+            extent, R_shift = preprocessor.compute_box_extent(loader.R, loader.mask)
+            dataset["R"] = preprocessor.center_and_park(
+                dataset["R"], dataset["mask"], extent, R_shift
+            )
+            box = extent
 
         if config.pretrain_prior_enabled() and config.prior_residual_enabled():
             training_logger.warning(
@@ -1317,7 +1432,6 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
             buffer_mult=buffer_mult,
             park_mult=park_mult,
         )
-        box = extent
 
         split_seed = int(config.get_seed()) + int(bucket_idx)
         dataset = _shuffle_dataset_for_split(dataset, seed=split_seed)
@@ -1351,6 +1465,7 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
             config,
             tiled_train_source if tiled_train_source is not None else train_split,
             split_seed,
+            box=np.asarray(box) if use_pbc_mp else None,
         )
         config.save(config_path)
         training_logger.info(

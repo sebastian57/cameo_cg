@@ -1,0 +1,38 @@
+# MD simulation config for 1pro_4zoh (Cα CG model, 53 beads)
+#
+# Model architecture is loaded from training_config_path — nothing to repeat here.
+#
+# Units (units: physical, the default):
+#   dt      — fs   (femtoseconds)
+#   kT      — K    (Kelvin)
+#   gamma   — ps   (Langevin friction timescale τ; γ = 1/τ internally)
+#   mass    — amu  (unchanged)
+
+md:
+  units: physical               # physical (default) | akma
+
+  # ---- Pointers ----
+  training_config_path: local_work/outputs/1pro_4zoh_full/exports/1pro_4zoh_full_ml_only_config.yaml
+  params_path:          local_work/outputs/1pro_4zoh_full/exports/1pro_4zoh_full_ml_only_params.pkl
+  dataset_path:         data_prep/datasets/1pro_4zohB01_alltemp_cg_aggforce/combined_dataset.npz
+
+  # ---- Initial conditions ----
+  frame_idx: 0
+
+  # ---- Integrator ----
+  integrator: nvt_langevin      # nvt_langevin | nve
+  n_steps: 10000
+  dt:    1.0                    # fs
+  kT:    300.0                  # K
+  gamma: 50.0                   # ps  (friction timescale τ = 1/γ)
+  mass:  12.011                 # amu
+
+  # ---- Output ----
+  output_dir:      local_work/md_runs/1pro_4zoh
+  output_filename: traj_nvt_10000steps.npz
+  output_every: 50              # steps
+  seed: 42
+
+  # ---- Visualization ----
+  dump_for_ovito: true          # write a .dump file alongside the NPZ
+  dump_padding:   20.0          # Å added to each box side

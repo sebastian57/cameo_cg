@@ -196,7 +196,7 @@ class ModelExporter(exporter.Exporter):
             self._export_debug_logged = True
 
         neighbors = partition.NeighborList(
-            jnp.stack((graph.senders, graph.receivers)),
+            jnp.stack((graph.receivers, graph.senders)),
             pos,
             None,
             None,

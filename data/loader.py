@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 # Alternative key names accepted in place of the canonical "R" and "F".
 _COORD_ALIASES = ["coords", "coordinates", "positions", "pos", "xyz"]
 _FORCE_ALIASES = ["forces", "force", "frc", "grads", "gradients"]
+_BOX_ALIASES   = ["box", "cell", "lattice"]
 
 
 def _resolve_key(data, canonical: str, aliases: list[str], source: str = "") -> str:
@@ -42,6 +43,30 @@ def _resolve_key(data, canonical: str, aliases: list[str], source: str = "") -> 
     raise KeyError(
         f"Required key '{canonical}' not found{' in ' + source if source else ''}. "
         f"Tried aliases: {aliases}. Available keys: {list(data.keys())}"
+    )
+
+
+def _resolve_box(raw_box: np.ndarray) -> np.ndarray:
+    """Collapse any box representation to an orthorhombic (3,) vector.
+
+    Accepted shapes:
+      (3,)        — already a diagonal box vector
+      (3, 3)      — full box matrix; extract diagonal
+      (N_frames, 3)   — per-frame orthorhombic; use first frame (NVT assumption)
+      (N_frames, 3, 3) — per-frame triclinic; extract diagonal of first frame
+    """
+    raw_box = np.asarray(raw_box, dtype=np.float32)
+    if raw_box.ndim == 1 and raw_box.shape == (3,):
+        return raw_box
+    if raw_box.ndim == 2 and raw_box.shape == (3, 3):
+        return np.diag(raw_box)
+    if raw_box.ndim == 2 and raw_box.shape[1] == 3:
+        return raw_box[0]              # (N_frames, 3) — first frame
+    if raw_box.ndim == 3 and raw_box.shape[1:] == (3, 3):
+        return np.diag(raw_box[0])     # (N_frames, 3, 3) — diagonal of first frame
+    raise ValueError(
+        f"Unrecognised box shape {raw_box.shape}. "
+        "Expected (3,), (3,3), (N,3), or (N,3,3)."
     )
 
 
@@ -123,6 +148,14 @@ def load_npz(path: PathLike) -> Dict[str, Any]:
                 arrays.append(d["species"] if "species" in d else np.zeros(d[rk].shape[:2], dtype=np.int32))
             return np.concatenate(arrays, axis=0)
 
+        # Box: use first dataset that has a box key; assume all share the same box (NVT).
+        box_value = None
+        for d in datasets:
+            box_key = next((k for k in _BOX_ALIASES if k in d), None)
+            if box_key is not None:
+                box_value = _resolve_box(d[box_key])
+                break
+
         result = {
             "R": np.concatenate([d[rk] for d, rk in zip(datasets, r_keys)], axis=0).astype(np.float32),
             "F": np.concatenate([d[fk] for d, fk in zip(datasets, f_keys)], axis=0).astype(np.float32),
@@ -134,6 +167,7 @@ def load_npz(path: PathLike) -> Dict[str, Any]:
             "resname": datasets[0]["resname"] if "resname" in datasets[0] else None,
             "N_max":   int(datasets[0]["N_max"][0]) if "N_max" in datasets[0] else datasets[0][r_keys[0]].shape[1],
             "aa_to_id": datasets[0]["aa_to_id"].item() if "aa_to_id" in datasets[0] else None,
+            "box": box_value,
         }
 
         return result
@@ -159,6 +193,10 @@ def load_npz(path: PathLike) -> Dict[str, Any]:
     # Handle N_max being an array
     if isinstance(result["N_max"], np.ndarray):
         result["N_max"] = int(result["N_max"][0])
+
+    # Box: optional, required when model.pbc=true. Collapse to (3,) orthorhombic vector.
+    box_key = next((k for k in _BOX_ALIASES if k in data), None)
+    result["box"] = _resolve_box(data[box_key]) if box_key is not None else None
 
     return result
 
@@ -765,6 +803,9 @@ class DatasetLoader:
         self.resid = raw_data["resid"]
         self.resname = raw_data["resname"]
         self.Z = raw_data["Z"]
+        # Box: shape (3,) orthorhombic vector, or None if not in dataset.
+        # Required when model.pbc=true.
+        self.box = raw_data.get("box", None)
 
         # Species mapping
         if raw_data["aa_to_id"] is not None:

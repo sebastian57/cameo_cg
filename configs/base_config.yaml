@@ -63,6 +63,7 @@ model:
   cutoff: 10.0                  # neighbor list cutoff (Angstrom)
   dr_threshold: 0.5             # neighbor list rebuild threshold
   neighbor_list_format: dense   # dense | sparse
+  pbc: false                    # true = periodic boundary conditions (requires 'box' key in NPZ)
 
   # --- Allegro hyperparameters -----------------------------------------------
   allegro:

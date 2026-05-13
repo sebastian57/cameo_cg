@@ -42,6 +42,8 @@ __all__ = [
     # Export
     "ModelExporter",
     "AllegroExporter",
+    # MD
+    "MDRunner",
 ]
 
 _LAZY_SYMBOLS = {
@@ -60,6 +62,7 @@ _LAZY_SYMBOLS = {
     "ForceAnalyzer": ("cameo_cg.analysis_tests.visualizer", "ForceAnalyzer"),
     "ModelExporter": ("cameo_cg.export.exporter", "ModelExporter"),
     "AllegroExporter": ("cameo_cg.export.exporter", "ModelExporter"),
+    "MDRunner": ("cameo_cg.md.runner", "MDRunner"),
 }
 
 
