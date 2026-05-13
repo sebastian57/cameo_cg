@@ -17,6 +17,9 @@ md:
   # ---- Initial conditions ----
   frame_idx: 0
 
+  # ---- COM drift removal (zero yes equivalent) ----
+  zero_com_velocity: true       # subtract mean momentum each step; prevents Langevin noise drift
+
   # ---- Equilibration (steps are not recorded) ----
   equilibrate:    false
   n_equil_steps:  1000          # steps to discard before production

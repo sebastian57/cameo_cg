@@ -59,6 +59,12 @@ class MDRunner:
         self.equilibrate       = bool(md_config.get("equilibrate", False))
         self.n_equil_steps     = int(md_config.get("n_equil_steps", 0))
 
+        # COM drift removal (equivalent to LAMMPS 'fix langevin ... zero yes').
+        # Langevin noise kicks are independent per atom, so their sum is a
+        # random force on the COM that causes diffusive drift — especially
+        # visible for small molecules.  Default on.
+        self.zero_com_velocity = bool(md_config.get("zero_com_velocity", True))
+
         # Scalar observables (logged to CSV, independent cadence from trajectory)
         self.observables_every = int(md_config.get("observables_every", self.output_every))
         raw_obs = md_config.get("observables", _ALL_OBSERVABLES)
@@ -92,6 +98,7 @@ class MDRunner:
             md_logger.info(f"  gamma={self.gamma:.6f} AKMA^-1 (τ ≈ {1/self.gamma:.1f} AKMA)")
         if self.equilibrate and self.n_equil_steps > 0:
             md_logger.info(f"  equilibration: {self.n_equil_steps} steps (not recorded)")
+        md_logger.info(f"  zero_com_velocity: {self.zero_com_velocity}")
         md_logger.info(
             f"  observables: {self.observables}  every {self.observables_every} steps"
         )
@@ -155,6 +162,18 @@ class MDRunner:
             for _ in range(self.n_equil_steps):
                 nbrs  = ml.nneigh_fn.update(state.position, nbrs, mask=valid_mask)
                 state = self._step_fn(state, neighbor=nbrs, mask=valid_mask, species=species)
+                if self.zero_com_velocity:
+                    com_p = (
+                        jnp.sum(jnp.where(valid_mask[:, None], state.momentum, 0.0), axis=0)
+                        / n_valid
+                    )
+                    state = state.set(
+                        momentum=jnp.where(
+                            valid_mask[:, None],
+                            state.momentum - com_p[None, :],
+                            state.momentum,
+                        )
+                    )
             jax.block_until_ready(state.position)
             md_logger.info(
                 f"  equilibration done in {time.perf_counter() - t_eq:.1f} s"
@@ -227,6 +246,18 @@ class MDRunner:
         for step in range(1, self.n_steps + 1):
             nbrs  = ml.nneigh_fn.update(state.position, nbrs, mask=valid_mask)
             state = self._step_fn(state, neighbor=nbrs, mask=valid_mask, species=species)
+            if self.zero_com_velocity:
+                com_p = (
+                    jnp.sum(jnp.where(valid_mask[:, None], state.momentum, 0.0), axis=0)
+                    / n_valid
+                )
+                state = state.set(
+                    momentum=jnp.where(
+                        valid_mask[:, None],
+                        state.momentum - com_p[None, :],
+                        state.momentum,
+                    )
+                )
 
             if step % self.output_every == 0:
                 _record_traj(traj_idx, step, state, nbrs)
