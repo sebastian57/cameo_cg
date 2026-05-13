@@ -18,6 +18,17 @@ import pickle
 import logging
 from pathlib import Path
 
+# ── GPU / platform detection ────────────────────────────────────────────────
+# jax_md/rigid_body.py runs jnp.linalg.eigh at *module import time*, which
+# triggers cuSolver and crashes on login nodes without a GPU allocation.
+# On this cluster GPU is only available inside a SLURM job (SLURM_JOB_ID set).
+# Force CPU when running interactively — must happen before any JAX import.
+# Override manually: JAX_PLATFORMS=cuda python scripts/run_md.py ...
+if "JAX_PLATFORMS" not in os.environ:
+    if not os.environ.get("SLURM_JOB_ID"):
+        os.environ["JAX_PLATFORMS"] = "cpu"
+# ────────────────────────────────────────────────────────────────────────────
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Must happen before any jax_md imports.
