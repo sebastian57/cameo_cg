@@ -340,6 +340,8 @@ class ConfigManager:
         "wca": 0.0,
         "fene": 0.0,
         "leash": 0.0,
+        "local_in": 0.0,
+        "local_bond_in": 0.0,
         "dh": 0.0,
         "stickiness": 0.0,
         "salt_bridge": 0.0,

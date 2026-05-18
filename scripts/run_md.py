@@ -16,6 +16,7 @@ import os
 import sys
 import pickle
 import logging
+import signal
 from pathlib import Path
 
 # ── GPU / platform detection ────────────────────────────────────────────────
@@ -137,7 +138,14 @@ def main(config_file: str, job_id: str = None) -> None:
     # ------------------------------------------------------------------
     # 3. Build CombinedModel (same init path as train.py).
     # ------------------------------------------------------------------
-    n_species = int(np.max(loader.species)) + 1
+    data_n_species = int(np.max(loader.species)) + 1
+    config_n_species = training_config.get("model", "allegro", "num_types", default=None)
+    n_species = max(data_n_species, int(config_n_species or 0))
+    if n_species != data_n_species:
+        md_logger.info(
+            f"Using n_species={n_species} from training config "
+            f"(dataset contains species ids up to {data_n_species - 1})."
+        )
     model = CombinedModel(
         config=training_config,
         R0=R0,
@@ -166,6 +174,12 @@ def main(config_file: str, job_id: str = None) -> None:
     output_dir = _resolve(md_cfg.get("output_dir", "local_work/md_runs"), root)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    filename = md_cfg.get("output_filename", f"traj_{job_id}.npz")
+    output_path = output_dir / filename
+    md_cfg["_partial_output_path"] = str(
+        output_path.with_name(output_path.stem + ".partial" + output_path.suffix)
+    )
+
     runner = MDRunner(model, params, md_cfg)
     rng    = jax.random.PRNGKey(int(md_cfg.get("seed", 0)))
     traj   = runner.run(R0, mask, species, rng)
@@ -173,8 +187,6 @@ def main(config_file: str, job_id: str = None) -> None:
     # ------------------------------------------------------------------
     # 6. Save trajectory.
     # ------------------------------------------------------------------
-    filename = md_cfg.get("output_filename", f"traj_{job_id}.npz")
-    output_path = output_dir / filename
     np.savez(str(output_path), **{k: np.asarray(v) for k, v in traj.items()})
     md_logger.info(f"Trajectory saved: {output_path}")
     md_logger.info(
@@ -221,9 +233,19 @@ def main(config_file: str, job_id: str = None) -> None:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    def _handle_termination(signum, frame):
+        raise KeyboardInterrupt(f"received signal {signum}")
+
+    signal.signal(signal.SIGTERM, _handle_termination)
+    signal.signal(signal.SIGINT, _handle_termination)
+
     if len(sys.argv) < 2:
         logging.error("Usage: python scripts/run_md.py <md_config.yaml> [job_id]")
         sys.exit(1)
     config_file = sys.argv[1]
     job_id = sys.argv[2] if len(sys.argv) > 2 else None
-    main(config_file, job_id)
+    try:
+        main(config_file, job_id)
+    except KeyboardInterrupt as exc:
+        logging.info(f"MD interrupted cleanly ({exc}).")
+        sys.exit(130)

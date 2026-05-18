@@ -11,6 +11,12 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# md.__init__ imports MDRunner, which imports jax_md. Apply the same
+# compatibility shim as run_md.py before any jax_md import can happen.
+from utils.jax_setup import apply_jax_compat_shims  # noqa: E402
+apply_jax_compat_shims()
+
 from md.dump import write_lammps_dump  # noqa: E402
 
 

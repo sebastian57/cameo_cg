@@ -621,6 +621,7 @@ class PriorEnergy:
         ev_min = int(config.get("model", "priors", "excluded_volume_min_sep", default=2))
         ev_max = int(config.get("model", "priors", "excluded_volume_max_sep", default=5))
         self.excluded_vol_pairs = topology.get_excluded_volume_pairs(min_sep=ev_min, max_sep=ev_max)
+        self._init_explicit_local_priors(config)
         self._init_typed_interaction_metadata(config, id_to_aa)
 
         # Check for spline-based priors.
@@ -639,6 +640,40 @@ class PriorEnergy:
             self._init_spline_priors(spline_path, config)
         else:
             self._init_parametric_priors(config)
+
+    def _init_explicit_local_priors(self, config) -> None:
+        """Initialize explicit local pair priors from config arrays.
+
+        These prototype terms are intended for fixed-topology, one-protein
+        datasets. In tiled residual mode the prior forces are computed on the
+        untiled dataset before packing, so the explicit indices are valid for
+        the current 4zoh residual-cache tests.
+        """
+        prior_cfg = config.get("model", "priors", default={}) or {}
+
+        def _pairs(name: str) -> jax.Array:
+            cfg = prior_cfg.get(name, {}) or {}
+            pairs = np.asarray(cfg.get("pairs", []), dtype=np.int32)
+            if pairs.size == 0:
+                return _empty_pairs()
+            return jnp.asarray(pairs.reshape((-1, 2)), dtype=jnp.int32)
+
+        def _vector(name: str, key: str) -> jax.Array:
+            cfg = prior_cfg.get(name, {}) or {}
+            vals = np.asarray(cfg.get(key, []), dtype=np.float32)
+            return jnp.asarray(vals.reshape((-1,)), dtype=jnp.float32)
+
+        self.local_in_pairs = _pairs("local_in")
+        self.local_in_r0 = _vector("local_in", "r0")
+        self.local_in_k = _vector("local_in", "k")
+        self.local_in_margin = jnp.asarray(
+            float((prior_cfg.get("local_in", {}) or {}).get("margin", 0.5)),
+            dtype=jnp.float32,
+        )
+
+        self.local_bond_in_pairs = _pairs("local_bond_in")
+        self.local_bond_in_r0 = _vector("local_bond_in", "r0")
+        self.local_bond_in_k = _vector("local_bond_in", "k")
 
     def _init_typed_interaction_metadata(
         self, config, id_to_aa: Optional[Dict[int, str]]
@@ -1189,6 +1224,46 @@ class PriorEnergy:
         active = valid & (r_eval < r_cut)
         return jnp.sum(jnp.where(active, U, 0.0))
 
+    def compute_local_in_energy(
+        self,
+        R: jax.Array,
+        mask: jax.Array,
+        segment_id: Optional[jax.Array] = None,
+    ) -> jax.Array:
+        """Compute explicit one-sided local i,i+n upper-wall energy."""
+        if self.local_in_pairs.shape[0] == 0:
+            return jnp.array(0.0, dtype=R.dtype)
+        pi, pj = self.local_in_pairs[:, 0], self.local_in_pairs[:, 1]
+        valid = (mask[pi] * mask[pj]) > 0
+        valid = valid & _same_segment_mask(self.local_in_pairs, segment_id)
+        r = _safe_norm(R[pi] - R[pj])
+        r = jnp.where(valid, r, jax.lax.stop_gradient(r))
+        stretch = jnp.maximum(
+            r - (self.local_in_r0.astype(R.dtype) + self.local_in_margin.astype(R.dtype)),
+            0.0,
+        )
+        E = 0.5 * self.local_in_k.astype(R.dtype) * stretch * stretch
+        return jnp.sum(jnp.where(valid, E, 0.0))
+
+    def compute_local_bond_in_energy(
+        self,
+        R: jax.Array,
+        mask: jax.Array,
+        segment_id: Optional[jax.Array] = None,
+    ) -> jax.Array:
+        """Compute explicit symmetric harmonic local i,i+n bond energy."""
+        if self.local_bond_in_pairs.shape[0] == 0:
+            return jnp.array(0.0, dtype=R.dtype)
+        pi, pj = self.local_bond_in_pairs[:, 0], self.local_bond_in_pairs[:, 1]
+        valid = (mask[pi] * mask[pj]) > 0
+        valid = valid & _same_segment_mask(self.local_bond_in_pairs, segment_id)
+        r = _safe_norm(R[pi] - R[pj])
+        r = jnp.where(valid, r, jax.lax.stop_gradient(r))
+        E = 0.5 * self.local_bond_in_k.astype(R.dtype) * (
+            r - self.local_bond_in_r0.astype(R.dtype)
+        ) ** 2
+        return jnp.sum(jnp.where(valid, E, 0.0))
+
     def compute_fene_energy(
         self,
         R: jax.Array,
@@ -1441,6 +1516,18 @@ class PriorEnergy:
         E_sb_raw = self.compute_salt_bridge_energy(
             R, mask, species=species, params=p, segment_id=segment_id
         )
+        E_local_in_weight = self.weights.get("local_in", 0.0)
+        E_local_in_raw = (
+            self.compute_local_in_energy(R, mask, segment_id=segment_id)
+            if E_local_in_weight != 0.0
+            else jnp.array(0.0, dtype=R.dtype)
+        )
+        E_local_bond_in_weight = self.weights.get("local_bond_in", 0.0)
+        E_local_bond_in_raw = (
+            self.compute_local_bond_in_energy(R, mask, segment_id=segment_id)
+            if E_local_bond_in_weight != 0.0
+            else jnp.array(0.0, dtype=R.dtype)
+        )
 
         # Apply weights
         E_bond = self.weights["bond"] * E_bond_raw
@@ -1454,6 +1541,8 @@ class PriorEnergy:
         E_dh = self.weights.get("dh", 0.0) * E_dh_raw
         E_stick = self.weights.get("stickiness", 0.0) * E_stick_raw
         E_sb = self.weights.get("salt_bridge", 0.0) * E_sb_raw
+        E_local_in = E_local_in_weight * E_local_in_raw
+        E_local_bond_in = E_local_bond_in_weight * E_local_bond_in_raw
 
         E_total = (
             E_bond
@@ -1467,6 +1556,8 @@ class PriorEnergy:
             + E_dh
             + E_stick
             + E_sb
+            + E_local_in
+            + E_local_bond_in
         )
 
         return {
@@ -1481,6 +1572,8 @@ class PriorEnergy:
             "E_dh": E_dh,
             "E_stickiness": E_stick,
             "E_salt_bridge": E_sb,
+            "E_local_in": E_local_in,
+            "E_local_bond_in": E_local_bond_in,
             "E_total": E_total,
         }
 

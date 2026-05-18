@@ -306,6 +306,8 @@ class CombinedModel:
                 "E_dh": prior_components.get("E_dh", 0.0),
                 "E_stickiness": prior_components.get("E_stickiness", 0.0),
                 "E_salt_bridge": prior_components.get("E_salt_bridge", 0.0),
+                "E_local_in": prior_components.get("E_local_in", 0.0),
+                "E_local_bond_in": prior_components.get("E_local_bond_in", 0.0),
                 "E_prior_total": prior_components["E_total"],
             })
             components["E_total"] = E_ml + prior_components["E_total"]
@@ -355,13 +357,15 @@ class CombinedModel:
                     comps.get("E_wca", 0.0),
                     comps.get("E_fene", 0.0),
                     comps.get("E_leash", 0.0),
+                    comps.get("E_local_in", 0.0),
+                    comps.get("E_local_bond_in", 0.0),
                 )
 
             # Single forward pass; vjp_fn holds stored residuals for backward.
             _, vjp_fn = jax.vjp(all_energies, R)
 
             # Each vjp_fn call is a backward-only pass (no re-forward).
-            def _force(idx, n=10):
+            def _force(idx, n=12):
                 ct = tuple(1.0 if i == idx else 0.0 for i in range(n))
                 return -vjp_fn(ct)[0]
 
@@ -376,6 +380,8 @@ class CombinedModel:
                 "F_wca":             _force(7),
                 "F_fene":            _force(8),
                 "F_leash":           _force(9),
+                "F_local_in":        _force(10),
+                "F_local_bond_in":   _force(11),
             }
         else:
             def all_energies(R_):

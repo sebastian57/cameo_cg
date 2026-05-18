@@ -4,7 +4,9 @@ Runs NVT-Langevin or NVE dynamics using a CombinedModel loaded from PKL params.
 All quantities in AKMA units (Å, kcal/mol, amu); 1 AKMA time unit ≈ 48.88 fs.
 """
 
+import os
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import jax
@@ -20,6 +22,10 @@ _kB_KCAL = 1.9872041e-3
 
 # All observable keys in the default output order.
 _ALL_OBSERVABLES = ["step", "T", "KE", "PE", "E_total", "pressure", "box_volume"]
+
+# Energy-component keys returned by CombinedModel.compute_components that are
+# always present (regardless of whether priors are enabled).
+_DECOMP_ENERGY_KEYS = ["E_ml", "E_prior_total"]
 
 
 class MDRunner:
@@ -58,6 +64,14 @@ class MDRunner:
         else:
             self.mass = float(mass_raw)
         self.output_every      = int(md_config.get("output_every", 10))
+        self.continuous_output = bool(md_config.get("continuous_output", False))
+        self.continuous_output_every = max(
+            1, int(md_config.get("continuous_output_every", 10))
+        )
+        partial_output_path = md_config.get("_partial_output_path", None)
+        self.partial_output_path = (
+            Path(partial_output_path) if partial_output_path else None
+        )
 
         # Equilibration
         self.equilibrate       = bool(md_config.get("equilibrate", False))
@@ -73,6 +87,11 @@ class MDRunner:
         self.observables_every = int(md_config.get("observables_every", self.output_every))
         raw_obs = md_config.get("observables", _ALL_OBSERVABLES)
         self.observables       = list(raw_obs)   # ordered list of keys to record
+
+        # Force / energy decomposition mode: record E_ml, E_prior and their
+        # force contributions (F_ml, F_prior) at output_every cadence.
+        self.force_decomp       = bool(md_config.get("force_decomp", False))
+        self.force_decomp_every = int(md_config.get("force_decomp_every", self.output_every))
 
         if self.integrator not in ("nvt_langevin", "nve"):
             raise ValueError(
@@ -110,6 +129,21 @@ class MDRunner:
         md_logger.info(
             f"  observables: {self.observables}  every {self.observables_every} steps"
         )
+        if self.force_decomp:
+            md_logger.info(
+                f"  force_decomp: ON  every {self.force_decomp_every} steps  "
+                f"(E_ml/E_prior + F_ml/F_prior saved to trajectory NPZ)"
+            )
+        if self.continuous_output:
+            if self.partial_output_path is None:
+                md_logger.warning(
+                    "  continuous_output requested, but no partial output path was provided."
+                )
+            else:
+                md_logger.info(
+                    f"  continuous output: {self.partial_output_path}  "
+                    f"every {self.continuous_output_every} trajectory frame(s)"
+                )
 
     # ------------------------------------------------------------------
     # Public API
@@ -200,6 +234,16 @@ class MDRunner:
         out_T    = np.zeros(n_traj_frames, dtype=np.float32)
         out_step = np.zeros(n_traj_frames, dtype=np.int32)
 
+        # ── Force/energy decomposition arrays (optional) ─────────────────
+        use_priors = self.model.use_priors
+        if self.force_decomp:
+            n_decomp_frames = self.n_steps // self.force_decomp_every + 1
+            out_E_ml    = np.zeros(n_decomp_frames, dtype=np.float32)
+            out_E_prior = np.zeros(n_decomp_frames, dtype=np.float32)
+            out_F_ml    = np.zeros((n_decomp_frames, R0.shape[0], 3), dtype=np.float32)
+            out_F_prior = np.zeros((n_decomp_frames, R0.shape[0], 3), dtype=np.float32)
+            out_decomp_step = np.zeros(n_decomp_frames, dtype=np.int32)
+
         # ── Pre-allocate observable arrays ──────────────────────────────
         n_obs_frames  = self.n_steps // self.observables_every + 1
         obs_buf: Dict[str, np.ndarray] = {
@@ -247,45 +291,50 @@ class MDRunner:
                     virial = float(np.sum(R_v * F_v))
                     obs_buf["pressure"][idx] = (2.0 * ke + virial) / (3.0 * max(vol, 1e-10))
 
-        # ── Production loop ─────────────────────────────────────────────
-        # Record step 0.
-        _record_traj(0, 0, state, nbrs)
-        _record_obs(0, 0, state, nbrs)
-        traj_idx = 1
-        obs_idx  = 1
+        def _record_decomp(idx, step, s, nb):
+            """Compute and store per-component energies and forces via vjp."""
+            R_now = jnp.asarray(s.position)
 
-        t_loop = time.perf_counter()
-        for step in range(1, self.n_steps + 1):
-            nbrs  = ml.nneigh_fn.update(state.position, nbrs, mask=valid_mask)
-            state = self._step_fn(state, neighbor=nbrs, mask=valid_mask, species=species)
-            if self.zero_com_velocity:
-                com_p = (
-                    jnp.sum(jnp.where(valid_mask[:, None], state.momentum, 0.0), axis=0)
-                    / n_valid
-                )
-                state = state.set(
-                    momentum=jnp.where(
-                        valid_mask[:, None],
-                        state.momentum - com_p[None, :],
-                        state.momentum,
+            # ── energy components ─────────────────────────────────────────
+            comps = self.model.compute_components(
+                self.params, R_now, valid_mask, species, neighbor=nb
+            )
+            e_ml    = float(np.asarray(comps.get("E_ml", 0.0)))
+            e_prior = float(np.asarray(comps.get("E_prior_total", 0.0)))
+
+            # ── force components via vjp (one forward pass, two backward) ─
+            if use_priors:
+                def _both_energies(R_):
+                    c = self.model.compute_components(
+                        self.params, R_, valid_mask, species, neighbor=nb
                     )
+                    return c["E_ml"], c["E_prior_total"]
+                _, vjp_fn = jax.vjp(_both_energies, R_now)
+                f_ml    = np.asarray(-vjp_fn((1.0, 0.0))[0], dtype=np.float32)
+                f_prior = np.asarray(-vjp_fn((0.0, 1.0))[0], dtype=np.float32)
+            else:
+                def _ml_energy(R_):
+                    c = self.model.compute_components(
+                        self.params, R_, valid_mask, species, neighbor=nb
+                    )
+                    return c["E_ml"]
+                f_ml    = np.asarray(-jax.grad(_ml_energy)(R_now), dtype=np.float32)
+                f_prior = np.zeros_like(f_ml)
+
+            out_E_ml[idx]    = e_ml
+            out_E_prior[idx] = e_prior
+            out_F_ml[idx]    = f_ml
+            out_F_prior[idx] = f_prior
+            out_decomp_step[idx] = step
+
+            # Log a brief summary for the first and then every 10th decomp frame.
+            if idx == 0 or idx % 10 == 0:
+                f_ml_rms    = float(np.sqrt(np.mean(f_ml[np.asarray(valid_mask)] ** 2)))
+                f_prior_rms = float(np.sqrt(np.mean(f_prior[np.asarray(valid_mask)] ** 2))) if use_priors else 0.0
+                md_logger.info(
+                    f"  [decomp step={step}]  E_ml={e_ml:.3f}  E_prior={e_prior:.3f} kcal/mol"
+                    f"  |F_ml|_rms={f_ml_rms:.3f}  |F_prior|_rms={f_prior_rms:.3f} kcal/mol/Å"
                 )
-
-            if step % self.output_every == 0:
-                _record_traj(traj_idx, step, state, nbrs)
-                traj_idx += 1
-
-            if step % self.observables_every == 0:
-                _record_obs(obs_idx, step, state, nbrs)
-                obs_idx += 1
-
-        elapsed = time.perf_counter() - t_loop
-        md_logger.info(
-            f"MD complete: {self.n_steps} steps in {elapsed:.1f} s "
-            f"({elapsed / self.n_steps * 1000:.2f} ms/step)  "
-            f"T_final={obs_buf['T'][obs_idx-1]:.1f} K  "
-            f"PE_final={obs_buf['PE'][obs_idx-1]:.3f} kcal/mol"
-        )
 
         # ── Box (static for free-space) ─────────────────────────────────
         try:
@@ -294,24 +343,128 @@ class MDRunner:
         except Exception:
             box = np.zeros(3, dtype=np.float32)
 
-        # ── Build return dict ────────────────────────────────────────────
-        traj = {
-            "R":       out_R[:traj_idx],
-            "F":       out_F[:traj_idx],
-            "KE":      out_KE[:traj_idx],
-            "PE":      out_PE[:traj_idx],
-            "T":       out_T[:traj_idx],
-            "step":    out_step[:traj_idx],
-            "box":     box,
-            "species": np.asarray(species, dtype=np.int32),
-            "mask":    np.asarray(mask, dtype=np.float32),
-        }
+        def _build_traj(traj_count, obs_count, decomp_count=0, interrupted=False):
+            traj = {
+                "R":       out_R[:traj_count],
+                "F":       out_F[:traj_count],
+                "KE":      out_KE[:traj_count],
+                "PE":      out_PE[:traj_count],
+                "T":       out_T[:traj_count],
+                "step":    out_step[:traj_count],
+                "box":     box,
+                "species": np.asarray(species, dtype=np.int32),
+                "mask":    np.asarray(mask, dtype=np.float32),
+                "complete": np.asarray(not interrupted, dtype=np.bool_),
+            }
+            if traj_count > 0:
+                traj["last_step"] = np.asarray(out_step[traj_count - 1], dtype=np.int32)
 
-        # Only include requested observables, prefixed with 'obs_'.
-        for key in self.observables:
-            if key in obs_buf:
-                traj[f"obs_{key}"] = obs_buf[key][:obs_idx]
+            # Only include requested observables, prefixed with 'obs_'.
+            for key in self.observables:
+                if key in obs_buf:
+                    traj[f"obs_{key}"] = obs_buf[key][:obs_count]
 
+            # Force/energy decomposition (if enabled).
+            if self.force_decomp and decomp_count > 0:
+                traj["decomp_step"]    = out_decomp_step[:decomp_count]
+                traj["decomp_E_ml"]    = out_E_ml[:decomp_count]
+                traj["decomp_E_prior"] = out_E_prior[:decomp_count]
+                traj["decomp_F_ml"]    = out_F_ml[:decomp_count]
+                traj["decomp_F_prior"] = out_F_prior[:decomp_count]
+            return traj
+
+        def _write_partial(traj_count, obs_count, decomp_count=0, interrupted=False):
+            if (
+                not self.continuous_output
+                or self.partial_output_path is None
+                or traj_count <= 0
+            ):
+                return
+            self.partial_output_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self.partial_output_path.with_name(
+                self.partial_output_path.name + ".tmp.npz"
+            )
+            np.savez(
+                str(tmp_path),
+                **_build_traj(traj_count, obs_count, decomp_count, interrupted=interrupted),
+            )
+            os.replace(tmp_path, self.partial_output_path)
+
+        # ── Production loop ─────────────────────────────────────────────
+        # Record step 0.
+        _record_traj(0, 0, state, nbrs)
+        _record_obs(0, 0, state, nbrs)
+        traj_idx   = 1
+        obs_idx    = 1
+        decomp_idx = 0
+        if self.force_decomp:
+            _record_decomp(0, 0, state, nbrs)
+            decomp_idx = 1
+        _write_partial(traj_idx, obs_idx, decomp_idx)
+
+        t_loop = time.perf_counter()
+        try:
+            for step in range(1, self.n_steps + 1):
+                nbrs  = ml.nneigh_fn.update(state.position, nbrs, mask=valid_mask)
+                state = self._step_fn(state, neighbor=nbrs, mask=valid_mask, species=species)
+                if self.zero_com_velocity:
+                    com_p = (
+                        jnp.sum(jnp.where(valid_mask[:, None], state.momentum, 0.0), axis=0)
+                        / n_valid
+                    )
+                    state = state.set(
+                        momentum=jnp.where(
+                            valid_mask[:, None],
+                            state.momentum - com_p[None, :],
+                            state.momentum,
+                        )
+                    )
+
+                wrote_traj = False
+                if step % self.output_every == 0:
+                    _record_traj(traj_idx, step, state, nbrs)
+                    traj_idx += 1
+                    wrote_traj = True
+
+                if step % self.observables_every == 0:
+                    _record_obs(obs_idx, step, state, nbrs)
+                    obs_idx += 1
+
+                if self.force_decomp and step % self.force_decomp_every == 0:
+                    _record_decomp(decomp_idx, step, state, nbrs)
+                    decomp_idx += 1
+
+                if (
+                    wrote_traj
+                    and (traj_idx - 1) % self.continuous_output_every == 0
+                ):
+                    _write_partial(traj_idx, obs_idx, decomp_idx)
+        except KeyboardInterrupt:
+            jax.block_until_ready(state.position)
+            _write_partial(traj_idx, obs_idx, decomp_idx, interrupted=True)
+            if self.partial_output_path is not None:
+                md_logger.info(
+                    f"MD interrupted; partial trajectory saved: {self.partial_output_path} "
+                    f"(frames={traj_idx}, last_step={int(out_step[traj_idx - 1])})"
+                )
+            raise
+
+        elapsed = time.perf_counter() - t_loop
+        md_logger.info(
+            f"MD complete: {self.n_steps} steps in {elapsed:.1f} s "
+            f"({elapsed / self.n_steps * 1000:.2f} ms/step)  "
+            f"T_final={obs_buf['T'][obs_idx-1]:.1f} K  "
+            f"PE_final={obs_buf['PE'][obs_idx-1]:.3f} kcal/mol"
+        )
+        if self.force_decomp and decomp_idx > 0:
+            md_logger.info(
+                f"  decomp: {decomp_idx} frames  "
+                f"E_ml_mean={float(np.mean(out_E_ml[:decomp_idx])):.3f}  "
+                f"E_prior_mean={float(np.mean(out_E_prior[:decomp_idx])):.3f} kcal/mol"
+            )
+
+        traj = _build_traj(traj_idx, obs_idx, decomp_idx, interrupted=False)
+        _write_partial(traj_idx, obs_idx, decomp_idx, interrupted=False)
         return traj
 
     # ------------------------------------------------------------------
