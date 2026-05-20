@@ -1,7 +1,10 @@
 """MD simulation entry point for CAMEO CG force-field models.
 
-Usage:
+Usage (single run):
     python scripts/run_md.py <md_config.yaml> [job_id]
+
+Usage (one specific replica, e.g. from a SLURM array):
+    python scripts/run_md.py <md_config.yaml> [job_id] --replica 2
 
 The MD config YAML contains only an `md:` section that points to:
   - training_config_path: the _config.yaml saved alongside the trained model
@@ -11,6 +14,7 @@ The MD config YAML contains only an `md:` section that points to:
 All model architecture is loaded from the training config — no duplication.
 """
 
+import argparse
 import csv
 import os
 import sys
@@ -65,12 +69,69 @@ def _resolve(path_str: str, root: Path) -> Path:
     return p if p.is_absolute() else (root / p)
 
 
-def main(config_file: str, job_id: str = None) -> None:
-    """Run an MD simulation from a YAML config file.
+def _replica_output_path(base_path: Path, replica_idx: int, n_replicas: int) -> Path:
+    """Append _repXX to the stem when running more than one replica."""
+    if n_replicas <= 1:
+        return base_path
+    return base_path.with_name(f"{base_path.stem}_rep{replica_idx:02d}{base_path.suffix}")
+
+
+def _save_outputs(
+    traj: dict,
+    output_path: Path,
+    md_cfg: dict,
+    output_dir: Path,
+) -> None:
+    """Save trajectory NPZ, observables CSV, and optional OVITO dump."""
+    np.savez(str(output_path), **{k: np.asarray(v) for k, v in traj.items()})
+    md_logger.info(f"Trajectory saved: {output_path}")
+    md_logger.info(
+        f"Frames: {traj['R'].shape[0]}  "
+        f"T_mean={float(np.mean(traj['T'])):.1f} K  "
+        f"PE_mean={float(np.mean(traj['PE'])):.3f} kcal/mol"
+    )
+
+    # Observables CSV
+    obs_keys = [k for k in md_cfg.get("observables", []) if f"obs_{k}" in traj]
+    if obs_keys:
+        obs_filename = md_cfg.get(
+            "observables_filename",
+            Path(output_path.name).stem + "_observables.csv",
+        )
+        obs_path_raw = md_cfg.get("observables_path", None)
+        if obs_path_raw:
+            obs_path = Path(obs_path_raw)
+            if not obs_path.is_absolute():
+                obs_path = output_dir / obs_path
+        else:
+            obs_path = output_dir / obs_filename
+
+        obs_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(obs_path, "w", newline="") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(obs_keys)
+            n_rows = len(traj[f"obs_{obs_keys[0]}"])
+            for i in range(n_rows):
+                writer.writerow([float(traj[f"obs_{k}"][i]) for k in obs_keys])
+        md_logger.info(f"Observables CSV: {obs_path}  ({n_rows} rows, cols: {obs_keys})")
+
+    # OVITO dump
+    if md_cfg.get("dump_for_ovito", False):
+        dump_path = output_path.with_suffix(".dump")
+        padding = float(md_cfg.get("dump_padding", 20.0))
+        write_lammps_dump(str(output_path), str(dump_path), padding=padding)
+        md_logger.info(f"OVITO dump: {dump_path}")
+
+
+def main(config_file: str, job_id: str = None, replica_idx: int = None) -> None:
+    """Run MD simulation(s) from a YAML config file.
 
     Args:
         config_file: Path to MD YAML (must contain an `md:` section).
-        job_id:      Optional identifier appended to output filenames.
+        job_id:      Optional identifier used in default output filenames.
+        replica_idx: If set, run only this replica index (0-based).
+                     If None, run all replicas 0..n_replicas-1 sequentially.
+                     Use with SLURM array jobs (--replica $SLURM_ARRAY_TASK_ID).
     """
     if job_id is None:
         job_id = os.environ.get("SLURM_JOB_ID", "local")
@@ -91,16 +152,19 @@ def main(config_file: str, job_id: str = None) -> None:
     md_logger.info(f"Training config: {training_config_path}")
     training_config = ConfigManager(str(training_config_path))
 
-    # For prior-residual models (use_priors=false, ML learned F_ref - F_prior):
-    # set override_use_priors: true to add F_prior back at MD runtime so the
-    # total force is F_ML + F_prior = F_ref.  Prior params come from the config
-    # (fixed), not the PKL.
     if md_cfg.get("override_use_priors", False):
         training_config.set("model", "use_priors", True)
         training_config.set("model", "train_priors", False)
         md_logger.info(
             "[Config] override_use_priors=true: prior energy added to ML energy. "
             "Use for prior-residual models (F_total = F_ML + F_prior)."
+        )
+
+    if md_cfg.get("cell_list", False):
+        training_config.set("model", "neighbor_disable_cell_list", False)
+        md_logger.info(
+            "[Config] cell_list=true: cell list enabled for neighbor search "
+            "(overrides training config neighbor_disable_cell_list=True)."
         )
 
     # ------------------------------------------------------------------
@@ -129,7 +193,6 @@ def main(config_file: str, job_id: str = None) -> None:
         park_multiplier=training_config.get_park_multiplier(),
     )
     box, R_shift = preprocessor.compute_box_extent(loader.R, loader.mask)
-    # Center initial frame in this box.
     R0 = jnp.asarray(preprocessor.center_and_park(
         np.asarray(R0)[None], np.asarray(mask)[None], box, R_shift
     )[0], dtype=jnp.float32)
@@ -163,89 +226,105 @@ def main(config_file: str, job_id: str = None) -> None:
     md_logger.info(f"Params: {params_path}")
     with open(params_path, "rb") as fh:
         params = pickle.load(fh)
-    # CombinedModel wraps params under {"ml": ..., "prior": ...}; unwrap if needed.
+    if isinstance(params, dict):
+        if isinstance(params.get("params"), dict):
+            md_logger.info("Detected trainer checkpoint format; extracting params.")
+            params = params["params"]
+        elif isinstance(params.get("best_params"), dict):
+            md_logger.info("Detected trainer checkpoint format; extracting best_params (no params key).")
+            params = params["best_params"]
     if not isinstance(params, dict) or "ml" not in params:
         params = {"ml": params}
 
     # ------------------------------------------------------------------
-    # 5. Convert physical units → AKMA, then run MD.
+    # 5. Convert physical units → AKMA.
     # ------------------------------------------------------------------
     md_cfg = to_akma(md_cfg)
+
     output_dir = _resolve(md_cfg.get("output_dir", "local_work/md_runs"), root)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     filename = md_cfg.get("output_filename", f"traj_{job_id}.npz")
-    output_path = output_dir / filename
-    md_cfg["_partial_output_path"] = str(
-        output_path.with_name(output_path.stem + ".partial" + output_path.suffix)
-    )
-
-    runner = MDRunner(model, params, md_cfg)
-    rng    = jax.random.PRNGKey(int(md_cfg.get("seed", 0)))
-    traj   = runner.run(R0, mask, species, rng)
+    base_output_path = output_dir / filename
 
     # ------------------------------------------------------------------
-    # 6. Save trajectory.
+    # 6. Determine replicas to run.
     # ------------------------------------------------------------------
-    np.savez(str(output_path), **{k: np.asarray(v) for k, v in traj.items()})
-    md_logger.info(f"Trajectory saved: {output_path}")
+    n_replicas = int(md_cfg.get("n_replicas", 1))
+    base_seed  = int(md_cfg.get("seed", 0))
+
+    if replica_idx is not None:
+        if replica_idx < 0 or replica_idx >= n_replicas:
+            raise ValueError(
+                f"--replica {replica_idx} is out of range for n_replicas={n_replicas}."
+            )
+        replicas_to_run = [replica_idx]
+    else:
+        replicas_to_run = list(range(n_replicas))
+
     md_logger.info(
-        f"Frames: {traj['R'].shape[0]}  "
-        f"T_mean={float(np.mean(traj['T'])):.1f} K  "
-        f"PE_mean={float(np.mean(traj['PE'])):.3f} kcal/mol"
+        f"Replicas: running {len(replicas_to_run)} of {n_replicas}  "
+        f"(base_seed={base_seed}, indices={replicas_to_run})"
     )
 
     # ------------------------------------------------------------------
-    # 7. Write observables CSV.
+    # 7. Build MDRunner once — JIT is compiled on the first replica and
+    #    reused for all subsequent ones (same model, same shapes).
     # ------------------------------------------------------------------
-    obs_keys = [k for k in md_cfg.get("observables", []) if f"obs_{k}" in traj]
-    if obs_keys:
-        obs_filename = md_cfg.get(
-            "observables_filename",
-            Path(filename).stem + "_observables.csv",
+    # partial_output_path is updated per-replica before each run() call.
+    md_cfg_runner = dict(md_cfg)
+    md_cfg_runner["_partial_output_path"] = None
+    runner = MDRunner(model, params, md_cfg_runner)
+
+    # ------------------------------------------------------------------
+    # 8. Run replicas sequentially.
+    # ------------------------------------------------------------------
+    for i in replicas_to_run:
+        replica_seed = base_seed + i
+        output_path  = _replica_output_path(base_output_path, i, n_replicas)
+        partial_path = output_path.with_name(
+            output_path.stem + ".partial" + output_path.suffix
         )
-        obs_path_raw = md_cfg.get("observables_path", None)
-        if obs_path_raw:
-            obs_path = Path(obs_path_raw)
-            if not obs_path.is_absolute():
-                obs_path = output_dir / obs_path
-        else:
-            obs_path = output_dir / obs_filename
 
-        obs_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(obs_path, "w", newline="") as fh:
-            writer = csv.writer(fh)
-            writer.writerow(obs_keys)
-            n_rows = len(traj[f"obs_{obs_keys[0]}"])
-            for i in range(n_rows):
-                writer.writerow([float(traj[f"obs_{k}"][i]) for k in obs_keys])
-        md_logger.info(f"Observables CSV: {obs_path}  ({n_rows} rows, cols: {obs_keys})")
+        runner.partial_output_path = partial_path if md_cfg.get("continuous_output") else None
 
-    # ------------------------------------------------------------------
-    # 8. Optionally convert to LAMMPS dump for OVITO.
-    # ------------------------------------------------------------------
-    if md_cfg.get("dump_for_ovito", False):
-        dump_path = output_path.with_suffix(".dump")
-        padding   = float(md_cfg.get("dump_padding", 20.0))
-        write_lammps_dump(str(output_path), str(dump_path), padding=padding)
-        md_logger.info(f"OVITO dump: {dump_path}")
+        if n_replicas > 1:
+            md_logger.info(
+                f"\n{'='*60}\n"
+                f"Replica {i} / {n_replicas - 1}  seed={replica_seed}  "
+                f"→ {output_path.name}\n"
+                f"{'='*60}"
+            )
+
+        rng  = jax.random.PRNGKey(replica_seed)
+        traj = runner.run(R0, mask, species, rng)
+
+        _save_outputs(traj, output_path, md_cfg, output_dir)
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+
     def _handle_termination(signum, frame):
         raise KeyboardInterrupt(f"received signal {signum}")
 
     signal.signal(signal.SIGTERM, _handle_termination)
     signal.signal(signal.SIGINT, _handle_termination)
 
-    if len(sys.argv) < 2:
-        logging.error("Usage: python scripts/run_md.py <md_config.yaml> [job_id]")
-        sys.exit(1)
-    config_file = sys.argv[1]
-    job_id = sys.argv[2] if len(sys.argv) > 2 else None
+    parser = argparse.ArgumentParser(
+        description="Run CAMEO CG MD simulation(s) from a YAML config."
+    )
+    parser.add_argument("config_file", help="Path to MD config YAML.")
+    parser.add_argument("job_id", nargs="?", default=None,
+                        help="Optional job identifier (default: SLURM_JOB_ID or 'local').")
+    parser.add_argument("--replica", type=int, default=None, metavar="IDX",
+                        help="Run only replica IDX (0-based). "
+                             "Omit to run all replicas sequentially. "
+                             "Intended for SLURM array jobs.")
+    args = parser.parse_args()
+
     try:
-        main(config_file, job_id)
+        main(args.config_file, args.job_id, replica_idx=args.replica)
     except KeyboardInterrupt as exc:
         logging.info(f"MD interrupted cleanly ({exc}).")
         sys.exit(130)

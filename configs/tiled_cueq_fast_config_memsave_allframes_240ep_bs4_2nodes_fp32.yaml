@@ -47,7 +47,7 @@ model:
   allegro:
     num_types: 22
     max_ell: 2
-    hidden_irreps: 64x0o + 64x1o + 64x1e + 64x2e
+    hidden_irreps: 64x0e + 64x0o + 64x1o + 64x1e + 64x2e
     num_layers: 3
     n_radial_basis: 18
     envelope_p: 6

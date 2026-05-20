@@ -175,6 +175,8 @@ def _load_params(path: Path) -> dict[str, Any]:
     if isinstance(payload, dict):
         if isinstance(payload.get("params"), dict):
             params = payload["params"]
+        elif isinstance(payload.get("best_params"), dict):
+            params = payload["best_params"]
         elif (
             isinstance(payload.get("trainer_state"), dict)
             and isinstance(payload["trainer_state"].get("params"), dict)
@@ -205,6 +207,8 @@ def build_runtime(md_config_path: Path) -> RuntimeContext:
     if md_cfg.get("override_use_priors", False):
         config.set("model", "use_priors", True)
         config.set("model", "train_priors", False)
+    if md_cfg.get("cell_list", False):
+        config.set("model", "neighbor_disable_cell_list", False)
 
     loader = DatasetLoader(str(dataset_path))
     frame_idx = int(md_cfg.get("frame_idx", 0))

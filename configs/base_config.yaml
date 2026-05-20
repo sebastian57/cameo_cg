@@ -69,7 +69,7 @@ model:
   allegro:
     num_types: 22
     max_ell: 2                  # 1 | 2 | 3
-    hidden_irreps: 64x0o + 64x1o + 64x1e + 64x2e    # only for cuEq backends
+    hidden_irreps: 64x0e + 64x0o + 64x1o + 64x1e + 64x2e    # only for cuEq backends
     num_layers: 3
     n_radial_basis: 18
     envelope_p: 6
@@ -349,6 +349,24 @@ training:
     cache_path: null
     force_recompute: false
     compute_batch_size: 128
+
+  # --- Noised-residual training (requires prior_residual.enabled=true) ---
+  noised_residual_training:
+    enabled: false
+    seed_offset: 9999
+    duplicate_every: ~  # null = every frame; int >= 2 = every Nth frame; e.g. 2 = every 2nd frame
+    duplicate_offset: 0  # starting offset for the modulo; use to shift which frames are selected
+    compute_batch_size: 100
+    refresh_interval_epochs: 1  # regenerate noised structures and rebuild tiles every N epochs; 0 disables
+    min_pair_distance: 2.5  # shrink per-frame noise until closest valid bead pair is at least this far; 0 disables
+    max_rescale_attempts: 8
+    rescale_factor: 0.5
+    noise_levels: []  # list of numbers or dicts with sigma/name/attenuation/weight
+    # Example (high-noise = zero residual, low-noise = attenuated residual):
+    # noise_levels:
+    #   - {sigma: 0.10, name: tiny_perturbation, attenuation: 0.5, weight: 2.0}
+    #   - {sigma: 0.50, name: small_noise, attenuation: 0.1, weight: 2.0}
+    #   - {sigma: 2.00, name: large_noise, attenuation: 0.0, weight: 2.0}
 
   # --- Export ---
   export_combined_ml_priors: false

@@ -28,18 +28,41 @@ md:
   n_equil_steps:  1000          # steps to discard before production
 
   # ---- Integrator ----
-  integrator: nvt_langevin      # nvt_langevin | nve
+  #   nve             — microcanonical (no thermostat); velocities drawn from Maxwell-Boltzmann at kT
+  #   nvt_langevin    — Langevin thermostat; requires gamma (friction timescale)
+  #   nvt_nose_hoover — Nosé-Hoover chain thermostat; requires tau (coupling timescale)
+  integrator: nvt_langevin
   n_steps:    10000
   dt:         1.0               # fs
-  kT:         300.0             # K
-  gamma:      50.0              # ps  (friction timescale τ = 1/γ)
+  kT:         300.0             # K  — sets target temperature; also used for velocity init in nve
+  gamma:      50.0              # ps  (Langevin friction timescale τ = 1/γ; nvt_langevin only)
+  # tau:      100.0             # ps  (Nosé-Hoover coupling timescale; nvt_nose_hoover only; default 100*dt)
   mass:       12.011            # amu — scalar (all beads) or list [m0, m1, ...] (one per species ID in order)
 
   # ---- Trajectory output (coordinates + forces) ----
   output_dir:      local_work/md_runs/1pro_4zoh
-  output_filename: traj_nvt_10000steps.npz
+  output_filename: traj_nvt_10000steps.npz  # replicas append _rep00, _rep01, … automatically
   output_every:    50           # save full frames every N steps
-  seed: 42
+
+  # ---- Multiple replicas ----
+  # Run N independent simulations with different velocity initializations.
+  # Seeds are derived as: seed + replica_index (0, 1, 2, ...).
+  #
+  # To run all replicas sequentially in one job:
+  #   python scripts/run_md.py configs/md_1pro_4zoh.yaml
+  #
+  # To run replicas in parallel as a SLURM array (one GPU job per replica):
+  #   sbatch --array=0-3 scripts/submit_md_array.sh configs/md_1pro_4zoh.yaml
+  #   (or use submit_md_array.sh which reads n_replicas from the config automatically)
+  #
+  # Output files: traj_nvt_10000steps_rep00.npz, _rep01.npz, ...
+  # With n_replicas: 1 (default), the original filename is used unchanged.
+  n_replicas: 1
+  seed: 42                      # base seed; replica i uses seed+i
+
+  # ---- Continuous output (write partial trajectory while running) ----
+  continuous_output: false      # write a .partial.npz that is updated during the run
+  continuous_output_every: 10  # update partial file every N trajectory frames
 
   # ---- Scalar observables (written to CSV) ----
   observables_every: 10         # log scalars every N steps (can differ from output_every)

@@ -27,10 +27,22 @@ from chemtrain.data.data_loaders import DataLoaders
 from config.manager import ConfigManager
 from data.loader import DatasetLoader, BucketedDatasetLoader, build_tiled_dataset
 from data.preprocessor import CoordinatePreprocessor
+from data_prep.noise_decoy_frames import add_noised_decoy_frames
 from models.combined_model import CombinedModel
 from training.prior_residual import apply_prior_force_residual_targets, pretrain_prior_for_residual
 from training.trainer import Trainer
 from training.dsm import add_dsm_noise_fields, dsm_enabled
+from training.safety_regularization import (
+    SAFETY_FIELD_KEYS,
+    attach_default_safety_fields,
+    load_safety_datasets,
+    mix_safety_into_train_split,
+    safety_enabled,
+)
+from training.noised_residual import (
+    attach_noised_residual_fields,
+    noised_residual_enabled,
+)
 from training.diagnostics import find_training_log, write_dataset_summary
 from training.path_utils import repo_root_from_file, resolve_from_config_or_repo
 from export.exporter import ModelExporter
@@ -223,6 +235,24 @@ def _validate_prior_residual_mode_constraints(config: ConfigManager) -> None:
         )
 
 
+def _validate_safety_regularization_constraints(config: ConfigManager) -> None:
+    """Validate currently supported safety fine-tuning constraints."""
+    if not safety_enabled(config):
+        return
+    if config.get_batch_mode() != "standard":
+        raise ValueError(
+            "training.safety_regularization.enabled=true currently requires "
+            "data.batch_mode='standard'. Tiled safety support needs explicit "
+            "metadata propagation and is intentionally disabled for this first test."
+        )
+    if not config.prior_residual_enabled():
+        raise ValueError(
+            "training.safety_regularization.enabled=true currently expects "
+            "training.prior_residual.enabled=true so safety frames regularize "
+            "the ML residual model."
+        )
+
+
 def _pretrain_for_residual_if_needed(
     config: ConfigManager,
     dataset: dict,
@@ -288,6 +318,41 @@ def _apply_prior_residual_if_enabled(
         float(stats.get("mean_residual_norm", 0.0)),
     )
     return dataset
+
+
+def _apply_noise_decoys_if_enabled(config: ConfigManager, dataset: dict, seed: int) -> dict:
+    """Append noised duplicate frames when data.noise_decoys.every_n is configured."""
+    cfg = config.get("data", "noise_decoys", default={}) or {}
+    if not isinstance(cfg, dict):
+        cfg = {"every_n": cfg}
+    every_n_raw = cfg.get("every_n", False)
+    if every_n_raw in (False, None, 0, "false", "False", "none", "None", ""):
+        return dataset
+
+    every_n = int(every_n_raw)
+    sigma = float(cfg.get("sigma", cfg.get("noise_sigma", 0.5)))
+    decoy_seed = int(cfg.get("seed", seed + int(cfg.get("seed_offset", 2718))))
+    n_before = int(dataset["R"].shape[0])
+    augmented = add_noised_decoy_frames(
+        dataset,
+        every_n=every_n,
+        sigma=sigma,
+        seed=decoy_seed,
+        source_key=str(cfg.get("source_key", "source_name")),
+        zero_force_decoys=bool(cfg.get("zero_force_decoys", True)),
+    )
+    n_after = int(augmented["R"].shape[0])
+    data_logger.info(
+        "[NoiseDecoys] Added %d noised decoy frames from every_n=%d sigma=%.4g seed=%d "
+        "(frames: %d -> %d).",
+        n_after - n_before,
+        every_n,
+        sigma,
+        decoy_seed,
+        n_before,
+        n_after,
+    )
+    return augmented
 
 
 def _compute_force_loss_weights(split: dict) -> np.ndarray:
@@ -551,6 +616,9 @@ def _build_loader_kwargs(split: dict) -> dict:
             "dsm_eps",
             "dsm_sigma",
             "dsm_loss_mask",
+            "is_noised_frame",
+            "noise_level_id",
+            *SAFETY_FIELD_KEYS,
         ):
             loader_kwargs[key] = value
         elif key.startswith("meta_") or key in ("n_valid", "n_segments"):
@@ -795,38 +863,22 @@ def _shard_tiles_by_rank(tiled: dict, rank: int, world_size: int) -> dict:
     return sharded
 
 
-def _build_train_split(
-    dataset: dict,
-    n_train: int,
+def _build_tiled_split_from_source(
+    train_source: dict,
     config: ConfigManager,
     seed: int,
 ) -> dict:
-    """Build the training split and optionally tile it."""
-    mask_slice = np.asarray(dataset["mask"][:n_train], dtype=np.float32)
-    species_raw = dataset.get("species")
-    train_split = {
-        "R": np.asarray(dataset["R"][:n_train], dtype=np.float32),
-        "F": np.asarray(dataset["F"][:n_train], dtype=np.float32),
-        "mask": mask_slice,
-        "species": (
-            np.asarray(species_raw[:n_train], dtype=np.int32)
-            if species_raw is not None
-            else np.zeros_like(mask_slice, dtype=np.int32)
-        ),
-    }
-    structure_ids = np.arange(n_train, dtype=np.int32)
-    if config.get_batch_mode() != "tiled":
-        train_split = _attach_batch_metadata(train_split, structure_ids)
-        _log_train_split_profile(train_split, config)
-        return train_split
-
+    """Build packed tiles from untiled structures as late as possible."""
     t_tile_build_start = time.perf_counter()
+    structure_ids = train_source.get("structure_ids")
+    if structure_ids is None:
+        structure_ids = np.arange(train_source["R"].shape[0], dtype=np.int32)
     tiled = build_tiled_dataset(
-        R=train_split["R"],
-        F=train_split["F"],
-        mask=train_split["mask"],
-        species=train_split["species"],
-        structure_ids=structure_ids,
+        R=np.asarray(train_source["R"], dtype=np.float32),
+        F=np.asarray(train_source["F"], dtype=np.float32),
+        mask=np.asarray(train_source["mask"], dtype=np.float32),
+        species=np.asarray(train_source["species"], dtype=np.int32),
+        structure_ids=np.asarray(structure_ids, dtype=np.int32),
         target_beads=config.get_tile_target_beads(),
         bucket_beads=config.get_tile_bucket_beads(),
         target_edges=config.get_tile_target_edges(),
@@ -849,7 +901,6 @@ def _build_train_split(
     tiled = _attach_batch_metadata(tiled, np.arange(tiled["R"].shape[0], dtype=np.int32))
     t_tile_meta_end = time.perf_counter()
 
-    # Shard tiles across ranks for data parallelism
     if _WORLD_SIZE > 1:
         tiled = _shard_tiles_by_rank(tiled, _RANK, _WORLD_SIZE)
 
@@ -861,7 +912,7 @@ def _build_train_split(
         "isolate_large=%s, large_threshold=%s, large_edge_threshold=%s, "
         "spatial_separation=%s, structure_gap=%.2f, drop_incomplete=%s).",
         int(tiled["R"].shape[0]),
-        int(train_split["R"].shape[0]),
+        int(train_source["R"].shape[0]),
         int(config.get_tile_target_beads()),
         config.get_tile_bucket_beads(),
         config.get_tile_target_edges(),
@@ -898,6 +949,22 @@ def _build_train_split(
     return tiled
 
 
+def _build_train_split(
+    dataset: dict,
+    n_train: int,
+    config: ConfigManager,
+    seed: int,
+) -> dict:
+    """Build the training split and optionally tile it."""
+    train_split = _build_tiled_train_source(dataset, n_train)
+    if config.get_batch_mode() != "tiled":
+        train_split = _attach_batch_metadata(train_split, train_split["structure_ids"])
+        _log_train_split_profile(train_split, config)
+        return train_split
+
+    return _build_tiled_split_from_source(train_split, config, seed)
+
+
 def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     """
     Main training pipeline.
@@ -917,6 +984,7 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     config = ConfigManager(config_file)
     _validate_tiled_mode_constraints(config)
     _validate_prior_residual_mode_constraints(config)
+    _validate_safety_regularization_constraints(config)
     _apply_grad_accum_overrides(config)
     env_neighbor_fmt = os.environ.get("CHEMTRAIN_NEIGHBOR_LIST_FORMAT")
     effective_neighbor_fmt = config.get_neighbor_list_format()
@@ -1023,6 +1091,8 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         data_logger.info(f"[Preprocessing] Computed box: {jax.device_get(box)}")
         data_logger.info(f"[Preprocessing] R_shift: {jax.device_get(R_shift)}")
 
+    dataset = _apply_noise_decoys_if_enabled(config, dataset, seed=seed)
+
     # LBFGS prior pretraining must happen against raw F_ref, before residuals are subtracted.
     fitted_prior_params = _pretrain_for_residual_if_needed(config, dataset, loader.id_to_aa)
 
@@ -1044,6 +1114,11 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         id_to_aa=loader.id_to_aa,
         dataset_path=data_path_obj,
         export_dir=export_dir,
+    )
+
+    safety_dataset = load_safety_datasets(
+        config,
+        repo_root=repo_root_from_file(__file__),
     )
 
     # Spline priors are an add-on mode; LBFGS pretraining is only valid for
@@ -1085,13 +1160,58 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     tiled_train_source = None
     if config.get_batch_mode() == "tiled":
         tiled_train_source = _build_tiled_train_source(dataset, N_train)
-
-    train_split = _build_train_split(
-        dataset=dataset,
-        n_train=N_train,
-        config=config,
-        seed=split_seed,
-    )
+        train_source = tiled_train_source
+        if noised_residual_enabled(config):
+            training_logger.info(
+                "[NoisedResidual] Expanding untiled train source before tiling."
+            )
+            train_source = attach_noised_residual_fields(
+                split=tiled_train_source,
+                config=config,
+                id_to_aa=loader.id_to_aa,
+                seed=split_seed,
+                split_seed=split_seed,
+                fitted_params=fitted_prior_params,
+            )
+            training_logger.info(
+                "[NoisedResidual] Untiled train source expanded: n_clean=%d n_noised=%d n_total=%d.",
+                int(np.sum(train_source.get("is_noised_frame", 0) == 0)),
+                int(np.sum(train_source.get("is_noised_frame", 0) == 1)),
+                int(train_source["R"].shape[0]),
+            )
+        train_split = _build_tiled_split_from_source(train_source, config, split_seed)
+    else:
+        train_split = _build_train_split(
+            dataset=dataset,
+            n_train=N_train,
+            config=config,
+            seed=split_seed,
+        )
+        if noised_residual_enabled(config):
+            training_logger.info(
+                "[NoisedResidual] Expanding train split with noised residual frames."
+            )
+            train_split = attach_noised_residual_fields(
+                split=train_split,
+                config=config,
+                id_to_aa=loader.id_to_aa,
+                seed=split_seed,
+                split_seed=split_seed,
+                fitted_params=fitted_prior_params,
+            )
+            training_logger.info(
+                "[NoisedResidual] Train split expanded: n_clean=%d n_noised=%d n_total=%d.",
+                int(np.sum(train_split.get("is_noised_frame", 0) == 0)),
+                int(np.sum(train_split.get("is_noised_frame", 0) == 1)),
+                int(train_split["R"].shape[0]),
+            )
+    if safety_enabled(config):
+        train_split = mix_safety_into_train_split(
+            train_split,
+            safety_dataset,
+            config,
+            seed=split_seed,
+        )
     _configure_auto_leash_d_safe(
         config, tiled_train_source if tiled_train_source is not None else train_split
     )
@@ -1163,6 +1283,8 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
             )
             if dsm_enabled(config):
                 val_split = add_dsm_noise_fields(val_split, config, seed=split_seed + 100000)
+            if safety_enabled(config):
+                val_split = attach_default_safety_fields(val_split, config)
             val_loader = NumpyDataLoader(**_build_loader_kwargs(val_split))
     elif N_val == 0 or val_fraction == 0.0:
         val_loader = train_loader
@@ -1170,6 +1292,8 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         val_split = _build_validation_split(dataset, N_train, N_train + N_val)
         if dsm_enabled(config):
             val_split = add_dsm_noise_fields(val_split, config, seed=split_seed + 100000)
+        if safety_enabled(config):
+            val_split = attach_default_safety_fields(val_split, config)
         val_loader = NumpyDataLoader(**_build_loader_kwargs(val_split))
 
     loaders = DataLoaders(
@@ -1205,7 +1329,26 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         val_loader=val_loader,
         train_data=train_data,
         tiled_train_source=tiled_train_source,
+        noised_id_to_aa=loader.id_to_aa,
+        noised_fitted_params=fitted_prior_params,
     )
+
+    init_ckpt_cfg = config.get("training", "init_from_checkpoint", default={}) or {}
+    if isinstance(init_ckpt_cfg, dict) and bool(init_ckpt_cfg.get("enabled", False)):
+        init_path_raw = init_ckpt_cfg.get("path")
+        if init_path_raw is None:
+            raise ValueError(
+                "training.init_from_checkpoint.enabled=true requires a path."
+            )
+        init_path = resolve_from_config_or_repo(
+            init_path_raw,
+            config.config_path,
+            repo_root_from_file(__file__),
+        )
+        trainer.initialize_params_from_checkpoint(
+            str(init_path),
+            source_key=str(init_ckpt_cfg.get("source_key", "best_params")),
+        )
 
     # Handle resume from checkpoint
     resolved_checkpoint = None
@@ -1547,6 +1690,8 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
             train_loader=train_loader, val_loader=val_loader,
             train_data=train_data,
             tiled_train_source=tiled_train_source,
+            noised_id_to_aa=loader.id_to_aa,
+            noised_fitted_params=None,
         )
 
         if prev_params is not None:

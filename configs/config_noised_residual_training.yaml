@@ -1,0 +1,156 @@
+seed: 1337
+model_context: noised_residual_experiment
+model_id: allegro_prior_residual_noised
+
+paths:
+  output_dir: ./local_work/outputs/noised_residual_training_example
+
+data:
+  path: data_prep/datasets/example.npz       # <-- replace with your dataset
+  max_frames: null
+  batch_mode: standard                        # or tiled
+
+preprocessing:
+  buffer_multiplier: 2.0
+  park_multiplier: 0.95
+
+model:
+  ml_model: allegro
+  use_priors: true
+  train_priors: false
+  prior_only: false
+  cutoff: 10.0
+  dr_threshold: 0.5
+  neighbor_list_format: dense
+  pbc: false
+
+  allegro:
+    num_types: 22
+    max_ell: 2
+    hidden_irreps: 64x0e + 64x0o + 64x1o + 64x1e + 64x2e
+    num_layers: 3
+    n_radial_basis: 18
+    envelope_p: 6
+    embed_n_hidden: [64, 128]
+    species_embed: 32
+    mlp_n_hidden: 96
+    mlp_n_layers: 3
+    mlp_activation: mish
+    mlp_hidden_activation: silu
+    mlp_output_activation: tanh
+    avg_num_neighbors: 15
+    max_edge_multiplier: 1.25
+
+  priors:
+    use_spline_priors: true
+    spline_file: data_prep/datasets/fitted_priors_spline.npz
+    residue_specific_angles: false
+    min_repulsive_sep: 6
+    excluded_volume_min_sep: 2
+    excluded_volume_max_sep: 5
+    weights:
+      bond: 0.5
+      angle: 0.25
+      dihedral: 0.25
+      repulsive: 1.0
+      excluded_volume: 0.0
+      wca: 0.0
+      fene: 0.0
+      leash: 0.0
+      dh: 0.0
+      stickiness: 0.0
+      salt_bridge: 0.0
+    bond:
+      r0: 3.8375
+      kr: 154.5
+    theta0: 1.834
+    k_theta: 8.27
+    epsilon: 1.0
+    sigma: 3.0
+    epsilon_ex: 1.0
+    sigma_ex: 3.5
+
+export:
+  mode: auto
+
+optimizer:
+  grad_clip: 2.0
+  adabelief:
+    lr: 0.001
+    peak_lr: 0.03
+    end_lr: 0.001
+    warmup_steps: 200
+    decay_steps: 10000
+    beta1: 0.95
+    beta2: 0.999
+    eps: 1.0e-8
+    grad_clip: 5.0
+    weight_decay: 0.0
+
+training:
+  stages:
+    - optimizer: adabelief
+      epochs: 80
+
+  val_fraction: 0.1
+  batch_per_device: 4
+  batch_cache: 10
+  checkpoint_freq: 10
+
+  gammas:
+    F: 1.0
+    U: 0.0
+
+  force_loss_normalization: legacy_mean
+
+  dsm:
+    enabled: false
+
+  enable_mixed_precision: false
+  compute_dtype: float32
+  param_dtype: float32
+  reduce_dtype: float32
+
+  enable_buffer_donation: false
+  donate_mode: state_only
+  remat_level: 0
+  remat_policy: none
+
+  grad_accum_steps: 1
+  grad_accum_mode: stack_scan
+
+  pretrain_prior: false
+
+  prior_residual:
+    enabled: true
+    cache_enabled: true
+    cache_path: null
+    force_recompute: false
+    compute_batch_size: 128
+
+  noised_residual_training:
+    enabled: true
+    seed_offset: 9999
+    duplicate_every: ~  # null = every frame gets noised copies
+    duplicate_offset: 0
+    compute_batch_size: 100
+    refresh_interval_epochs: 1  # regenerate noised structures and rebuild tiles every N epochs; 0 disables
+    min_pair_distance: 2.5  # shrink per-frame noise until closest valid bead pair is at least this far; 0 disables
+    max_rescale_attempts: 8
+    rescale_factor: 0.5
+    noise_levels:
+      - sigma: 0.10
+        name: tiny_perturbation
+        attenuation: 0.5
+        weight: 2.0
+      - sigma: 0.50
+        name: small_noise
+        attenuation: 0.1
+        weight: 2.0
+      - sigma: 2.00
+        name: large_noise
+        attenuation: 0.0
+        weight: 2.0
+
+  profiling:
+    enabled: false

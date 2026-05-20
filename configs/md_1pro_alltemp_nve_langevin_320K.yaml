@@ -1,0 +1,52 @@
+# MD simulation config for 1pro_alltemp trained model (nvt_langevin, 320K)
+#
+# Units (units: physical, the default):
+#   dt      — fs   (femtoseconds)
+#   kT      — K    (Kelvin)
+#   gamma   — ps   (Langevin friction timescale τ; γ = 1/τ internally)
+#   mass    — amu  (unchanged)
+
+md:
+  units: physical
+
+  training_config_path: local_work/outputs/20260519_1pro_alltemp_aggforce_base_priors_noise_every50_sigma0p5/exports/1protein_formd_aggforce_base_priors_noise_decoys_base_priors_tiled_sgd_nesterov_300ep_noise_every50_sigma0p5_config.yaml
+  params_path:          local_work/outputs/20260519_1pro_alltemp_aggforce_base_priors_noise_every50_sigma0p5/exports/1protein_formd_aggforce_base_priors_noise_decoys_base_priors_tiled_sgd_nesterov_300ep_noise_every50_sigma0p5_params.pkl
+  dataset_path:         data_prep/datasets/1pro_4zohB01_alltemp_cg_aggforce/02_cg_npz/4zohB01_cg.npz
+
+  override_use_priors: true
+  frame_idx: 0
+
+  zero_com_velocity: true
+
+  equilibrate:    false
+  n_equil_steps:  0
+
+  integrator: nve
+  n_steps:    5000
+  dt:         1.0
+  kT:         320.0
+  gamma:      50.0
+  mass:       12.011
+
+  output_dir:      local_work/md_runs/20260519_1pro_alltemp_nve_langevin_320K_v2
+  output_filename: traj_nve_langevin_10000steps.npz
+  output_every:    50
+
+  n_replicas: 5
+  seed: 42
+
+  continuous_output: false
+  continuous_output_every: 10
+
+  observables_every: 10
+  observables:
+    - step
+    - T
+    - KE
+    - PE
+    - E_total
+    - pressure
+    - box_volume
+
+  dump_for_ovito: true
+  dump_padding:   20.0

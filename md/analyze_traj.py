@@ -161,9 +161,16 @@ def load_npz_coords(
     """
     with np.load(str(path), allow_pickle=False) as data:
         R = data["R"].astype(np.float64)          # (n_frames, N, 3)
-        steps = data["step"].astype(np.int64)      # (n_frames,)
+        # Reference datasets (e.g. training NPZ) may have no 'step' key.
+        if "step" in data:
+            steps_all = data["step"].astype(np.int64)
+        else:
+            steps_all = np.arange(R.shape[0], dtype=np.int64)
+        # Reference datasets store mask per-frame (n_frames, N); trajectory
+        # NPZ files from run_md.py store a single 1-D mask (N,).
         if "mask" in data:
-            valid = np.asarray(data["mask"]) > 0   # (N,)
+            m = np.asarray(data["mask"])
+            valid = (m[0] if m.ndim > 1 else m) > 0
         else:
             valid = np.ones(R.shape[1], dtype=bool)
 
@@ -173,7 +180,7 @@ def load_npz_coords(
         indices = indices[:max_frames]
 
     R = R[indices][:, valid, :]
-    steps = steps[indices]
+    steps = steps_all[indices]
     return R, steps
 
 

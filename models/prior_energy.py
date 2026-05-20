@@ -947,6 +947,9 @@ class PriorEnergy:
             # Excluded volume params (softer than long-range repulsion, for sep 2-5)
             "epsilon_ex": jnp.asarray(prior_params.get("epsilon_ex", 1.0), dtype=jnp.float32),
             "sigma_ex": jnp.asarray(prior_params.get("sigma_ex", 3.5), dtype=jnp.float32),
+            # Hard repulsion params (n=12 steep repulsion)
+            "epsilon_hard": jnp.asarray(prior_params.get("epsilon_hard", 1.0), dtype=jnp.float32),
+            "sigma_hard": jnp.asarray(prior_params.get("sigma_hard", 3.0), dtype=jnp.float32),
         }
         self.params.update(self._init_new_term_params(prior_params))
         self.params.update(self._init_wca_params(prior_params))
@@ -972,6 +975,9 @@ class PriorEnergy:
             # Excluded volume params (softer than long-range repulsion, for sep 2-5)
             "epsilon_ex": jnp.asarray(prior_params.get("epsilon_ex", 1.0), dtype=jnp.float32),
             "sigma_ex": jnp.asarray(prior_params.get("sigma_ex", 3.5), dtype=jnp.float32),
+            # Hard repulsion params (n=12 steep repulsion)
+            "epsilon_hard": jnp.asarray(prior_params.get("epsilon_hard", 1.0), dtype=jnp.float32),
+            "sigma_hard": jnp.asarray(prior_params.get("sigma_hard", 3.0), dtype=jnp.float32),
         }
         self.params.update(self._init_new_term_params(prior_params))
         self.params.update(self._init_wca_params(prior_params))
@@ -1130,6 +1136,54 @@ class PriorEnergy:
         # Soft-sphere repulsion: (sigma/r)^4
         rep_term = (p["sigma"] / r_safe) ** 4
         E_rep = p["epsilon"] * jnp.sum(jnp.where(rep_valid, rep_term, 0.0))
+
+        return E_rep
+
+    def compute_repulsive_hard_energy(
+        self,
+        R: jax.Array,
+        mask: jax.Array,
+        params: Optional[Dict[str, jax.Array]] = None,
+        segment_id: Optional[jax.Array] = None,
+    ) -> jax.Array:
+        """
+        Compute hard-sphere repulsive energy using (sigma/r)^12 potential.
+
+        This is a much steeper, more short-range repulsion than compute_repulsive_energy.
+        U(r) = epsilon * (sigma / r)^12
+
+        Intended to create a hard barrier that beads cannot easily overcome.
+        The steep n=12 power means the force grows very rapidly as r decreases.
+
+        Args:
+            R: Coordinates, shape (n_atoms, 3)
+            mask: Validity mask, shape (n_atoms,)
+            params: Optional prior params dict (for train_priors mode)
+
+        Returns:
+            Total hard repulsive energy (scalar)
+        """
+        p = params if params is not None else self.params
+        pi, pj = self.rep_pairs[:, 0], self.rep_pairs[:, 1]
+
+        rep_valid = (mask[pi] * mask[pj]) > 0
+        rep_valid = rep_valid & _same_segment_mask(self.rep_pairs, segment_id)
+
+        Rp_i, Rp_j = R[pi], R[pj]
+        dR_rep = Rp_i - Rp_j
+        r_rep = _safe_norm(dR_rep)
+
+        r_rep = jnp.where(rep_valid, r_rep, jax.lax.stop_gradient(r_rep))
+        r_rep = jnp.where(rep_valid, r_rep, 1e6)
+
+        r_min = jnp.array(1e-3, dtype=R.dtype)
+        r_safe = jnp.maximum(r_rep, r_min)
+
+        epsilon_hard = p.get("epsilon_hard", p.get("epsilon", 1.0))
+        sigma_hard = p.get("sigma_hard", p.get("sigma", 3.0))
+
+        rep_term = (sigma_hard / r_safe) ** 12
+        E_rep = epsilon_hard * jnp.sum(jnp.where(rep_valid, rep_term, 0.0))
 
         return E_rep
 
@@ -1528,6 +1582,12 @@ class PriorEnergy:
             if E_local_bond_in_weight != 0.0
             else jnp.array(0.0, dtype=R.dtype)
         )
+        E_rep_hard_weight = self.weights.get("repulsive_hard", 0.0)
+        E_rep_hard_raw = (
+            self.compute_repulsive_hard_energy(R, mask, params=p, segment_id=segment_id)
+            if E_rep_hard_weight != 0.0
+            else jnp.array(0.0, dtype=R.dtype)
+        )
 
         # Apply weights
         E_bond = self.weights["bond"] * E_bond_raw
@@ -1543,6 +1603,7 @@ class PriorEnergy:
         E_sb = self.weights.get("salt_bridge", 0.0) * E_sb_raw
         E_local_in = E_local_in_weight * E_local_in_raw
         E_local_bond_in = E_local_bond_in_weight * E_local_bond_in_raw
+        E_rep_hard = E_rep_hard_weight * E_rep_hard_raw
 
         E_total = (
             E_bond
@@ -1558,12 +1619,14 @@ class PriorEnergy:
             + E_sb
             + E_local_in
             + E_local_bond_in
+            + E_rep_hard
         )
 
         return {
             "E_bond": E_bond,
             "E_angle": E_angle,
             "E_repulsive": E_rep,
+            "E_repulsive_hard": E_rep_hard,
             "E_dihedral": E_dih,
             "E_excluded_volume": E_ex,
             "E_wca": E_wca,

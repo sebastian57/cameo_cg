@@ -75,3 +75,20 @@ def write_lammps_dump(
         f"  box: {['[{:.2f}, {:.2f}]'.format(lo, hi) for lo, hi in bounds]}\n"
         f"  atom types: {sorted(set(atom_types.tolist()))}"
     )
+
+
+if __name__ == "__main__":
+    import argparse
+
+    ap = argparse.ArgumentParser(
+        description="Convert a cameo_cg trajectory NPZ to a LAMMPS dump for OVITO."
+    )
+    ap.add_argument("traj_npz", help="Input trajectory NPZ (from run_md.py)")
+    ap.add_argument("output_dump", nargs="?", default=None,
+                    help="Output .dump path. Default: same stem as input with .dump extension.")
+    ap.add_argument("--padding", type=float, default=20.0,
+                    help="Extra box margin in Å (default: 20.0)")
+    args = ap.parse_args()
+
+    out = args.output_dump or str(Path(args.traj_npz).with_suffix(".dump"))
+    write_lammps_dump(args.traj_npz, out, padding=args.padding)

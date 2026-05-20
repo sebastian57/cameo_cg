@@ -286,7 +286,24 @@ def apply_prior_force_residual_targets(
             param_overrides=fitted_params,
         )
 
+    decoy_zero_force = np.asarray(
+        dataset.get("noise_decoy_zero_force", np.zeros((R.shape[0],), dtype=np.float32)),
+        dtype=np.float32,
+    )
+    if decoy_zero_force.shape[0] != R.shape[0]:
+        raise ValueError(
+            "noise_decoy_zero_force must have one value per frame when present; "
+            f"got {decoy_zero_force.shape[0]} for {R.shape[0]} frames."
+        )
     f_residual = F_ref - f_prior
+    zero_delta = decoy_zero_force > 0
+    if np.any(zero_delta):
+        f_residual[zero_delta] = F_ref[zero_delta]
+        training_logger.info(
+            "[PriorResidual] Preserved zero-delta targets for %d noised decoy frames "
+            "(prior subtraction skipped for those labels).",
+            int(np.sum(zero_delta)),
+        )
     dataset["F"] = np.asarray(f_residual, dtype=np.float32)
 
     if config.prior_residual_cache_enabled() and (not cache_hit or config.prior_residual_force_recompute()):

@@ -23,6 +23,18 @@ from chemtrain.data.data_loaders import DataLoaders
 from config.types import PretrainResult, TrainingResults, StageResult
 from .optimizers import create_optimizer_from_config
 from .dsm import add_dsm_noise_fields, dsm_config, dsm_enabled, dsm_error, make_dsm_quantity
+from .safety_regularization import (
+    SAFETY_FIELD_KEYS,
+    make_safety_quantities,
+    safety_config,
+    safety_error_fns,
+    safety_gammas,
+    safety_weights_keys,
+)
+from .noised_residual import (
+    attach_noised_residual_fields,
+    noised_residual_config_parsed,
+)
 from .diagnostics import log_neighbor_debug_once
 from utils.logging import training_logger
 from data.loader import build_tiled_dataset, attach_batch_metadata
@@ -80,6 +92,8 @@ class Trainer:
         val_loader: Optional[Any] = None,
         train_data: Optional[Dict[str, jax.Array]] = None,
         tiled_train_source: Optional[Dict[str, np.ndarray]] = None,
+        noised_id_to_aa: Optional[Dict[int, str]] = None,
+        noised_fitted_params: Optional[Dict[str, np.ndarray]] = None,
         seed: Optional[int] = None,  # Optional seed override for ensemble training
     ):
         """
@@ -92,6 +106,8 @@ class Trainer:
             val_loader: Validation data loader (optional)
             train_data: Optional dict with R, F, mask for prior pre-training
             tiled_train_source: Untiled training structures used to rebuild tiled batches
+            noised_id_to_aa: Optional species metadata for noised residual prior forces
+            noised_fitted_params: Optional fitted prior parameters for noised residual prior forces
             seed: Optional seed override (for ensemble training). If None, uses config seed.
         """
         self.model = model
@@ -107,7 +123,22 @@ class Trainer:
         if self._dsm_cfg["enabled"]:
             self.gammas = dict(self.gammas)
             self.gammas["DSM"] = float(self._dsm_cfg["lambda"])
+        self._safety_cfg = safety_config(config)
+        if self._safety_cfg["enabled"]:
+            self.gammas = dict(self.gammas)
+            self.gammas.update(safety_gammas(config))
+            training_logger.info(
+                "[Safety] Regularization enabled: gammas=%s",
+                {k: self.gammas[k] for k in safety_gammas(config)},
+            )
         self._dsm_refresh_interval_steps = int(self._dsm_cfg.get("refresh_interval_steps", 0))
+        self._noised_residual_cfg = noised_residual_config_parsed(config)
+        self._noised_residual_enabled = bool(self._noised_residual_cfg.get("enabled", False))
+        self._noised_refresh_interval_epochs = int(
+            self._noised_residual_cfg.get("refresh_interval_epochs", 1)
+        )
+        self._noised_id_to_aa = noised_id_to_aa
+        self._noised_fitted_params = noised_fitted_params
         self._dsm_refresh_count = 0
         self._dsm_optimizer_steps = 0
         self._seed = seed if seed is not None else config.get_seed()
@@ -123,8 +154,16 @@ class Trainer:
             os.environ.get("CHEMTRAIN_GRAD_ACCUM_MODE", "stack_scan")
         ).strip().lower()
         self._force_loss_normalization = config.get_force_loss_normalization()
-        self._tile_rebuild_each_epoch = (
+        self._config_tile_rebuild_each_epoch = (
             self._batch_mode == "tiled" and config.tile_rebuild_each_epoch_enabled()
+        )
+        self._tile_rebuild_each_epoch = (
+            self._config_tile_rebuild_each_epoch
+            or (
+                self._batch_mode == "tiled"
+                and self._noised_residual_enabled
+                and self._noised_refresh_interval_epochs > 0
+            )
         )
         self._tile_shuffle_structures = config.tile_shuffle_structures_enabled()
         self._tile_sort_by_size = config.tile_sort_by_size_enabled()
@@ -1375,6 +1414,7 @@ class Trainer:
                 "dsm_eps",
                 "dsm_sigma",
                 "dsm_loss_mask",
+                *SAFETY_FIELD_KEYS,
             ):
                 loader_kwargs[key] = value
             elif key.startswith("meta_") or key in ("n_valid", "n_segments"):
@@ -1388,12 +1428,22 @@ class Trainer:
 
         epoch_seed = int(self._seed + epoch_idx)
         t_build_start = time.perf_counter()
+        train_source = self._tiled_train_source
+        if self._noised_residual_enabled:
+            train_source = attach_noised_residual_fields(
+                train_source,
+                self.config,
+                id_to_aa=self._noised_id_to_aa,
+                seed=epoch_seed,
+                split_seed=epoch_seed,
+                fitted_params=self._noised_fitted_params,
+            )
         tiled = build_tiled_dataset(
-            R=self._tiled_train_source["R"],
-            F=self._tiled_train_source["F"],
-            mask=self._tiled_train_source["mask"],
-            species=self._tiled_train_source["species"],
-            structure_ids=self._tiled_train_source.get("structure_ids"),
+            R=train_source["R"],
+            F=train_source["F"],
+            mask=train_source["mask"],
+            species=train_source["species"],
+            structure_ids=train_source.get("structure_ids"),
             target_beads=int(self._tile_target_beads),
             bucket_beads=self._tile_bucket_beads,
             target_edges=self._tile_target_edges,
@@ -1470,6 +1520,13 @@ class Trainer:
 
         def _refresh_tiles(chemtrain_trainer, *args, **kwargs):
             epoch_idx = int(stage_start_epoch + getattr(chemtrain_trainer, "_epoch", 0))
+            if (
+                not self._config_tile_rebuild_each_epoch
+                and self._noised_residual_enabled
+                and self._noised_refresh_interval_epochs > 1
+            ):
+                if epoch_idx % self._noised_refresh_interval_epochs != 0:
+                    return
             train_split = self._build_epoch_tiled_split(epoch_idx)
             train_loader = NumpyDataLoader(**self._split_loader_kwargs(train_split))
             chemtrain_trainer.set_loader(train_loader, stage="training")
@@ -1542,6 +1599,8 @@ class Trainer:
             fns["F"] = valid_component_mse
         if self._dsm_cfg["enabled"]:
             fns["DSM"] = dsm_error
+        if self._safety_cfg["enabled"]:
+            fns.update(safety_error_fns(self.config))
         return fns or None
 
     def _force_matching_weights_keys(self) -> Optional[Dict[str, str]]:
@@ -1553,18 +1612,21 @@ class Trainer:
             keys["F"] = "force_loss_weights"
         if self._dsm_cfg["enabled"]:
             keys["DSM"] = "dsm_loss_mask"
+        if self._safety_cfg["enabled"]:
+            keys.update(safety_weights_keys(self.config))
         return keys or None
 
     def _force_matching_additional_targets(self) -> Optional[Dict[str, Callable]]:
         """Return Chemtrain additional target quantities."""
-        if not self._dsm_cfg["enabled"]:
-            return None
-        return {
-            "DSM": make_dsm_quantity(
+        targets: Dict[str, Callable] = {}
+        if self._dsm_cfg["enabled"]:
+            targets["DSM"] = make_dsm_quantity(
                 self.model.dsm_energy_fn_template,
                 kT=float(self._dsm_cfg["kT"]),
             )
-        }
+        if self._safety_cfg["enabled"]:
+            targets.update(make_safety_quantities(self.model, self.config))
+        return targets or None
 
     def _loader_reference_data(self, loader: Any) -> Dict[str, Any]:
         """Extract loader arrays while preserving auxiliary batch metadata."""
@@ -2309,6 +2371,52 @@ class Trainer:
 
         self.best_params = self.params
         training_logger.info(f"Loaded parameters from: {input_path}")
+
+    def initialize_params_from_checkpoint(
+        self,
+        input_path: str,
+        source_key: str = "best_params",
+    ) -> None:
+        """Initialize model params from a checkpoint without resuming optimizer state."""
+        input_path = Path(input_path)
+        if not input_path.exists():
+            raise FileNotFoundError(f"Initial checkpoint not found: {input_path}")
+
+        with input_path.open("rb") as f:
+            payload = pickle.load(f)
+
+        params = payload
+        key = str(source_key or "best_params")
+        if isinstance(payload, dict):
+            if key == "trainer_state.params":
+                trainer_state = payload.get("trainer_state", {})
+                params = trainer_state.get("params")
+            elif key in payload:
+                params = payload[key]
+            elif key == "params" and isinstance(payload.get("trainer_state"), dict):
+                params = payload["trainer_state"].get("params")
+            else:
+                raise KeyError(
+                    f"Checkpoint {input_path} does not contain source_key={key!r}. "
+                    f"Available top-level keys: {sorted(payload.keys())}"
+                )
+
+        if isinstance(params, dict) and "ml" not in params:
+            params = {"ml": params}
+        if not isinstance(params, dict) or "ml" not in params:
+            raise TypeError(
+                f"Unsupported initial params payload from {input_path}: {type(params)}"
+            )
+
+        self.params = jax.tree_util.tree_map(jnp.asarray, params)
+        self.best_params = self.params
+        self._resume_opt_state = None
+        training_logger.info(
+            "Initialized model params from checkpoint %s (source_key=%s); "
+            "optimizer state was not restored.",
+            input_path,
+            key,
+        )
 
     def get_best_params(self) -> Dict[str, Any]:
         """Get best parameters from training."""

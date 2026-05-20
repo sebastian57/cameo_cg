@@ -2,6 +2,7 @@
 local_work/*
 !local_work/.gitignore
 new_conf.yaml
+slurm/
 
 # --- local agent / assistant notes (not for repo) ---
 LOCAL_AGENT_CONTEXT.md

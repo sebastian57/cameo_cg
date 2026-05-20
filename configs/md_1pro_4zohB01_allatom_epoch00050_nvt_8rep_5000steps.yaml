@@ -1,0 +1,86 @@
+# 8-replica NVT-Langevin run for TICA comparison against the reference dataset.
+#
+# Run with:
+#   sbatch scripts/submit_md_parallel.sh configs/md_1pro_4zohB01_allatom_epoch00050_nvt_8rep_5000steps.yaml
+#
+# Or interactively (4 GPUs visible):
+#   python scripts/run_md_parallel.py configs/md_1pro_4zohB01_allatom_epoch00050_nvt_8rep_5000steps.yaml
+#
+# Produces 8 trajectory files named traj_4zoh_aa_8rep_rep00.npz … _rep07.npz.
+# After the run, fit TICA on all replicas + compare to reference:
+#
+#   # Fit TICA on the reference dataset (do once)
+#   python md/analyze_traj.py \
+#       --npz data_prep/datasets/1pro_4zohB01_alltemp_aa/4zohB01_alltemp_aa.npz \
+#       --outdir local_work/tica/4zoh_ref --prefix 4zoh_ref
+#
+#   # Project all 8 replicas onto reference TICA
+#   python md/analyze_traj.py \
+#       --npz local_work/md_runs/20260520_1pro_4zohB01_allatom_epoch00050_nvt_8rep_5000steps/traj_4zoh_aa_8rep_rep*.npz \
+#       --reference-model local_work/tica/4zoh_ref/4zoh_ref_tica_model.pkl \
+#       --reference-pairs local_work/tica/4zoh_ref/4zoh_ref_pair_indices.csv \
+#       --outdir local_work/tica/4zoh_md_8rep --prefix 4zoh_md
+#
+# Units (units: physical):
+#   dt    - fs   (femtoseconds)
+#   kT    - K    (Kelvin)
+#   gamma - ps   (Langevin friction timescale tau = 1/gamma)
+#   mass  - amu
+
+md:
+  units: physical
+
+  training_config_path: local_work/outputs/20260519_allatom/exports/1pro_allatom_nopriors_tiled_config.yaml
+  params_path:          local_work/outputs/20260519_allatom/checkpoints/epoch00050.pkl
+  dataset_path:         data_prep/datasets/1pro_4zohB01_alltemp_aa/4zohB01_alltemp_aa.npz
+
+  override_use_priors: false
+  cell_list: true          # enable cell list (training used disable_cell_list=True to save memory)
+  frame_idx: 0
+
+  zero_com_velocity: true
+
+  h_constraints: true
+  h_constraint_species: 0
+  h_constraint_max_distance: 1.35
+  h_constraint_iterations: 8
+
+  equilibrate:    false
+  n_equil_steps:  0
+
+  integrator: nvt_langevin
+  n_steps:    5000
+  dt:         0.1        # fs  — safe for all-atom with H constraints
+  kT:         320.0      # K
+  gamma:      1.0        # ps  (tau = 1 ps: moderately damped, good for sampling)
+  mass:
+    - 1.008
+    - 12.011
+    - 14.007
+    - 15.999
+    - 32.060
+
+  n_replicas: 8
+  seed: 42               # replicas use seeds 42..49
+
+  # scan_chunk_size fuses this many steps into one XLA call.
+  # Set equal to output_every for cleanest behaviour: exactly one output
+  # frame per XLA chunk, no intermediate Python iterations needed.
+  scan_chunk_size: 5000
+  output_every:    50    # 100 trajectory frames per replica (+ step 0)
+  observables_every: 50  # match scan_chunk_size to avoid mid-chunk PE evals
+
+  output_dir:      local_work/md_runs/20260520_1pro_4zohB01_allatom_epoch00050_nvt_8rep_5000steps
+  output_filename: traj_4zoh_aa_8rep.npz
+
+  continuous_output: false
+  continuous_output_every: 10
+
+  observables:
+    - step
+    - T
+    - KE
+    - PE
+    - E_total
+
+  dump_for_ovito: true

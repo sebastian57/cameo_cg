@@ -75,6 +75,25 @@ def _irrep_block_slices(irreps: cue.Irreps) -> List[Tuple[int, Any, int, int]]:
     return blocks
 
 
+def _irrep_offsets(irreps: cue.Irreps) -> Dict[Tuple[int, int], List[Tuple[int, int]]]:
+    """Compute (start, end) positions for every block of each (l, p) irrep in ir_mul layout.
+
+    Returns a list of slices per (l, p) because the same irrep type can appear in
+    multiple non-contiguous blocks — e.g. the embedding layer concatenates Y-derived
+    features and two separate species embeddings, each stored as its own 0e block.
+    """
+    if hasattr(irreps, 'irreps'):
+        irreps = irreps.irreps
+    offsets: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
+    pos = 0
+    for mul, ir in irreps:
+        width = int(mul) * int(ir.dim)
+        key = (int(ir.l), int(ir.p))
+        offsets.setdefault(key, []).append((pos, pos + width))
+        pos += width
+    return offsets
+
+
 def _normalize_tp_mode(tp_mode: str) -> str:
     """Normalize TP mode aliases to internal names."""
     aliases = {
@@ -652,43 +671,79 @@ class AllegroLayer(hk.Module):
         self,
         Y_irreps: cue.Irreps,
         V_red_irreps: cue.Irreps,
-    ) -> Dict[Tuple[int, int], cue.EquivariantPolynomial]:
-        """Build separate TP descriptors for each (l, p) irrep block.
-        
-        This enables using uniform_1d method which requires single-mode descriptors.
-        """
-        irrep_descriptors = {}
-        
-        for mul, ir in self.output_irreps:
-            l, p = ir.l, ir.p
-            
-            if (l, p) in irrep_descriptors:
-                continue
-            
-            Y_filtered = cue.Irreps("O3", f"1x{l}{'e' if p == 1 else 'o'}")
+    ) -> Dict[Tuple[int, int], List[Tuple[Any, int, int, int, int]]]:
+        """Build TP descriptors covering all CG-valid paths to each output irrep.
 
-            def keep_fn(mul_ir):
-                mul_, ir_ = mul_ir
-                return int(ir_.l) == l and int(ir_.p) == p
-            V_filtered = V_red_irreps.filter(keep=keep_fn)
-            
-            if V_filtered.dim == 0:
-                continue
-            
-            try:
-                tp_desc = cue.descriptors.full_tensor_product(
-                    Y_filtered,
-                    V_filtered,
-                    irreps3_filter=cue.Irreps("O3", f"{mul}x{l}{'e' if p == 1 else 'o'}"),
-                )
-                output_dim = getattr(tp_desc.outputs[0], "dim", 0)
-                if output_dim == 0:
-                    continue
-                irrep_descriptors[(l, p)] = tp_desc
-            except Exception:
-                continue
-        
-        return irrep_descriptors
+        For each output irrep (l_out, p_out), enumerates every valid combination
+        (l_Y, p_Y) ⊗ (l_V, p_V) → (l_out, p_out) satisfying the triangle rule
+        |l_Y − l_V| ≤ l_out ≤ l_Y + l_V and parity p_Y * p_V = p_out.  Each such
+        path gets its own single-irrep descriptor that is eligible for the
+        uniform_1d kernel.  Outputs from multiple paths to the same (l_out, p_out)
+        are concatenated in _tensor_product_per_irrep, matching the full-TP
+        behaviour of _build_tp_descriptor.
+
+        0e is appended to the processed set when absent from self.output_irreps so
+        that scalar channels are always produced for the x-update — identical to the
+        has_scalar guard in _build_tp_descriptor.
+
+        Returns:
+            Dict mapping (l_out, p_out) → list of
+            (tp_desc, y_start, y_end, v_start, v_end).
+        """
+        y_offsets = _irrep_offsets(Y_irreps)
+        v_offsets = _irrep_offsets(V_red_irreps)
+
+        # Output irreps to process; always include 0e for the x scalar update.
+        seen: set = set()
+        out_keys: List[Tuple[int, int]] = []
+        for _, ir in self.output_irreps:
+            key = (int(ir.l), int(ir.p))
+            if key not in seen:
+                seen.add(key)
+                out_keys.append(key)
+        if (0, 1) not in seen:
+            out_keys.append((0, 1))
+
+        descriptors: Dict[Tuple[int, int], List[Any]] = {}
+
+        for l_out, p_out in out_keys:
+            out_ir_list = [ir for _, ir in cue.Irreps("O3", f"1x{l_out}{'e' if p_out == 1 else 'o'}")]
+            path_list: List[Any] = []
+
+            for (l_Y, p_Y), y_slices in sorted(y_offsets.items()):
+                p_V_needed = p_out * p_Y           # parity conservation
+                l_V_min = abs(l_out - l_Y)
+                l_V_max = l_out + l_Y
+
+                for (l_V, p_V), v_slices in sorted(v_offsets.items()):
+                    if p_V != p_V_needed:
+                        continue
+                    if not (l_V_min <= l_V <= l_V_max):
+                        continue
+
+                    # Build one descriptor per (y_block, v_block) pair so each
+                    # descriptor has uniform Y and V dimensions (uniform_1d eligible).
+                    for y_start, y_end in y_slices:
+                        y_mul = (y_end - y_start) // (2 * l_Y + 1)
+                        Y_single = cue.Irreps("O3", f"{y_mul}x{l_Y}{'e' if p_Y == 1 else 'o'}")
+                        for v_start, v_end in v_slices:
+                            v_mul = (v_end - v_start) // (2 * l_V + 1)
+                            V_single = cue.Irreps("O3", f"{v_mul}x{l_V}{'e' if p_V == 1 else 'o'}")
+
+                            try:
+                                tp_desc = cue.descriptors.full_tensor_product(
+                                    Y_single, V_single, irreps3_filter=out_ir_list,
+                                )
+                                if getattr(tp_desc.outputs[0], "dim", 0) == 0:
+                                    continue
+                                path_list.append((tp_desc, y_start, y_end, v_start, v_end))
+                            except Exception:
+                                continue
+
+            if path_list:
+                descriptors[(l_out, p_out)] = path_list
+
+        return descriptors
 
     def _tensor_product_per_irrep(
         self,
@@ -701,82 +756,79 @@ class AllegroLayer(hk.Module):
         *,
         method: str,
     ) -> Tuple[jnp.ndarray, cue.Irreps]:
-        """Apply TP using per-irrep descriptors with uniform_1d method.
-        
-        This splits the TP into separate calls per (l, p) irrep block,
-        each of which is eligible for the fast uniform_1d kernel.
+        """Apply TP using per-irrep descriptors, covering all valid CG paths.
+
+        Each output irrep collects contributions from every valid (l_Y, l_V)
+        path enumerated by _build_per_irrep_tp_descriptors.  Individual path
+        results are concatenated along the channel axis so that CueLinear can
+        learn the optimal linear combination — identical to the full-TP strategy
+        used by _build_tp_descriptor in the fused_sp / baseline_mixed backends.
+
+        Y and V slices are extracted using correct ir_mul layout offsets rather
+        than a naive prefix slice, ensuring each descriptor receives the right
+        spherical-harmonic and feature components.
         """
         irrep_descriptors = self._build_per_irrep_tp_descriptors(Y_irreps, V_red_irreps)
+        n_paths_total = sum(len(v) for v in irrep_descriptors.values())
+
         if hk.running_init():
             model_logger.info(
-                f"[{self.name}] per-irrep descriptor count={len(irrep_descriptors)} n_edges={n_edges} mul_gcd={mul_gcd} "
+                f"[{self.name}] per-irrep descriptor count={len(irrep_descriptors)} "
+                f"n_paths={n_paths_total} n_edges={n_edges} mul_gcd={mul_gcd} "
                 f"wY_axis_shape={tuple(wY_axis.shape)} V_axis_shape={tuple(V_axis.shape)}"
             )
-        
+
         if not irrep_descriptors:
             if hk.running_init():
                 model_logger.warning(
                     f"[{self.name}] per-irrep TP built no descriptors; returning zero-width output."
                 )
             return jnp.zeros((n_edges, mul_gcd, 0)), cue.Irreps("O3", "0x0e")
-        
-        results = []
-        output_irreps_list = []
-        
+
         Eg = n_edges * mul_gcd
-        
-        for (l, p), tp_desc in sorted(irrep_descriptors.items()):
-            try:
-                wY_dim = tp_desc.inputs[0].dim
-                V_dim = tp_desc.inputs[1].dim
-                out_dim = getattr(tp_desc.outputs[0], "dim", 0)
-                if out_dim == 0:
-                    if hk.running_init():
-                        model_logger.info(
-                            f"[{self.name}] skipping zero-width uniform_1d descriptor for ({l},{p})."
-                        )
-                    continue
-                
-                wY_flat = wY_axis.reshape(Eg, -1)
-                V_flat = V_axis.reshape(Eg, -1)
-                
-                wY_slice = wY_flat[:, :wY_dim]
-                V_slice = V_flat[:, :V_dim]
-                
+        wY_flat = wY_axis.reshape(Eg, -1)   # (Eg, Y_full_dim)
+        V_flat = V_axis.reshape(Eg, -1)      # (Eg, V_dim_per_gcd)
+
+        results: List[jnp.ndarray] = []
+        out_irreps_parts: List[str] = []
+
+        for (l_out, p_out), path_list in sorted(irrep_descriptors.items()):
+            for tp_desc, y_start, y_end, v_start, v_end in path_list:
+                wY_slice = wY_flat[:, y_start:y_end]   # correct l_Y components
+                V_slice = V_flat[:, v_start:v_end]      # correct l_V components
+
+                if hk.running_init():
+                    out_dim = getattr(tp_desc.outputs[0], "dim", 0)
+                    model_logger.info(
+                        f"[{self.name}] uniform_1d path ({l_out},{p_out}): "
+                        f"y[{y_start}:{y_end}] v[{v_start}:{v_end}] "
+                        f"wY_dim={y_end - y_start} V_dim={v_end - v_start} out_dim={out_dim}"
+                    )
+
                 wY_rep = cuex.RepArray(tp_desc.inputs[0], wY_slice)
                 V_rep = cuex.RepArray(tp_desc.inputs[1], V_slice)
-                if hk.running_init():
-                    model_logger.info(
-                        f"[{self.name}] uniform_1d debug ({l},{p}): Eg={Eg} n_edges={n_edges} mul_gcd={mul_gcd} "
-                        f"wY_dim={wY_dim} V_dim={V_dim} out_dim={out_dim} "
-                        f"wY_slice_shape={tuple(wY_slice.shape)} V_slice_shape={tuple(V_slice.shape)}"
-                    )
-                
-                out = cuex.equivariant_polynomial(tp_desc, [wY_rep, V_rep], method=method)
-                
-                if isinstance(out, list):
-                    out = out[0]
-                
-                out_arr = out.array.reshape(n_edges, mul_gcd, -1)
-                results.append(out_arr)
-                output_irreps_list.append(tp_desc.outputs[0].irreps)
-                
-            except Exception as e:
-                if hk.running_init():
-                    model_logger.warning(f"[{self.name}] Failed TP for ({l},{p}): {e}")
-                continue
-        
+
+                try:
+                    out = cuex.equivariant_polynomial(tp_desc, [wY_rep, V_rep], method=method)
+                    if isinstance(out, list):
+                        out = out[0]
+                    results.append(out.array.reshape(n_edges, mul_gcd, -1))
+                    out_irreps = out.irreps.irreps if hasattr(out.irreps, 'irreps') else out.irreps
+                    for mul, ir in out_irreps:
+                        out_irreps_parts.append(f"{mul}x{ir.l}{'e' if ir.p == 1 else 'o'}")
+                except Exception as e:
+                    if hk.running_init():
+                        model_logger.warning(
+                            f"[{self.name}] TP failed for path ({l_out},{p_out}): {e}"
+                        )
+                    continue
+
         if not results:
             return jnp.zeros((n_edges, mul_gcd, 0)), cue.Irreps("O3", "0x0e")
-        
+
         out_axis = jnp.concatenate(results, axis=-1)
-        
-        output_irreps = cue.Irreps("O3", "")
-        for irreps in output_irreps_list:
-            for mul, ir in irreps:
-                output_irreps = output_irreps + cue.Irreps("O3", f"{mul}x{ir.l}{'e' if ir.p == 1 else 'o'}")
-        
-        return out_axis, output_irreps
+        tp_output_irreps = cue.Irreps("O3", " + ".join(out_irreps_parts))
+        return out_axis, tp_output_irreps
 
     def _tensor_product_fused_sp(
         self,

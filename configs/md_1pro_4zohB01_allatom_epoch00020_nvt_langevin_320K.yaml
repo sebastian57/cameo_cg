@@ -1,0 +1,65 @@
+# MD simulation config for 4zohB01 all-atom checkpoint epoch00020.
+#
+# The all-atom dataset encodes species as sorted atomic numbers:
+#   0=H, 1=C, 2=N, 3=O, 4=S
+# Masses below are from cameo_md/structures/config_4z_aa_frame0.data.
+# Units (units: physical, the default):
+#   dt      - fs   (femtoseconds)
+#   kT      - K    (Kelvin)
+#   gamma   - ps   (Langevin friction timescale tau; gamma = 1/tau internally)
+#   mass    - amu  (unchanged)
+
+md:
+  units: physical
+
+  training_config_path: local_work/outputs/20260519_allatom/exports/1pro_allatom_nopriors_tiled_config.yaml
+  params_path:          local_work/outputs/20260519_allatom/checkpoints/epoch00050.pkl
+  dataset_path:         data_prep/datasets/1pro_4zohB01_alltemp_aa/4zohB01_alltemp_aa.npz
+
+  override_use_priors: false
+  frame_idx: 0
+
+  zero_com_velocity: true
+
+  h_constraints: true
+  h_constraint_species: 0
+  h_constraint_max_distance: 1.35
+  h_constraint_iterations: 8
+
+  equilibrate:    false
+  n_equil_steps:  0
+
+  integrator: nvt_langevin
+  n_steps:    2000
+  dt:         0.1
+  kT:         320.0
+  gamma:      1.0
+  mass:
+    - 1.008
+    - 12.011
+    - 14.007
+    - 15.999
+    - 32.060
+
+  output_dir:      local_work/md_runs/20260519_1pro_4zohB01_allatom_epoch00020_nvt_langevin_320K
+  output_filename: traj_4zohB01_allatom_epoch00020_nvt_10000steps.npz
+  output_every:    10
+
+  n_replicas: 1
+  seed: 42
+
+  continuous_output: false
+  continuous_output_every: 10
+
+  observables_every: 10
+  observables:
+    - step
+    - T
+    - KE
+    - PE
+    - E_total
+    - pressure
+    - box_volume
+
+  dump_for_ovito: true
+  dump_padding:   20.0
