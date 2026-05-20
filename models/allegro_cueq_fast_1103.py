@@ -768,6 +768,27 @@ class AllegroLayer(hk.Module):
         than a naive prefix slice, ensuring each descriptor receives the right
         spherical-harmonic and feature components.
         """
+        # If uniform_1d was requested but cuequivariance_ops_jax is absent, fall back
+        # to naive automatically — this mirrors the existing ALLEGRO_TP_METHOD_FALLBACK
+        # mechanism used by _tensor_product_fused_sp, and is triggered automatically on
+        # SLURM nodes where slurm_env.sh exports ALLEGRO_TP_METHOD_FALLBACK=naive.
+        if method == "uniform_1d":
+            try:
+                import cuequivariance_ops_jax  # noqa: F401
+            except ImportError:
+                if self.tp_method_fallback == "naive":
+                    if hk.running_init():
+                        model_logger.warning(
+                            f"[{self.name}] cuequivariance_ops_jax not available; "
+                            "falling back to method='naive' (ALLEGRO_TP_METHOD_FALLBACK=naive)."
+                        )
+                    method = "naive"
+                else:
+                    raise ValueError(
+                        "cuequivariance_ops_jax is required for tp_method='uniform_1d' but is not installed. "
+                        "Install cuequivariance-ops-jax-cu12, or set ALLEGRO_TP_METHOD_FALLBACK=naive."
+                    )
+
         irrep_descriptors = self._build_per_irrep_tp_descriptors(Y_irreps, V_red_irreps)
         n_paths_total = sum(len(v) for v in irrep_descriptors.values())
 
