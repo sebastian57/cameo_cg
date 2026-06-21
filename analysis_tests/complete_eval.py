@@ -652,6 +652,7 @@ def compute_complete_eval(
     smoothness_frames: int = 5,
     smoothness_perturbations: int = 20,
     smoothness_sigma: float = 0.01,
+    use_train: bool = False,
 ) -> Dict[str, Any]:
     """Run all seven diagnostic modules and return combined metrics."""
     import jax
@@ -690,7 +691,10 @@ def compute_complete_eval(
     if max_val_frames is not None:
         val_idx = val_idx[: int(max_val_frames)]
     if val_idx.size == 0:
-        raise ValueError("No held-out validation samples for complete eval.")
+        if use_train and train_idx.size > 0:
+            val_idx = train_idx
+        else:
+            raise ValueError("No held-out validation samples for complete eval.")
 
     # --- build model ---
     config.set("model", "use_priors", bool(config.export_combined_ml_priors_enabled()))
@@ -855,6 +859,8 @@ def main() -> None:
                         help="Perturbations per frame for smoothness test")
     parser.add_argument("--smoothness-sigma", type=float, default=0.01,
                         help="Gaussian noise std for smoothness test")
+    parser.add_argument("--use-train", action="store_true",
+                        help="Use train split when no val split exists (e.g. for RE training).")
     args = parser.parse_args()
 
     metrics = compute_complete_eval(
@@ -867,6 +873,7 @@ def main() -> None:
         smoothness_frames=args.smoothness_frames,
         smoothness_perturbations=args.smoothness_perturbations,
         smoothness_sigma=args.smoothness_sigma,
+        use_train=args.use_train,
     )
     print(json.dumps(
         {k: v for k, v in metrics.items() if not isinstance(v, (list, dict))},

@@ -103,6 +103,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Output directory. Default: traj.parent/force_component_analysis_<timestamp>",
     )
+    p.add_argument(
+        "--recompute-components",
+        action="store_true",
+        help="Force post-hoc VJP recomputation even when run_md.py saved force_decomp arrays.",
+    )
     return p.parse_args()
 
 
@@ -207,6 +212,12 @@ def build_runtime(md_config_path: Path) -> RuntimeContext:
     if md_cfg.get("override_use_priors", False):
         config.set("model", "use_priors", True)
         config.set("model", "train_priors", False)
+    if "ml_energy_scale" in md_cfg:
+        config.set("model", "ml_energy_scale", float(md_cfg["ml_energy_scale"]))
+    if "prior_energy_scale" in md_cfg:
+        config.set("model", "prior_energy_scale", float(md_cfg["prior_energy_scale"]))
+    if "robustness_gate" in md_cfg:
+        config.set("model", "robustness_gate", dict(md_cfg.get("robustness_gate") or {}))
     if md_cfg.get("cell_list", False):
         config.set("model", "neighbor_disable_cell_list", False)
 
@@ -297,6 +308,42 @@ def evaluate_components(
     return energies, forces
 
 
+
+
+def evaluate_components_from_saved_decomp(
+    *,
+    traj: dict[str, np.ndarray],
+    frame_index: int,
+    step: int,
+) -> tuple[dict[str, float], dict[str, np.ndarray]] | None:
+    if "decomp_step" not in traj or "decomp_F_ml" not in traj:
+        return None
+    decomp_steps = np.asarray(traj["decomp_step"], dtype=np.int64)
+    matches = np.where(decomp_steps == int(step))[0]
+    if matches.size == 0:
+        return None
+    j = int(matches[0])
+    energies: dict[str, float] = {}
+    if "decomp_E_ml" in traj:
+        energies["E_ml"] = float(np.asarray(traj["decomp_E_ml"])[j])
+    if "decomp_E_prior" in traj:
+        energies["E_prior_total"] = float(np.asarray(traj["decomp_E_prior"])[j])
+    if "E_ml" in energies and "E_prior_total" in energies:
+        energies["E_total"] = energies["E_ml"] + energies["E_prior_total"]
+
+    f_ml = np.asarray(traj["decomp_F_ml"][j], dtype=np.float32)
+    f_prior = np.asarray(
+        traj.get("decomp_F_prior", np.zeros_like(traj["decomp_F_ml"])),
+        dtype=np.float32,
+    )[j]
+    forces = {
+        "F_ml": f_ml,
+        "F_prior_total": f_prior,
+        "F_total": f_ml + f_prior,
+    }
+    return energies, forces
+
+
 def min_pair_distance(R: np.ndarray, mask: np.ndarray) -> tuple[float, int, int]:
     valid = np.where(mask > 0.5)[0]
     coords = R[valid]
@@ -353,11 +400,12 @@ def main() -> None:
     ctx = build_runtime(args.md_config)
 
     traj_path = _resolve(args.traj, ctx.root).resolve()
-    with np.load(traj_path, allow_pickle=False) as traj:
-        R_all = np.asarray(traj["R"], dtype=np.float32)
-        steps = np.asarray(traj["step"], dtype=np.int64)
-        saved_F = np.asarray(traj["F"], dtype=np.float32) if "F" in traj else None
-        traj_mask = np.asarray(traj["mask"], dtype=np.float32) if "mask" in traj else np.asarray(ctx.mask)
+    with np.load(traj_path, allow_pickle=False) as traj_npz:
+        traj = {key: np.asarray(traj_npz[key]) for key in traj_npz.files}
+    R_all = np.asarray(traj["R"], dtype=np.float32)
+    steps = np.asarray(traj["step"], dtype=np.int64)
+    saved_F = np.asarray(traj["F"], dtype=np.float32) if "F" in traj else None
+    traj_mask = np.asarray(traj["mask"], dtype=np.float32) if "mask" in traj else np.asarray(ctx.mask)
 
     selected, random_frames, final_frames = select_frames(
         R_all.shape[0],
@@ -392,9 +440,19 @@ def main() -> None:
         if args.scan_trajectory
         else set()
     )
+    used_saved_decomp = 0
     for frame_index in final_frames:
         R = R_all[frame_index]
-        energies, forces = evaluate_components(ctx, R)
+        saved_components = None if args.recompute_components else evaluate_components_from_saved_decomp(
+            traj=traj, frame_index=frame_index, step=int(steps[frame_index])
+        )
+        if saved_components is None:
+            energies, forces = evaluate_components(ctx, R)
+            component_source = "recomputed_vjp"
+        else:
+            energies, forces = saved_components
+            component_source = "saved_decomp"
+            used_saved_decomp += 1
         role_parts: list[str] = []
         if frame_index in scan_set:
             role_parts.append("scan")
@@ -409,6 +467,7 @@ def main() -> None:
             "frame_index": int(frame_index),
             "step": int(steps[frame_index]),
             "role": role,
+            "component_source": component_source,
             "min_pair_distance": min_d,
             "min_pair_i": min_i,
             "min_pair_j": min_j,
@@ -461,6 +520,7 @@ def main() -> None:
             "outdir": str(outdir.resolve()),
             "evaluated_frames": frame_indices,
             "steps": timesteps,
+            "saved_decomp_frames_used": used_saved_decomp,
         },
         indent=2,
         sort_keys=True,

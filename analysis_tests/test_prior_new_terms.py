@@ -42,6 +42,7 @@ class _DummyConfig:
             "dihedral": 0.15,
             "excluded_volume": 1.0,
             "wca": 0.0,
+            "lj": 0.0,
             "fene": 0.0,
             "leash": 0.0,
             "dh": 0.0,
@@ -64,6 +65,7 @@ def _base_prior_cfg():
                     "dihedral": 0.3,
                     "excluded_volume": 0.4,
                     "wca": 0.0,
+                    "lj": 0.0,
                     "fene": 0.0,
                     "leash": 0.0,
                     "dh": 0.0,
@@ -300,6 +302,37 @@ def test_mask_safety_with_typed_terms_finite_gradients():
     grad = jax.grad(energy_fn)(R)
     assert bool(jnp.all(jnp.isfinite(grad)))
     np.testing.assert_allclose(np.asarray(grad[3:]), 0.0, atol=1e-7, rtol=0.0)
+
+
+
+def test_lj_prior_component_is_attractive_near_minimum_and_in_total():
+    prior = _make_prior(
+        overrides={
+            "model": {
+                "priors": {
+                    "weights": {
+                        "bond": 0.0,
+                        "angle": 0.0,
+                        "repulsive": 0.0,
+                        "dihedral": 0.0,
+                        "excluded_volume": 0.0,
+                        "lj": 2.0,
+                    },
+                    "lj": {"epsilon": 0.5, "sigma": 3.0, "min_sep": 1},
+                }
+            }
+        },
+        n_max=2,
+    )
+    r_min = (2.0 ** (1.0 / 6.0)) * 3.0
+    R = jnp.array([[0.0, 0.0, 0.0], [r_min, 0.0, 0.0]], dtype=jnp.float32)
+    mask = jnp.array([1.0, 1.0], dtype=jnp.float32)
+    species = jnp.zeros((2,), dtype=jnp.int32)
+
+    comps = prior.compute_energy(R, mask, species=species)
+
+    np.testing.assert_allclose(np.asarray(comps["E_lj"]), -1.0, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(np.asarray(comps["E_total"]), np.asarray(comps["E_lj"]), rtol=1e-5, atol=1e-5)
 
 
 def test_disabled_new_terms_regression_matches_old_component_sum():

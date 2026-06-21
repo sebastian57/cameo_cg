@@ -15,6 +15,7 @@ import jax
 import jax.numpy as jnp
 from jax_md import space, partition, util as md_util
 from utils.logging import model_logger
+from training.edge_distance_gate import compute_edge_distance_gate
 
 # Resolve helper module paths used by the fast backend implementation.
 # The helper files live in the sibling repository directory:
@@ -138,10 +139,14 @@ def _parse_mode_csv(modes: Optional[Union[str, Iterable[str]]]) -> Optional[Tupl
 
 
 def _mesh_safe_softplus(x):
-    """Softplus variant that avoids Manual-vs-Auto sharding mismatches."""
+    """Softplus variant that avoids Manual-vs-Auto sharding mismatches.
+
+    Uses scalar literal 0.0 instead of zeros_like(x) so no sharding is
+    inherited from x — required for JAX >= 0.10 which rejects Auto-sharded
+    tensors used as templates inside a Manual mesh context.
+    """
     x = jnp.asarray(x)
-    zero = jnp.zeros_like(x)
-    return jnp.maximum(x, zero) + jnp.log1p(jnp.exp(-jnp.abs(x)))
+    return jnp.maximum(x, 0.0) + jnp.log1p(jnp.exp(-jnp.abs(x)))
 
 
 def _is_indexed_linear_candidate(stp: cue.SegmentedTensorProduct) -> bool:
@@ -1704,6 +1709,7 @@ def allegro_neighborlist_pp(
     per_particle: bool = False,
     positive_species: bool = False,
     logging: bool = True,
+    edge_distance_gate=None,
     **allegro_kwargs
 ):
     """Allegro model wrapper for neighbor list-based energy prediction.
@@ -1717,6 +1723,7 @@ def allegro_neighborlist_pp(
         max_edge_multiplier: Unused compatibility placeholder (matches cuEq wrapper API).
         max_edges: Unused compatibility placeholder (matches cuEq wrapper API).
         avg_num_neighbors: Average neighbors (required)
+        edge_distance_gate: Optional EdgeDistanceGateBank for per-edge energy gating.
         mode: Prediction mode:
             - "energy": total energy only
             - "energy_and_fast_forces": total energy + fast per-node forces
@@ -1818,6 +1825,7 @@ def allegro_neighborlist_pp(
         )
         fallback_vec = jnp.array([r_cutoff, 0.0, 0.0], dtype=vectors.dtype)
         vectors = jnp.where(valid_edges[:, None], vectors, fallback_vec)
+        distances = jnp.linalg.norm(vectors, axis=-1)
 
         vectors = vectors / r_cutoff
 
@@ -1840,8 +1848,19 @@ def allegro_neighborlist_pp(
                 return_fast_forces=False,
                 compute_energy=True,
             )
+            per_edge_values = per_edge_energies.array.squeeze(-1)
+            if edge_distance_gate is not None:
+                edge_alpha = compute_edge_distance_gate(
+                    distances=distances,
+                    senders=senders,
+                    receivers=receivers,
+                    species=species,
+                    valid_edges=valid_edges,
+                    bank=edge_distance_gate,
+                )
+                per_edge_values = per_edge_values * edge_alpha
             per_node_energies = jax.ops.segment_sum(
-                per_edge_energies.array.squeeze(-1),
+                per_edge_values,
                 senders,
                 num_segments=n_nodes
             )
@@ -1865,7 +1884,6 @@ def allegro_neighborlist_pp(
                 compute_energy=True,
                 return_al_features=True,
             )
-            distances = jnp.linalg.norm(vectors, axis=-1) * r_cutoff
             return {
                 "edge_features": al_aux["scalar_features_enveloped"],
                 "edge_features_unenveloped": al_aux["scalar_features"],
@@ -1886,8 +1904,19 @@ def allegro_neighborlist_pp(
                 return_fast_forces=True,
                 compute_energy=True,
             )
+            per_edge_values = per_edge_energies.array.squeeze(-1)
+            if edge_distance_gate is not None:
+                edge_alpha = compute_edge_distance_gate(
+                    distances=distances,
+                    senders=senders,
+                    receivers=receivers,
+                    species=species,
+                    valid_edges=valid_edges,
+                    bank=edge_distance_gate,
+                )
+                per_edge_values = per_edge_values * edge_alpha
             per_node_energies = jax.ops.segment_sum(
-                per_edge_energies.array.squeeze(-1),
+                per_edge_values,
                 senders,
                 num_segments=n_nodes
             )

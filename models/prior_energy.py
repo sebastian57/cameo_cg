@@ -611,6 +611,9 @@ class PriorEnergy:
             wca_cfg = {}
         self.wca_min_sep = int(wca_cfg.get("min_sep", wca_cfg.get("min_repulsive_sep", 1)))
         self.wca_pairs = precompute_repulsive_pairs(self.topology.N_max, min_sep=self.wca_min_sep)
+        lj_cfg = config.get("model", "priors", "lj", default={}) or {}
+        self.lj_min_sep = int(lj_cfg.get("min_sep", 2))
+        self.lj_pairs = precompute_repulsive_pairs(self.topology.N_max, min_sep=self.lj_min_sep)
         leash_cfg = config.get("model", "priors", "leash", default=None)
         if leash_cfg is None:
             leash_cfg = config.get("priors", "leash", default={})
@@ -674,6 +677,16 @@ class PriorEnergy:
         self.local_bond_in_pairs = _pairs("local_bond_in")
         self.local_bond_in_r0 = _vector("local_bond_in", "r0")
         self.local_bond_in_k = _vector("local_bond_in", "k")
+
+        crowd_cfg = prior_cfg.get("crowding_wall", {}) or {}
+        self.crowding_r0 = jnp.asarray(float(crowd_cfg.get("r0", 7.0)), dtype=jnp.float32)
+        self.crowding_a = jnp.asarray(float(crowd_cfg.get("a", 0.4)), dtype=jnp.float32)
+        self.crowding_min_seq_sep = int(crowd_cfg.get("min_seq_sep", crowd_cfg.get("m", 2)))
+        crowding_N_max = float(crowd_cfg.get("N_max", crowd_cfg.get("n_max", 0.0)))
+        self.crowding_enabled = crowding_N_max > 0.0
+        self.crowding_N_max = jnp.asarray(crowding_N_max, dtype=jnp.float32)
+        self.crowding_k = jnp.asarray(float(crowd_cfg.get("k", crowd_cfg.get("k_N", 2.0))), dtype=jnp.float32)
+        self.crowding_p = jnp.asarray(float(crowd_cfg.get("p", 2.0)), dtype=jnp.float32)
 
     def _init_typed_interaction_metadata(
         self, config, id_to_aa: Optional[Dict[int, str]]
@@ -821,6 +834,16 @@ class PriorEnergy:
             "salt_sigma": jnp.asarray(sb_cfg.get("sigma", 0.3), dtype=jnp.float32),
         }
 
+    def _init_lj_params(self, prior_params: Dict[str, Any]) -> Dict[str, jax.Array]:
+        """Initialize full Lennard-Jones prior parameters."""
+        lj_cfg = prior_params.get("lj", {})
+        if not isinstance(lj_cfg, dict):
+            lj_cfg = {}
+        return {
+            "lj_epsilon": jnp.asarray(lj_cfg.get("epsilon", prior_params.get("lj_epsilon", 1.0)), dtype=jnp.float32),
+            "lj_sigma": jnp.asarray(lj_cfg.get("sigma", prior_params.get("lj_sigma", 3.0)), dtype=jnp.float32),
+        }
+
     def _init_wca_params(self, prior_params: Dict[str, Any]) -> Dict[str, jax.Array]:
         """Initialize WCA clash-guard parameters."""
         wca_cfg = prior_params.get("wca", {})
@@ -951,6 +974,7 @@ class PriorEnergy:
             "epsilon_hard": jnp.asarray(prior_params.get("epsilon_hard", 1.0), dtype=jnp.float32),
             "sigma_hard": jnp.asarray(prior_params.get("sigma_hard", 3.0), dtype=jnp.float32),
         }
+        self.params.update(self._init_lj_params(prior_params))
         self.params.update(self._init_new_term_params(prior_params))
         self.params.update(self._init_wca_params(prior_params))
         self.params.update(self._init_safety_prior_params(prior_params))
@@ -979,6 +1003,7 @@ class PriorEnergy:
             "epsilon_hard": jnp.asarray(prior_params.get("epsilon_hard", 1.0), dtype=jnp.float32),
             "sigma_hard": jnp.asarray(prior_params.get("sigma_hard", 3.0), dtype=jnp.float32),
         }
+        self.params.update(self._init_lj_params(prior_params))
         self.params.update(self._init_new_term_params(prior_params))
         self.params.update(self._init_wca_params(prior_params))
         self.params.update(self._init_safety_prior_params(prior_params))
@@ -1239,6 +1264,34 @@ class PriorEnergy:
 
         return E_ex
 
+    def compute_lj_energy(
+        self,
+        R: jax.Array,
+        mask: jax.Array,
+        params: Optional[Dict[str, jax.Array]] = None,
+        segment_id: Optional[jax.Array] = None,
+    ) -> jax.Array:
+        """Compute full Lennard-Jones energy for configured nonbonded pairs."""
+        p = params if params is not None else self.params
+        if self.lj_pairs.shape[0] == 0:
+            return jnp.array(0.0, dtype=R.dtype)
+
+        pi, pj = self.lj_pairs[:, 0], self.lj_pairs[:, 1]
+        valid = (mask[pi] * mask[pj]) > 0
+        valid = valid & _same_segment_mask(self.lj_pairs, segment_id)
+
+        dR = R[pi] - R[pj]
+        r = _safe_norm(dR)
+        r = jnp.where(valid, r, jax.lax.stop_gradient(r))
+        r_eval = jnp.where(valid, r, 1e6)
+        r_safe = jnp.maximum(r_eval, jnp.array(1e-3, dtype=R.dtype))
+
+        sigma = jnp.asarray(p["lj_sigma"], dtype=R.dtype)
+        epsilon = jnp.asarray(p["lj_epsilon"], dtype=R.dtype)
+        sr6 = (sigma / r_safe) ** 6
+        U = 4.0 * epsilon * (sr6 ** 2 - sr6)
+        return jnp.sum(jnp.where(valid, U, 0.0))
+
     def compute_wca_energy(
         self,
         R: jax.Array,
@@ -1317,6 +1370,34 @@ class PriorEnergy:
             r - self.local_bond_in_r0.astype(R.dtype)
         ) ** 2
         return jnp.sum(jnp.where(valid, E, 0.0))
+
+    def compute_crowding_wall_energy(
+        self,
+        R: jax.Array,
+        mask: jax.Array,
+        segment_id: Optional[jax.Array] = None,
+    ) -> jax.Array:
+        """Compute local smooth-neighbor-count crowding wall energy."""
+        if not self.crowding_enabled:
+            return jnp.array(0.0, dtype=R.dtype)
+        n_atoms = R.shape[0]
+        idx = jnp.arange(n_atoms)
+        valid = (mask[:, None] * mask[None, :]) > 0
+        valid = valid & (jnp.abs(idx[:, None] - idx[None, :]) > self.crowding_min_seq_sep)
+        valid = valid & (idx[:, None] != idx[None, :])
+        if segment_id is not None:
+            same_segment = (segment_id[:, None] >= 0) & (segment_id[:, None] == segment_id[None, :])
+            valid = valid & same_segment
+
+        dR = R[:, None, :] - R[None, :, :]
+        r = jnp.sqrt(jnp.sum(dR * dR, axis=-1) + jnp.asarray(1.0e-12, dtype=R.dtype))
+        a = jnp.maximum(self.crowding_a.astype(R.dtype), jnp.asarray(1.0e-6, dtype=R.dtype))
+        s = jax.nn.sigmoid((self.crowding_r0.astype(R.dtype) - r) / a)
+        counts = jnp.sum(jnp.where(valid, s, 0.0), axis=1)
+        excess = jnp.maximum(counts - self.crowding_N_max.astype(R.dtype), 0.0)
+        active = mask > 0
+        E = self.crowding_k.astype(R.dtype) * excess ** self.crowding_p.astype(R.dtype)
+        return jnp.sum(jnp.where(active, E, 0.0))
 
     def compute_fene_energy(
         self,
@@ -1543,6 +1624,12 @@ class PriorEnergy:
         E_ex_raw = self.compute_excluded_volume_energy(
             R, mask, params=p, segment_id=segment_id
         )
+        E_lj_weight = self.weights.get("lj", 0.0)
+        E_lj_raw = (
+            self.compute_lj_energy(R, mask, params=p, segment_id=segment_id)
+            if E_lj_weight != 0.0
+            else jnp.array(0.0, dtype=R.dtype)
+        )
         E_wca_weight = self.weights.get("wca", 0.0)
         E_wca_raw = (
             self.compute_wca_energy(R, mask, params=p, segment_id=segment_id)
@@ -1582,6 +1669,12 @@ class PriorEnergy:
             if E_local_bond_in_weight != 0.0
             else jnp.array(0.0, dtype=R.dtype)
         )
+        E_crowding_weight = self.weights.get("crowding_wall", 0.0)
+        E_crowding_raw = (
+            self.compute_crowding_wall_energy(R, mask, segment_id=segment_id)
+            if E_crowding_weight != 0.0
+            else jnp.array(0.0, dtype=R.dtype)
+        )
         E_rep_hard_weight = self.weights.get("repulsive_hard", 0.0)
         E_rep_hard_raw = (
             self.compute_repulsive_hard_energy(R, mask, params=p, segment_id=segment_id)
@@ -1595,6 +1688,7 @@ class PriorEnergy:
         E_rep = self.weights["repulsive"] * E_rep_raw
         E_dih = self.weights["dihedral"] * E_dih_raw
         E_ex = self.weights.get("excluded_volume", 1.0) * E_ex_raw
+        E_lj = E_lj_weight * E_lj_raw
         E_wca = E_wca_weight * E_wca_raw
         E_fene = E_fene_weight * E_fene_raw
         E_leash = E_leash_weight * E_leash_raw
@@ -1603,6 +1697,7 @@ class PriorEnergy:
         E_sb = self.weights.get("salt_bridge", 0.0) * E_sb_raw
         E_local_in = E_local_in_weight * E_local_in_raw
         E_local_bond_in = E_local_bond_in_weight * E_local_bond_in_raw
+        E_crowding_wall = E_crowding_weight * E_crowding_raw
         E_rep_hard = E_rep_hard_weight * E_rep_hard_raw
 
         E_total = (
@@ -1611,6 +1706,7 @@ class PriorEnergy:
             + E_rep
             + E_dih
             + E_ex
+            + E_lj
             + E_wca
             + E_fene
             + E_leash
@@ -1619,6 +1715,7 @@ class PriorEnergy:
             + E_sb
             + E_local_in
             + E_local_bond_in
+            + E_crowding_wall
             + E_rep_hard
         )
 
@@ -1629,6 +1726,7 @@ class PriorEnergy:
             "E_repulsive_hard": E_rep_hard,
             "E_dihedral": E_dih,
             "E_excluded_volume": E_ex,
+            "E_lj": E_lj,
             "E_wca": E_wca,
             "E_fene": E_fene,
             "E_leash": E_leash,
@@ -1637,6 +1735,7 @@ class PriorEnergy:
             "E_salt_bridge": E_sb,
             "E_local_in": E_local_in,
             "E_local_bond_in": E_local_bond_in,
+            "E_crowding_wall": E_crowding_wall,
             "E_total": E_total,
         }
 

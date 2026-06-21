@@ -456,7 +456,8 @@ class ModelExporter(exporter.Exporter):
             disabled_checks = None
             if uses_uniform_1d:
                 disabled_checks = [
-                    jax.export.DisabledSafetyCheck.custom_call("uniform_1d")
+                    jax.export.DisabledSafetyCheck.custom_call("uniform_1d"),
+                    jax.export.DisabledSafetyCheck.custom_call("uniform_1d_cuda"),
                 ]
             exported_paths["primary"] = self._export_single(
                 output_path,

@@ -53,8 +53,9 @@ if [[ ! -f "${CONFIG}" ]]; then
 fi
 
 # ── Read n_replicas from the YAML ────────────────────────────────────────────
-source "${PROJECT_ROOT}/../load_modules.sh"
-source "${PROJECT_ROOT}/../venv_cameocg_jupiter/bin/activate"
+source "${PROJECT_ROOT}/../load_modules_2026.sh"
+source "${PROJECT_ROOT}/../venv_cameocg_jupiter2026/bin/activate"
+source "${PROJECT_ROOT}/../set_lammps_paths_2026.sh"
 
 N_REPLICAS="$(python3 -c "
 import yaml, sys
@@ -102,6 +103,10 @@ fi
 # because SLURM_ARRAY_TASK_ID is unset.
 if [[ -n "${SLURM_ARRAY_TASK_ID+x}" ]]; then
     # ── Per-task execution ───────────────────────────────────────────────────
+    source "${PROJECT_ROOT}/../load_modules_2026.sh"
+    source "${PROJECT_ROOT}/../venv_cameocg_jupiter2026/bin/activate"
+    source "${PROJECT_ROOT}/../set_lammps_paths_2026.sh"
+
     echo "============================================================"
     echo "CAMEO CG MD Replica"
     echo "Config     : ${MD_CONFIG}"

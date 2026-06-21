@@ -6,9 +6,10 @@ from pathlib import Path
 from typing import Dict, Optional
 
 sys.path.insert(0, str(os.path.join(os.path.dirname(__file__), "..")))
-from utils.jax_setup import apply_numpy_dataloader_patch
+from utils.jax_setup import apply_jax_compat_shims, apply_numpy_dataloader_patch
 from utils.distributed import initialize_jax_distributed, sync_all_ranks
 
+apply_jax_compat_shims()
 _DISTRIBUTED = initialize_jax_distributed()
 _IS_DISTRIBUTED = _DISTRIBUTED.is_distributed
 _RANK = _DISTRIBUTED.rank
@@ -43,12 +44,21 @@ from training.noised_residual import (
     attach_noised_residual_fields,
     noised_residual_enabled,
 )
+from training.support_gate import (
+    build_support_gate_bank,
+    support_gate_config,
+    support_gate_enabled,
+    support_gate_scope,
+)
 from training.diagnostics import find_training_log, write_dataset_summary
 from training.path_utils import repo_root_from_file, resolve_from_config_or_repo
 from export.exporter import ModelExporter
 from analysis_tests.visualizer import LossPlotter
 from utils.logging import data_logger, model_logger, training_logger, export_logger
 import logging
+
+
+HVP_FIELD_KEYS = ("hvp_probe", "HVP", "hvp_loss_mask")
 
 
 def _sync_all_ranks(tag: str) -> None:
@@ -63,6 +73,7 @@ def _make_export_model(
     species0,
     id_to_aa,
     n_max: int,
+    support_gate_bank=None,
 ) -> CombinedModel:
     """Build the model variant that should be used for export/evaluation."""
     export_with_priors = config.export_combined_ml_priors_enabled()
@@ -98,7 +109,40 @@ def _make_export_model(
         N_max=n_max,
         id_to_aa=id_to_aa,
         prior_only=False,
+        support_gate_bank=support_gate_bank,
     )
+
+
+def _build_support_gate_bank_if_enabled(config: ConfigManager, train_source: dict, seed: int):
+    if not support_gate_enabled(config):
+        return None
+    cfg = support_gate_config(config)
+    descriptor = str(cfg.get("descriptor", "pairwise_distances")).strip().lower()
+    scope = str(cfg.get("scope", "segment")).strip().lower()
+    if scope not in ("segment", "batch"):
+        raise ValueError("training.support_gate.scope must be 'segment' or 'batch'.")
+    if descriptor != "pairwise_distances":
+        raise ValueError(
+            "training.support_gate.descriptor currently supports only 'pairwise_distances'."
+        )
+    bank = build_support_gate_bank(
+        R=np.asarray(train_source["R"], dtype=np.float32),
+        mask=np.asarray(train_source["mask"], dtype=np.float32),
+        max_centers=int(cfg.get("max_centers", 512)),
+        sigma_multiplier=float(cfg.get("sigma_multiplier", 1.0)),
+        seed=int(cfg.get("seed", seed)),
+        floor=float(cfg.get("floor", 0.0)),
+        stop_gradient=bool(cfg.get("stop_gradient", False)),
+    )
+    data_logger.info(
+        "[SupportGate] Built pairwise-distance RBF bank: scope=%s centers=%d sigma=%.6g floor=%.3g stop_gradient=%s.",
+        scope,
+        int(bank.centers.shape[0]),
+        float(bank.sigma),
+        float(bank.floor),
+        bool(bank.stop_gradient),
+    )
+    return bank
 
 
 def _apply_grad_accum_overrides(config: ConfigManager) -> None:
@@ -575,6 +619,31 @@ def _configure_runtime_avg_num_neighbors(
     )
 
 
+
+def _copy_hvp_fields_from_dataset(target: dict, dataset: dict, start: int, stop: int) -> None:
+    """Attach optional HVP arrays to an untiled split."""
+    if "hvp_probe" in dataset:
+        target["hvp_probe"] = np.asarray(dataset["hvp_probe"][start:stop], dtype=np.float32)
+    if "HVP" in dataset:
+        target["HVP"] = np.asarray(dataset["HVP"][start:stop], dtype=np.float32)
+    if "hvp_loss_mask" in dataset:
+        target["hvp_loss_mask"] = np.asarray(dataset["hvp_loss_mask"][start:stop], dtype=np.float32)
+    elif "hvp_probe" in target and "HVP" in target:
+        target["hvp_loss_mask"] = np.broadcast_to(
+            np.asarray(target["mask"], dtype=np.float32)[:, None, :],
+            target["hvp_probe"].shape[:3],
+        ).astype(np.float32)
+
+
+def _hvp_extra_per_atom_fields(split: dict) -> dict:
+    """Return optional HVP arrays for tiled packing."""
+    return {
+        key: np.asarray(split[key], dtype=np.float32)
+        for key in HVP_FIELD_KEYS
+        if key in split
+    }
+
+
 def _attach_batch_metadata(split: dict, sample_ids: np.ndarray) -> dict:
     """Attach uniform profiling metadata to a training split."""
     annotated = dict(split)
@@ -616,6 +685,7 @@ def _build_loader_kwargs(split: dict) -> dict:
             "dsm_eps",
             "dsm_sigma",
             "dsm_loss_mask",
+            *HVP_FIELD_KEYS,
             "is_noised_frame",
             "noise_level_id",
             *SAFETY_FIELD_KEYS,
@@ -687,6 +757,7 @@ def _build_validation_split(dataset: dict, start: int, stop: int) -> dict:
             else np.zeros_like(mask_slice, dtype=np.int32)
         ),
     }
+    _copy_hvp_fields_from_dataset(val_split, dataset, start, stop)
     sample_ids = np.arange(start, stop, dtype=np.int32)
     return _attach_batch_metadata(val_split, sample_ids)
 
@@ -712,6 +783,9 @@ def _build_tiled_validation_split(
     if val_R.shape[0] == 0:
         raise ValueError("Validation split is empty; cannot build tiled validation dataset.")
 
+    val_hvp_source = {"mask": val_mask}
+    _copy_hvp_fields_from_dataset(val_hvp_source, dataset, start, stop)
+
     structure_ids = np.arange(start, stop, dtype=np.int32)
     tiled = build_tiled_dataset(
         R=val_R,
@@ -736,6 +810,7 @@ def _build_tiled_validation_split(
         spatial_separation=config.tile_spatial_separation_enabled(),
         structure_gap=config.get_tile_structure_gap(),
         seed=seed,
+        extra_per_atom_fields=_hvp_extra_per_atom_fields(val_hvp_source),
     )
     tiled = _attach_batch_metadata(tiled, np.arange(tiled["R"].shape[0], dtype=np.int32))
     data_logger.info(
@@ -763,7 +838,7 @@ def _build_tiled_train_source(dataset: dict, n_train: int) -> dict:
     """Capture the untiled training structures used to rebuild random tiles."""
     mask_slice = np.asarray(dataset["mask"][:n_train], dtype=np.float32)
     _sp = dataset.get("species")
-    return {
+    train_source = {
         "R": np.asarray(dataset["R"][:n_train], dtype=np.float32),
         "F": np.asarray(dataset["F"][:n_train], dtype=np.float32),
         "mask": mask_slice,
@@ -774,6 +849,8 @@ def _build_tiled_train_source(dataset: dict, n_train: int) -> dict:
         ),
         "structure_ids": np.arange(n_train, dtype=np.int32),
     }
+    _copy_hvp_fields_from_dataset(train_source, dataset, 0, n_train)
+    return train_source
 
 
 def _log_train_split_profile(train_split: dict, config: ConfigManager) -> None:
@@ -896,6 +973,7 @@ def _build_tiled_split_from_source(
         spatial_separation=config.tile_spatial_separation_enabled(),
         structure_gap=config.get_tile_structure_gap(),
         seed=seed,
+        extra_per_atom_fields=_hvp_extra_per_atom_fields(train_source),
     )
     t_tile_build_end = time.perf_counter()
     tiled = _attach_batch_metadata(tiled, np.arange(tiled["R"].shape[0], dtype=np.int32))
@@ -1215,6 +1293,12 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     _configure_auto_leash_d_safe(
         config, tiled_train_source if tiled_train_source is not None else train_split
     )
+    # Bank is always built on individual (untiled) structures so that bank.n_atoms
+    # matches the actual molecule size.  rbf_segment_supports extracts per-segment
+    # coordinates from tiled batches at runtime using segment_id, so tiling is purely
+    # a training-efficiency concern and does not affect gate semantics.
+    support_gate_bank = _build_support_gate_bank_if_enabled(config, train_split, split_seed)
+
     if dsm_enabled(config):
         train_split = add_dsm_noise_fields(train_split, config, seed=split_seed)
     _configure_runtime_avg_num_neighbors(
@@ -1256,7 +1340,8 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         init_mask=init_mask0,
         n_species_override=n_species_global,
         id_to_aa=loader.id_to_aa,
-        prior_only=config.prior_only_enabled()
+        prior_only=config.prior_only_enabled(),
+        support_gate_bank=support_gate_bank,
     )
 
     model_logger.info(f"Initialized: {model}")
@@ -1411,6 +1496,7 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         species0=species0,
         id_to_aa=loader.id_to_aa,
         n_max=model.N_max,
+        support_gate_bank=support_gate_bank,
     )
     exporter = ModelExporter.from_combined_model(
         model=export_model,
@@ -1529,6 +1615,7 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
 
     prev_params = None
     all_results = {}
+    final_support_gate_bank = None
 
     for bucket_idx, (n_max, loader) in enumerate(bucketed.buckets):
         training_logger.info(
@@ -1602,6 +1689,8 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
         _configure_auto_leash_d_safe(
             config, tiled_train_source if tiled_train_source is not None else train_split
         )
+        support_gate_bank = _build_support_gate_bank_if_enabled(config, train_split, split_seed)
+        final_support_gate_bank = support_gate_bank
         if dsm_enabled(config):
             train_split = add_dsm_noise_fields(train_split, config, seed=split_seed)
         _configure_runtime_avg_num_neighbors(
@@ -1638,7 +1727,8 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
             init_mask=init_mask0,
             n_species_override=global_n_species,
             id_to_aa=loader.id_to_aa,
-            prior_only=config.prior_only_enabled()
+            prior_only=config.prior_only_enabled(),
+            support_gate_bank=support_gate_bank,
         )
         model_logger.info(f"Bucket {bucket_idx}: {model}")
 
@@ -1728,6 +1818,7 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
             species0=final_species0,
             id_to_aa=loader.id_to_aa,
             n_max=final_n_max,
+            support_gate_bank=final_support_gate_bank,
         )
         exporter = ModelExporter.from_combined_model(
             model=export_model, params=prev_params,

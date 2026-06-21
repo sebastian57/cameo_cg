@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # Discover LAMMPS / chemtrain-deploy runtime paths from the active environment.
+# For use with load_modules_2026.sh + venv_cameocg_juwels2026.
 #
 # Expected usage:
 #   1. activate the desired Python environment first
@@ -109,11 +110,6 @@ PYIN
 if [[ -n "${_cueq_ops_lib}" && -d "${_cueq_ops_lib}" ]]; then
     export LD_LIBRARY_PATH="${_cueq_ops_lib}:${LD_LIBRARY_PATH:-}"
 fi
-
-# cuequivariance_ops_jax 0.10.0 requires JAX FFI API v0.3 (needs jax>=0.4.35).
-# The module system provides jax/0.4.34 (API v0.1), so the GPU uniform_1d kernel
-# is unavailable. Fall back to the pure-JAX naive TP implementation.
-export ALLEGRO_TP_METHOD_FALLBACK=naive
 
 if [[ ! -d "${CHEMTRAIN_DEPLOY_ROOT}" ]]; then
     echo "WARNING: chemtrain-deploy directory not found next to chemtrain install: ${CHEMTRAIN_DEPLOY_ROOT}" >&2

@@ -116,6 +116,113 @@ def _valid_component_mask(mask: np.ndarray) -> np.ndarray:
     return np.repeat(mask[..., None] > 0, 3, axis=-1).reshape(mask.shape[0], -1)
 
 
+def _per_frame_metrics(
+    F_ref: np.ndarray,
+    F_pred: np.ndarray,
+    mask: np.ndarray,
+    frame_ids: np.ndarray,
+    output_dir: Path,
+    *,
+    prefix: str,
+    extra_columns: Optional[Dict[str, np.ndarray]] = None,
+    top_k: int = 50,
+) -> Dict[str, Any]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    rows = []
+    extra_columns = extra_columns or {}
+    for local_i in range(F_ref.shape[0]):
+        valid = mask[local_i] > 0
+        ref = F_ref[local_i][valid]
+        pred = F_pred[local_i][valid]
+        if ref.size == 0:
+            rmse = mae = max_err = cos = pred_mean = ref_mean = float("nan")
+        else:
+            diff = pred - ref
+            rmse = float(np.sqrt(np.mean(diff ** 2)))
+            mae = float(np.mean(np.abs(diff)))
+            err_norm = np.linalg.norm(diff, axis=-1)
+            max_err = float(np.max(err_norm))
+            denom = float(np.linalg.norm(ref.reshape(-1)) * np.linalg.norm(pred.reshape(-1)))
+            cos = float(np.dot(ref.reshape(-1), pred.reshape(-1)) / denom) if denom > 1e-12 else float("nan")
+            pred_mean = float(np.mean(np.linalg.norm(pred, axis=-1)))
+            ref_mean = float(np.mean(np.linalg.norm(ref, axis=-1)))
+        row = {
+            "rank_by_rmse": 0,
+            "local_eval_index": int(local_i),
+            "frame_id": int(frame_ids[local_i]),
+            "rmse": rmse,
+            "mae": mae,
+            "cosine": cos,
+            "max_error_norm": max_err,
+            "pred_force_norm_mean": pred_mean,
+            "ref_force_norm_mean": ref_mean,
+            "n_valid": int(np.sum(valid)),
+        }
+        for key, values in extra_columns.items():
+            value = np.asarray(values)[local_i]
+            if np.ndim(value) == 0:
+                row[key] = value.item()
+            else:
+                row[key] = str(value.tolist())
+        rows.append(row)
+
+    rows_sorted = sorted(rows, key=lambda r: (not np.isfinite(r["rmse"]), -r["rmse"]))
+    for rank, row in enumerate(rows_sorted, start=1):
+        row["rank_by_rmse"] = rank
+
+    csv_path = output_dir / f"{prefix}_per_frame_errors.csv"
+    top_path = output_dir / f"{prefix}_worst_frames_top{int(top_k)}.json"
+    if rows_sorted:
+        fieldnames = list(rows_sorted[0].keys())
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows_sorted)
+    else:
+        csv_path.write_text("")
+    top_rows = rows_sorted[: max(0, int(top_k))]
+    top_path.write_text(json.dumps(top_rows, indent=2, sort_keys=True))
+    finite_rmse = np.asarray([r["rmse"] for r in rows if np.isfinite(r["rmse"])], dtype=np.float64)
+    return {
+        f"{prefix}_per_frame_csv_path": str(csv_path),
+        f"{prefix}_worst_frames_json_path": str(top_path),
+        f"{prefix}_per_frame_rmse_mean": float(np.mean(finite_rmse)) if finite_rmse.size else float("nan"),
+        f"{prefix}_per_frame_rmse_p95": float(np.quantile(finite_rmse, 0.95)) if finite_rmse.size else float("nan"),
+        f"{prefix}_per_frame_rmse_max": float(np.max(finite_rmse)) if finite_rmse.size else float("nan"),
+    }
+
+
+def _basic_force_metrics(Y_ref: np.ndarray, Y_pred: np.ndarray, mask: np.ndarray, Y_train: np.ndarray, *, shuffle_repeats: int, shuffle_seed: int) -> Dict[str, Any]:
+    valid_components = _valid_component_mask(mask)
+    y_ref_valid = Y_ref[valid_components]
+    y_pred_valid = Y_pred[valid_components]
+    mean_force_train = np.mean(Y_train, axis=0, keepdims=True) if Y_train.size else np.zeros((1, Y_ref.shape[1]), dtype=np.float32)
+    Y_zero = np.zeros_like(Y_ref)
+    Y_mean = np.repeat(mean_force_train, Y_ref.shape[0], axis=0)
+    rmse_model = _rmse(Y_ref, Y_pred)
+    rmse_zero = _rmse(Y_ref, Y_zero)
+    rmse_mean = _rmse(Y_ref, Y_mean)
+    rng = np.random.RandomState(shuffle_seed)
+    shuffle_rmses = []
+    for _ in range(int(shuffle_repeats)):
+        perm = rng.permutation(Y_pred.shape[0])
+        shuffle_rmses.append(_rmse(Y_ref, Y_pred[perm]))
+    shuffle_rmses = np.asarray(shuffle_rmses, dtype=np.float64)
+    return {
+        "rmse_model": rmse_model,
+        "rmse_zero": rmse_zero,
+        "rmse_mean": rmse_mean,
+        "rmse_shuffle_mean": float(np.mean(shuffle_rmses)),
+        "rmse_shuffle_std": float(np.std(shuffle_rmses)),
+        "shuffle_gap_rmse": float(np.mean(shuffle_rmses) - rmse_model),
+        "pearson_global": _safe_pearson(y_ref_valid, y_pred_valid),
+        "mean_cosine_similarity": _mean_cosine_similarity(Y_ref, Y_pred),
+        "r2_explained_variance": _r2_vector(Y_ref, Y_pred),
+        "variance_ratio_pred_to_ref": _variance_ratio(y_ref_valid, y_pred_valid),
+        "shuffle_rmses": shuffle_rmses,
+    }
+
+
 def compute_detailed_force_eval(
     config_path: Path,
     params_path: Path,
@@ -126,6 +233,7 @@ def compute_detailed_force_eval(
     shuffle_seed: int = 42,
     max_val_frames: Optional[int] = None,
     batch_size: Optional[int] = None,
+    use_train: bool = False,
 ) -> Dict[str, Any]:
     import jax
     import jax.numpy as jnp
@@ -160,7 +268,10 @@ def compute_detailed_force_eval(
     if max_val_frames is not None:
         val_idx = val_idx[: int(max_val_frames)]
     if val_idx.size == 0:
-        raise ValueError("No held-out validation samples available for detailed force evaluation.")
+        if use_train and train_idx.size > 0:
+            val_idx = train_idx
+        else:
+            raise ValueError("No held-out validation samples available for detailed force evaluation.")
 
     config.set("model", "use_priors", bool(config.export_combined_ml_priors_enabled()))
     config.set("model", "train_priors", False)
@@ -226,43 +337,35 @@ def compute_detailed_force_eval(
     Y_ref = _masked_flatten(F_val_ref, mask_val)
     Y_pred = _masked_flatten(F_val_pred, mask_val)
 
-    valid_components = _valid_component_mask(mask_val)
-    y_ref_valid = Y_ref[valid_components]
-    y_pred_valid = Y_pred[valid_components]
+    base_metrics = _basic_force_metrics(
+        Y_ref, Y_pred, mask_val, Y_train,
+        shuffle_repeats=shuffle_repeats,
+        shuffle_seed=shuffle_seed,
+    )
+    shuffle_rmses = np.asarray(base_metrics.pop("shuffle_rmses"), dtype=np.float64)
 
-    mean_force_train = np.mean(Y_train, axis=0, keepdims=True) if Y_train.size else np.zeros((1, Y_ref.shape[1]), dtype=np.float32)
-    Y_zero = np.zeros_like(Y_ref)
-    Y_mean = np.repeat(mean_force_train, Y_ref.shape[0], axis=0)
-
-    rmse_model = _rmse(Y_ref, Y_pred)
-    rmse_zero = _rmse(Y_ref, Y_zero)
-    rmse_mean = _rmse(Y_ref, Y_mean)
-
-    rng = np.random.RandomState(shuffle_seed)
-    shuffle_rmses = []
-    for _ in range(int(shuffle_repeats)):
-        perm = rng.permutation(Y_pred.shape[0])
-        shuffle_rmses.append(_rmse(Y_ref, Y_pred[perm]))
-    shuffle_rmses = np.asarray(shuffle_rmses, dtype=np.float64)
-
+    eval_split_name = "train" if use_train else "validation"
     metrics: Dict[str, Any] = {
-        "split_name": "validation",
+        "split_name": eval_split_name,
         "n_train_samples": int(train_idx.size),
         "n_eval_samples": int(val_idx.size),
         "shuffle_repeats": int(shuffle_repeats),
-        "rmse_model": rmse_model,
-        "rmse_zero": rmse_zero,
-        "rmse_mean": rmse_mean,
-        "rmse_shuffle_mean": float(np.mean(shuffle_rmses)),
-        "rmse_shuffle_std": float(np.std(shuffle_rmses)),
-        "shuffle_gap_rmse": float(np.mean(shuffle_rmses) - rmse_model),
-        "pearson_global": _safe_pearson(y_ref_valid, y_pred_valid),
-        "mean_cosine_similarity": _mean_cosine_similarity(Y_ref, Y_pred),
-        "r2_explained_variance": _r2_vector(Y_ref, Y_pred),
-        "variance_ratio_pred_to_ref": _variance_ratio(y_ref_valid, y_pred_valid),
+        **base_metrics,
     }
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    metrics.update(_per_frame_metrics(
+        F_val_ref,
+        F_val_pred,
+        mask_val,
+        val_idx,
+        output_dir,
+        prefix="validation",
+        extra_columns={
+            "is_noised_frame": np.zeros((n_val,), dtype=np.int32),
+            "noise_level_id": np.full((n_val,), -1, dtype=np.int32),
+        },
+    ))
     metrics_json = output_dir / "metrics.json"
     metrics_csv = output_dir / "metrics.csv"
     shuffle_csv = output_dir / "shuffle_rmses.csv"
@@ -270,11 +373,142 @@ def compute_detailed_force_eval(
     shuffle_plot = output_dir / "shuffle_rmse_distribution.png"
     cosine_plot = output_dir / "cosine_similarity_hist.png"
 
-    metrics_json.write_text(json.dumps(metrics, indent=2, sort_keys=True))
-    with open(metrics_csv, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(metrics.keys()))
-        writer.writeheader()
-        writer.writerow(metrics)
+    try:
+        from training.noised_residual import (
+            _apply_min_distance_guard,
+            _center_noise_per_structure,
+            noised_residual_config_parsed,
+            noised_residual_enabled,
+        )
+        if noised_residual_enabled(config):
+            nr_cfg = noised_residual_config_parsed(config)
+            if not config.use_priors():
+                raise ValueError("noised residual eval requires priors enabled")
+
+            def _prior_forces_single(R_i, mask_i, species_i):
+                def energy_fn(R_var):
+                    R_detached = jax.lax.stop_gradient(R_var)
+                    R_masked = jnp.where(mask_i[:, None] > 0, R_var, R_detached)
+                    return model.prior.compute_total_energy(R_masked, mask_i, species=species_i)
+                return -jax.grad(energy_fn)(R_i)
+
+            prior_forces_batched = jax.jit(jax.vmap(_prior_forces_single))
+            F_prior_clean = []
+            for start in range(0, n_val, chunk_size):
+                end = min(start + chunk_size, n_val)
+                F_prior_clean.append(np.asarray(prior_forces_batched(
+                    R_val_jax[start:end], mask_val_jax[start:end], species_val_jax[start:end]
+                ), dtype=np.float32))
+            F_prior_clean = np.concatenate(F_prior_clean, axis=0)
+            F_res_clean = F_val_ref - F_prior_clean
+
+            duplicate_every = nr_cfg.get("duplicate_every")
+            duplicate_offset = int(nr_cfg.get("duplicate_offset", 0))
+            if duplicate_every is None:
+                dup_mask = np.ones(n_val, dtype=bool)
+            else:
+                dup_mask = ((np.arange(n_val) - duplicate_offset) % int(duplicate_every)) == 0
+            R_sel = np.asarray(dataset["R"][val_idx], dtype=np.float32)[dup_mask]
+            F_res_sel = F_res_clean[dup_mask]
+            mask_sel = mask_val[dup_mask]
+            species_sel = np.asarray(dataset["species"][val_idx], dtype=np.int32)[dup_mask]
+            frame_sel = val_idx[dup_mask]
+
+            noised_R_blocks = []
+            noised_F_blocks = []
+            noised_mask_blocks = []
+            noised_species_blocks = []
+            noised_frame_blocks = []
+            noised_level_blocks = []
+            noised_sigma_blocks = []
+            noised_atten_blocks = []
+            rng = np.random.RandomState(int(config.get_seed()) + int(nr_cfg.get("seed_offset", 0)) + 12345)
+            for level_idx, level in enumerate(nr_cfg["noise_levels"]):
+                sigma = float(level["sigma"])
+                attenuation = float(level["attenuation"])
+                eps_raw = rng.normal(size=R_sel.shape).astype(np.float32)
+                eps = _center_noise_per_structure(R_sel, mask_sel, eps_raw)
+                R_noisy, _guard_stats = _apply_min_distance_guard(
+                    R_sel,
+                    eps,
+                    mask_sel,
+                    sigma,
+                    float(nr_cfg.get("min_pair_distance", 0.0)),
+                    int(nr_cfg.get("max_rescale_attempts", 0)),
+                    float(nr_cfg.get("rescale_factor", 0.5)),
+                )
+                F_prior_noisy = []
+                R_noisy_jax = jnp.asarray(R_noisy, dtype=jnp.float32)
+                mask_sel_jax = jnp.asarray(mask_sel, dtype=jnp.float32)
+                species_sel_jax = jnp.asarray(species_sel, dtype=jnp.int32)
+                for start in range(0, R_noisy.shape[0], chunk_size):
+                    end = min(start + chunk_size, R_noisy.shape[0])
+                    F_prior_noisy.append(np.asarray(prior_forces_batched(
+                        R_noisy_jax[start:end], mask_sel_jax[start:end], species_sel_jax[start:end]
+                    ), dtype=np.float32))
+                F_prior_noisy = np.concatenate(F_prior_noisy, axis=0)
+                noised_R_blocks.append(R_noisy.astype(np.float32))
+                noised_F_blocks.append((F_prior_noisy + attenuation * F_res_sel).astype(np.float32))
+                noised_mask_blocks.append(mask_sel.astype(np.float32))
+                noised_species_blocks.append(species_sel.astype(np.int32))
+                noised_frame_blocks.append(frame_sel.astype(np.int32))
+                noised_level_blocks.append(np.full((R_sel.shape[0],), level_idx, dtype=np.int32))
+                noised_sigma_blocks.append(np.full((R_sel.shape[0],), sigma, dtype=np.float32))
+                noised_atten_blocks.append(np.full((R_sel.shape[0],), attenuation, dtype=np.float32))
+
+            if noised_R_blocks:
+                R_noised = np.concatenate(noised_R_blocks, axis=0)
+                F_noised_ref = np.concatenate(noised_F_blocks, axis=0)
+                mask_noised = np.concatenate(noised_mask_blocks, axis=0)
+                species_noised = np.concatenate(noised_species_blocks, axis=0)
+                frame_noised = np.concatenate(noised_frame_blocks, axis=0)
+                level_noised = np.concatenate(noised_level_blocks, axis=0)
+                sigma_noised = np.concatenate(noised_sigma_blocks, axis=0)
+                atten_noised = np.concatenate(noised_atten_blocks, axis=0)
+
+                F_noised_pred_chunks = []
+                R_noised_jax = jnp.asarray(R_noised, dtype=jnp.float32)
+                mask_noised_jax = jnp.asarray(mask_noised, dtype=jnp.float32)
+                species_noised_jax = jnp.asarray(species_noised, dtype=jnp.int32)
+                for start in range(0, R_noised.shape[0], chunk_size):
+                    end = min(start + chunk_size, R_noised.shape[0])
+                    F_noised_pred_chunks.append(np.asarray(batched_forces_fn(
+                        R_noised_jax[start:end], mask_noised_jax[start:end], species_noised_jax[start:end]
+                    ), dtype=np.float32))
+                    print(f"  [detailed_force_eval] noised eval {end}/{R_noised.shape[0]} frames", flush=True)
+                F_noised_pred = np.concatenate(F_noised_pred_chunks, axis=0)
+                Y_noised_ref = _masked_flatten(F_noised_ref, mask_noised)
+                Y_noised_pred = _masked_flatten(F_noised_pred, mask_noised)
+                noised_metrics = _basic_force_metrics(
+                    Y_noised_ref,
+                    Y_noised_pred,
+                    mask_noised,
+                    Y_train,
+                    shuffle_repeats=shuffle_repeats,
+                    shuffle_seed=shuffle_seed,
+                )
+                noised_metrics.pop("shuffle_rmses", None)
+                for key, value in noised_metrics.items():
+                    metrics[f"noised_{key}"] = value
+                metrics["noised_n_eval_samples"] = int(R_noised.shape[0])
+                metrics["noised_duplicate_source_samples"] = int(R_sel.shape[0])
+                metrics.update(_per_frame_metrics(
+                    F_noised_ref,
+                    F_noised_pred,
+                    mask_noised,
+                    frame_noised,
+                    output_dir / "noised_frames",
+                    prefix="noised",
+                    extra_columns={
+                        "is_noised_frame": np.ones((R_noised.shape[0],), dtype=np.int32),
+                        "noise_level_id": level_noised,
+                        "noise_sigma": sigma_noised,
+                        "attenuation": atten_noised,
+                    },
+                ))
+    except Exception as exc:
+        metrics["noised_eval_error"] = str(exc)
+
     with open(shuffle_csv, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["shuffle_idx", "rmse"])
@@ -335,6 +569,11 @@ def compute_detailed_force_eval(
         "shuffle_plot_path": str(shuffle_plot),
         "cosine_plot_path": str(cosine_plot),
     })
+    metrics_json.write_text(json.dumps(metrics, indent=2, sort_keys=True))
+    with open(metrics_csv, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(metrics.keys()))
+        writer.writeheader()
+        writer.writerow(metrics)
     return metrics
 
 
@@ -349,6 +588,8 @@ def main() -> None:
     parser.add_argument("--max-val-frames", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None,
                         help="Frames per vmap chunk. Defaults to all val frames at once.")
+    parser.add_argument("--use-train", action="store_true",
+                        help="Use train split when no val split exists (e.g. for RE training).")
     args = parser.parse_args()
 
     metrics = compute_detailed_force_eval(
@@ -360,6 +601,7 @@ def main() -> None:
         shuffle_seed=args.shuffle_seed,
         max_val_frames=args.max_val_frames,
         batch_size=args.batch_size,
+        use_train=args.use_train,
     )
     print(json.dumps(metrics, indent=2, sort_keys=True))
 

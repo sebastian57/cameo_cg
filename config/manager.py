@@ -338,10 +338,12 @@ class ConfigManager:
         "dihedral": 0.15,
         "excluded_volume": 1.0,
         "wca": 0.0,
+        "lj": 0.0,
         "fene": 0.0,
         "leash": 0.0,
         "local_in": 0.0,
         "local_bond_in": 0.0,
+        "crowding_wall": 0.0,
         "dh": 0.0,
         "stickiness": 0.0,
         "salt_bridge": 0.0,
@@ -473,6 +475,21 @@ class ConfigManager:
                 "Expected one of: legacy_mean, valid_components, per_structure_components."
             )
         return raw
+
+    def relative_entropy_enabled(self) -> bool:
+        return bool(self.get("training", "relative_entropy", "enabled", default=False))
+
+    def get_relative_entropy_config(self) -> Dict[str, Any]:
+        cfg = self.get("training", "relative_entropy", default={}) or {}
+        if not isinstance(cfg, dict):
+            raise ValueError("training.relative_entropy must be a mapping.")
+        return cfg
+
+    def get_relative_entropy_reference_data_path(self) -> Optional[str]:
+        path = self.get("training", "relative_entropy", "reference_data_path", default=None)
+        if path is None or str(path).strip() == "":
+            return self.get_data_path()
+        return str(path)
 
     def get_dsm_refresh_interval_steps(self) -> int:
         value = int(self.get("training", "dsm", "refresh_interval_steps", default=0))

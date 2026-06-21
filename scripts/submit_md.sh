@@ -29,8 +29,9 @@ echo "Node        : $SLURMD_NODENAME"
 echo "============================================================"
 
 # Load environment (same as training).
-source "$PROJECT_ROOT/../load_modules.sh"
-source "$PROJECT_ROOT/../venv_cameocg_jupiter/bin/activate"
+source "$PROJECT_ROOT/../load_modules_2026.sh"
+source "$PROJECT_ROOT/../venv_cameocg_jupiter2026/bin/activate"
+source "$PROJECT_ROOT/../set_lammps_paths_2026.sh"
 
 mkdir -p "$PROJECT_ROOT/slurm"
 cd "$PROJECT_ROOT"

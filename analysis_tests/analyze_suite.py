@@ -50,6 +50,7 @@ FIELDNAMES = [
     'model_context',
     'model_id',
     'status',
+    'is_re_run',
     'job_id',
     'run_dir',
     'analysis_dir',
@@ -90,6 +91,8 @@ FIELDNAMES = [
     'force_magnitude_diff_mean',
     'force_magnitude_diff_std',
     'force_magnitude_abs_diff_mean',
+    'force_eval_per_frame_csv_path',
+    'force_eval_worst_frames_json_path',
     'force_eval_error',
     'detailed_force_eval_dir',
     'detailed_metrics_json_path',
@@ -112,6 +115,15 @@ FIELDNAMES = [
     'detailed_mean_cosine_similarity',
     'detailed_r2_explained_variance',
     'detailed_variance_ratio_pred_to_ref',
+    'detailed_validation_per_frame_csv_path',
+    'detailed_validation_worst_frames_json_path',
+    'detailed_noised_rmse_model',
+    'detailed_noised_rmse_zero',
+    'detailed_noised_mean_cosine_similarity',
+    'detailed_noised_n_eval_samples',
+    'detailed_noised_per_frame_csv_path',
+    'detailed_noised_worst_frames_json_path',
+    'detailed_noised_eval_error',
     'complete_eval_dir',
     'complete_eval_metrics_json_path',
     'complete_eval_arrays_npz_path',
@@ -508,6 +520,7 @@ def _collect_force_eval_data(
     all_ref = []
     all_mask = []
     all_R = []
+    per_frame_errors = []
     for idx in indices:
         result = evaluator.evaluate_frame(
             jnp.asarray(train_subset['R'][idx]),
@@ -515,9 +528,26 @@ def _collect_force_eval_data(
             jnp.asarray(train_subset['mask'][idx]),
             jnp.asarray(train_subset['species'][idx]),
         )
-        all_pred.append(np.asarray(result['forces'], dtype=np.float32))
-        all_ref.append(np.asarray(train_subset['F'][idx], dtype=np.float32))
-        all_mask.append(np.asarray(train_subset['mask'][idx], dtype=np.float32))
+        pred_i = np.asarray(result['forces'], dtype=np.float32)
+        ref_i = np.asarray(train_subset['F'][idx], dtype=np.float32)
+        mask_i = np.asarray(train_subset['mask'][idx], dtype=np.float32)
+        valid_i = mask_i > 0
+        diff_i = pred_i[valid_i] - ref_i[valid_i]
+        denom_i = float(np.linalg.norm(pred_i[valid_i].reshape(-1)) * np.linalg.norm(ref_i[valid_i].reshape(-1)))
+        per_frame_errors.append({
+            'frame_id': int(train_indices[idx]),
+            'local_train_index': int(idx),
+            'is_noised_frame': int(train_subset.get('is_noised_frame', np.zeros((n_train,), dtype=np.int32))[idx]) if 'is_noised_frame' in train_subset else 0,
+            'noise_level_id': int(train_subset.get('noise_level_id', np.full((n_train,), -1, dtype=np.int32))[idx]) if 'noise_level_id' in train_subset else -1,
+            'rmse': float(np.sqrt(np.mean(diff_i ** 2))) if diff_i.size else float('nan'),
+            'mae': float(np.mean(np.abs(diff_i))) if diff_i.size else float('nan'),
+            'cosine': float(np.dot(pred_i[valid_i].reshape(-1), ref_i[valid_i].reshape(-1)) / denom_i) if denom_i > 1e-12 else float('nan'),
+            'max_error_norm': float(np.max(np.linalg.norm(diff_i, axis=-1))) if diff_i.size else float('nan'),
+            'n_valid': int(np.sum(valid_i)),
+        })
+        all_pred.append(pred_i)
+        all_ref.append(ref_i)
+        all_mask.append(mask_i)
         all_R.append(np.asarray(train_subset['R'][idx], dtype=np.float32))
 
     f_pred = np.concatenate(all_pred, axis=0)
@@ -546,11 +576,74 @@ def _collect_force_eval_data(
         'F_pred_real': f_pred,
         'F_ref_real': f_ref,
         'R_real': R,
+        'per_frame_errors': sorted(per_frame_errors, key=lambda r: (not np.isfinite(r['rmse']), -r['rmse'])),
     }
 
 
 def _is_run_dir(path: Path) -> bool:
-    return (path / 'config_runtime.yaml').exists() or (path / 'config_input.yaml').exists()
+    return (path / 'config_runtime.yaml').exists() or (path / 'config_input.yaml').exists() or (path / 'config_runtime_re.yaml').exists() or (path / 'config_input_re.yaml').exists()
+
+
+def _is_re_run_dir(path: Path) -> bool:
+    re_dir = path / 'relative_entropy'
+    if not re_dir.is_dir():
+        return False
+    re_checkpoint = re_dir / 'relative_entropy_final_checkpoint.pkl'
+    if not re_checkpoint.exists():
+        re_checkpoints = list(re_dir.glob('relative_entropy_iter*.pkl'))
+        return len(re_checkpoints) > 0
+    return True
+
+
+def _re_checkpoint_path(run_dir: Path, *, include_incomplete: bool = False) -> Path | None:
+    re_dir = run_dir / 'relative_entropy'
+    if not re_dir.is_dir():
+        return None
+    final_checkpoint = re_dir / 'relative_entropy_final_checkpoint.pkl'
+    if final_checkpoint.exists():
+        return final_checkpoint
+    if not include_incomplete:
+        return None
+    checkpoints = sorted(re_dir.glob('relative_entropy_iter*.pkl'))
+    if checkpoints:
+        return checkpoints[-1]
+    return None
+
+
+def _load_re_training_history(run_dir: Path) -> List[Dict[str, Any]]:
+    re_dir = run_dir / 'relative_entropy'
+    if not re_dir.is_dir():
+        return []
+    history_path = re_dir / 'relative_entropy_history.csv'
+    if not history_path.exists():
+        return []
+    history = []
+    with history_path.open(newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            history.append(dict(row))
+    return history
+
+
+def _extract_re_params_from_checkpoint(checkpoint_path: Path) -> Dict[str, Any]:
+    with open(checkpoint_path, 'rb') as f:
+        payload = pickle.load(f)
+    if isinstance(payload, dict):
+        if 'params' in payload:
+            return payload['params']
+        if 'best_params' in payload:
+            return payload['best_params']
+        raise ValueError(f'RE checkpoint has no params/best_params. Keys: {list(payload.keys())}')
+    raise TypeError(f'cannot extract params from RE checkpoint of type {type(payload)}')
+
+
+def _write_re_params_from_checkpoint(checkpoint_path: Path, params_path: Path) -> None:
+    params = _extract_re_params_from_checkpoint(checkpoint_path)
+    params_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = params_path.with_suffix(params_path.suffix + '.tmp')
+    with open(tmp_path, 'wb') as f:
+        pickle.dump(params, f)
+    os.replace(tmp_path, params_path)
 
 
 def _iter_run_dirs(outputs_root: Path) -> Iterable[Path]:
@@ -687,6 +780,31 @@ def _ensure_params_path(
     return params_path, None
 
 
+def _ensure_re_params_path(
+    run_dir: Path,
+    config: ConfigManager,
+    *,
+    include_incomplete: bool = False,
+) -> tuple[Path, Optional[str]]:
+    model_name = f'{config.get_model_context()}_{config.get_model_id()}'
+    params_path = run_dir / 'relative_entropy' / f'{model_name}_params.pkl'
+    if params_path.exists():
+        return params_path, None
+    if not include_incomplete:
+        return params_path, None
+
+    checkpoint_path = _re_checkpoint_path(run_dir, include_incomplete=True)
+    if checkpoint_path is None or not checkpoint_path.exists():
+        return params_path, 'missing RE checkpoint for automatic params extraction'
+
+    try:
+        _write_re_params_from_checkpoint(checkpoint_path, params_path)
+    except Exception as exc:
+        return params_path, f'auto-extract failed from {checkpoint_path.name}: {exc}'
+
+    return params_path, None
+
+
 def _resolve_input_run_dirs(input_path: Path) -> List[Path]:
     if _is_run_dir(input_path):
         return [input_path]
@@ -753,11 +871,41 @@ def _completed_run_reason(run_dir: Path, include_incomplete: bool = False) -> tu
     return True, 'completed'
 
 
+def _completed_re_run_reason(run_dir: Path, include_incomplete: bool = False) -> tuple[bool, str]:
+    re_dir = run_dir / 'relative_entropy'
+    if not re_dir.is_dir():
+        return False, 'no relative_entropy/ subdirectory'
+
+    re_checkpoint = _re_checkpoint_path(run_dir, include_incomplete=include_incomplete)
+    if re_checkpoint is None or not re_checkpoint.exists():
+        return False, 'missing RE checkpoint'
+
+    re_history = re_dir / 'relative_entropy_history.csv'
+    re_log = re_dir / 'relative_entropy_loss.log'
+
+    if not include_incomplete:
+        if not re_history.exists() and not re_log.exists():
+            return False, 'missing RE history CSV or log'
+        log_text = _read_text_if_exists(re_log)
+        slurm_path = _resolve_slurm_path(run_dir, include_incomplete=False)
+        slurm_text = _read_text_if_exists(slurm_path)
+        combined = '\n'.join([log_text, slurm_text])
+        if 'Traceback (most recent call last):' in combined:
+            return False, 'traceback found in log'
+        if 'Exited with exit code' in combined:
+            return False, 'srun reported nonzero exit'
+
+    return True, 'completed'
+
+
 def _filter_completed_run_dirs(run_dirs: List[Path], include_incomplete: bool = False) -> tuple[List[Path], List[tuple[Path, str]]]:
     completed: List[Path] = []
     excluded: List[tuple[Path, str]] = []
     for run_dir in run_dirs:
-        is_completed, reason = _completed_run_reason(run_dir, include_incomplete=include_incomplete)
+        if _is_re_run_dir(run_dir):
+            is_completed, reason = _completed_re_run_reason(run_dir, include_incomplete=include_incomplete)
+        else:
+            is_completed, reason = _completed_run_reason(run_dir, include_incomplete=include_incomplete)
         if is_completed:
             completed.append(run_dir)
         else:
@@ -816,6 +964,199 @@ def _save_tail_fit_plot(train_losses: List[float], val_losses: Optional[List[flo
     fig.savefig(output_path, dpi=200, bbox_inches='tight')
     plt.close(fig)
     return ''
+
+
+def _save_re_loss_plot(re_history: List[Dict[str, Any]], output_path: Path, *, title: str) -> str:
+    if not re_history:
+        return 'Empty RE history'
+
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+    except Exception as exc:
+        return f'Plotting import failed: {exc}'
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    iterations = []
+    objectives = []
+    gaps = []
+    grad_norms = []
+    for row in re_history:
+        try:
+            iterations.append(int(row.get('iteration', 0)))
+            objectives.append(float(row.get('objective', float('nan'))))
+            gaps.append(float(row.get('re_energy_gap', float('nan'))))
+            grad_norms.append(float(row.get('grad_norm', float('nan'))))
+        except (ValueError, TypeError):
+            continue
+
+    if not iterations:
+        return 'No numeric data in RE history'
+
+    fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+
+    axes[0].plot(iterations, objectives, marker='o', linewidth=1.5, markersize=4, label='Objective (abs gap)')
+    axes[0].set_ylabel('Objective')
+    axes[0].set_title(title)
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+
+    axes[1].plot(iterations, gaps, marker='o', linewidth=1.5, markersize=4, label='RE Energy Gap', color='tab:orange')
+    axes[1].axhline(0, color='black', linewidth=0.8, linestyle='--')
+    axes[1].set_ylabel('Gap')
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3)
+
+    axes[2].plot(iterations, grad_norms, marker='o', linewidth=1.5, markersize=4, label='Grad Norm', color='tab:green')
+    axes[2].set_ylabel('Grad Norm')
+    axes[2].set_xlabel('Iteration')
+    axes[2].legend()
+    axes[2].grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+    return ''
+
+
+def _collect_re_force_eval_data(
+    config_path: Path,
+    params_path: Path,
+    run_dir: Path,
+    *,
+    n_frames: int,
+    seed: int,
+    devices_per_run: int,
+) -> Dict[str, Any]:
+    import jax
+    import jax.numpy as jnp
+
+    _apply_jax_compat_shims(jax)
+
+    from data.loader import DatasetLoader
+    from data.preprocessor import CoordinatePreprocessor
+    from analysis_tests.evaluator import Evaluator
+    from models.combined_model import CombinedModel
+    from training.relative_entropy import relative_entropy_config
+
+    config = ConfigManager(str(config_path))
+    _resolve_spline_path_if_needed(config)
+
+    re_cfg = relative_entropy_config(config)
+    if not re_cfg.reference_data_path:
+        raise ValueError('RE config missing reference_data_path')
+
+    from training.path_utils import repo_root_from_file, resolve_from_config_or_repo
+
+    data_path = resolve_from_config_or_repo(
+        re_cfg.reference_data_path,
+        config.config_path,
+        repo_root_from_file(__file__),
+    )
+
+    loader = DatasetLoader(str(data_path), max_frames=config.get_max_frames(), seed=config.get_seed())
+    dataset = loader.get_all()
+
+    use_pbc = config.use_pbc_enabled()
+    if use_pbc:
+        if loader.box is None:
+            raise ValueError('model.pbc=true requires a box in the RE reference dataset')
+        box = jnp.asarray(loader.box, dtype=jnp.float32)
+        dataset['R'] = jnp.mod(jnp.asarray(dataset['R'], dtype=jnp.float32), box[None, None, :])
+    else:
+        preprocessor = CoordinatePreprocessor(
+            cutoff=config.get_cutoff(),
+            buffer_multiplier=config.get_buffer_multiplier(),
+            park_multiplier=config.get_park_multiplier(),
+        )
+        box, shift = preprocessor.compute_box_extent(loader.R, loader.mask)
+        dataset['R'] = preprocessor.center_and_park(
+            jnp.asarray(dataset['R'], dtype=jnp.float32),
+            jnp.asarray(dataset['mask'], dtype=jnp.float32),
+            box, shift,
+        )
+
+    params = _load_params(params_path)
+    model = CombinedModel(
+        config=config,
+        R0=dataset['R'][0],
+        box=box,
+        species=dataset['species'][0] if dataset.get('species') is not None else jnp.zeros_like(dataset['mask'][0], dtype=jnp.int32),
+        N_max=loader.N_max,
+        id_to_aa=loader.id_to_aa,
+        prior_only=False,
+    )
+    evaluator = Evaluator(model, params, config)
+
+    n_total = int(dataset['R'].shape[0])
+    rng = np.random.RandomState(seed)
+    indices = np.sort(rng.choice(n_total, size=min(n_frames, n_total), replace=False))
+
+    all_pred = []
+    all_ref = []
+    all_mask = []
+    all_R = []
+    per_frame_errors = []
+
+    for idx in indices:
+        result = evaluator.evaluate_frame(
+            jnp.asarray(dataset['R'][idx]),
+            jnp.asarray(dataset['F'][idx]),
+            jnp.asarray(dataset['mask'][idx]),
+            jnp.asarray(dataset['species'][idx]) if dataset.get('species') is not None else jnp.zeros_like(dataset['mask'][idx], dtype=jnp.int32),
+        )
+        pred_i = np.asarray(result['forces'], dtype=np.float32)
+        ref_i = np.asarray(dataset['F'][idx], dtype=np.float32)
+        mask_i = np.asarray(dataset['mask'][idx], dtype=np.float32)
+        valid_i = mask_i > 0
+        diff_i = pred_i[valid_i] - ref_i[valid_i]
+        denom_i = float(np.linalg.norm(pred_i[valid_i].reshape(-1)) * np.linalg.norm(ref_i[valid_i].reshape(-1)))
+        per_frame_errors.append({
+            'frame_id': int(idx),
+            'local_train_index': int(idx),
+            'is_noised_frame': 0,
+            'noise_level_id': -1,
+            'rmse': float(np.sqrt(np.mean(diff_i ** 2))) if diff_i.size else float('nan'),
+            'mae': float(np.mean(np.abs(diff_i))) if diff_i.size else float('nan'),
+            'cosine': float(np.dot(pred_i[valid_i].reshape(-1), ref_i[valid_i].reshape(-1)) / denom_i) if denom_i > 1e-12 else float('nan'),
+            'max_error_norm': float(np.max(np.linalg.norm(diff_i, axis=-1))) if diff_i.size else float('nan'),
+            'n_valid': int(np.sum(valid_i)),
+        })
+        all_pred.append(pred_i)
+        all_ref.append(ref_i)
+        all_mask.append(mask_i)
+        all_R.append(np.asarray(dataset['R'][idx], dtype=np.float32))
+
+    f_pred = np.concatenate(all_pred, axis=0)
+    f_ref = np.concatenate(all_ref, axis=0)
+    mask = np.concatenate(all_mask, axis=0) > 0
+    R = np.concatenate(all_R, axis=0)
+    f_pred = f_pred[mask]
+    f_ref = f_ref[mask]
+    R = R[mask]
+
+    diff = f_pred - f_ref
+    diff_mag = np.linalg.norm(diff, axis=-1)
+    pred_mag = np.linalg.norm(f_pred, axis=-1)
+    ref_mag = np.linalg.norm(f_ref, axis=-1)
+    mag_diff = pred_mag - ref_mag
+
+    return {
+        'force_eval_frames': float(len(indices)),
+        'force_rmse': float(np.sqrt(np.mean(diff ** 2))),
+        'force_mae': float(np.mean(np.abs(diff))),
+        'force_error_magnitude_mean': float(np.mean(diff_mag)),
+        'force_error_magnitude_std': float(np.std(diff_mag)),
+        'force_magnitude_diff_mean': float(np.mean(mag_diff)),
+        'force_magnitude_diff_std': float(np.std(mag_diff)),
+        'force_magnitude_abs_diff_mean': float(np.mean(np.abs(mag_diff))),
+        'F_pred_real': f_pred,
+        'F_ref_real': f_ref,
+        'R_real': R,
+        'per_frame_errors': sorted(per_frame_errors, key=lambda r: (not np.isfinite(r['rmse']), -r['rmse'])),
+    }
 
 
 def _save_force_eval_plots(force_eval_data: Dict[str, Any], plot_prefix: str, force_eval_plots_dir: Path) -> Dict[str, str]:
@@ -913,6 +1254,7 @@ def _run_detailed_force_eval_subprocess(
     shuffle_seed: int,
     max_val_frames: Optional[int],
     batch_size: Optional[int],
+    use_train: bool = False,
 ) -> Dict[str, Any]:
     import json
 
@@ -939,6 +1281,8 @@ def _run_detailed_force_eval_subprocess(
         cmd.extend(['--max-val-frames', str(max_val_frames)])
     if batch_size is not None:
         cmd.extend(['--batch-size', str(batch_size)])
+    if use_train:
+        cmd.append('--use-train')
 
     proc = subprocess.run(
         cmd,
@@ -974,6 +1318,7 @@ def _run_complete_eval_subprocess(
     smoothness_frames: int = 5,
     smoothness_perturbations: int = 20,
     smoothness_sigma: float = 0.01,
+    use_train: bool = False,
 ) -> Dict[str, Any]:
     import json as _json
 
@@ -998,6 +1343,8 @@ def _run_complete_eval_subprocess(
         cmd.extend(['--max-val-frames', str(max_val_frames)])
     if batch_size is not None:
         cmd.extend(['--batch-size', str(batch_size)])
+    if use_train:
+        cmd.append('--use-train')
 
     proc = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True, env=env)
     if proc.returncode != 0:
@@ -1036,12 +1383,23 @@ def main() -> None:
     parser.add_argument('--smoothness-frames', type=int, default=5, help='Frames for smoothness test in complete eval.')
     parser.add_argument('--smoothness-perturbations', type=int, default=20, help='Perturbations per frame for smoothness test.')
     parser.add_argument('--smoothness-sigma', type=float, default=0.01, help='Gaussian noise std for smoothness test.')
+    parser.add_argument('--re-only', action='store_true', help='Analyze only relative-entropy training runs.')
+    parser.add_argument('--no-re', action='store_true', help='Exclude relative-entropy training runs from analysis.')
     args = parser.parse_args()
 
     input_path = Path(args.input_dir).resolve()
     run_dirs = _resolve_input_run_dirs(input_path)
     if not run_dirs:
         raise SystemExit(f'No run directories found under: {input_path}')
+
+    if args.re_only:
+        run_dirs = [d for d in run_dirs if _is_re_run_dir(d)]
+        if not run_dirs:
+            raise SystemExit('No relative-entropy runs found.')
+    elif args.no_re:
+        run_dirs = [d for d in run_dirs if not _is_re_run_dir(d)]
+        if not run_dirs:
+            raise SystemExit('All runs are relative-entropy runs and --no-re was specified.')
 
     run_dirs, excluded_runs = _filter_completed_run_dirs(run_dirs, include_incomplete=args.include_incomplete)
     if excluded_runs:
@@ -1070,16 +1428,22 @@ def main() -> None:
     for run_dir in run_dirs:
         runtime_config = run_dir / 'config_runtime.yaml'
         input_config = run_dir / 'config_input.yaml'
+        runtime_re_config = run_dir / 'config_runtime_re.yaml'
+        input_re_config = run_dir / 'config_input_re.yaml'
+        runtime_config = runtime_config if runtime_config.exists() else runtime_re_config
+        input_config = input_config if input_config.exists() else input_re_config
         config_path = runtime_config if runtime_config.exists() else input_config
         if not config_path.exists():
             continue
 
+        is_re_run = _is_re_run_dir(run_dir)
         config = ConfigManager(str(config_path))
         model_name = f'{config.get_model_context()}_{config.get_model_id()}'
-        export_dir = run_dir / 'exports'
-        params_path, params_error = _ensure_params_path(config, run_dir, include_incomplete=args.include_incomplete)
-        checkpoint_path = _resolve_checkpoint_path(config, run_dir, include_incomplete=args.include_incomplete)
-        log_path = _latest_file(run_dir, 'train_*.log')
+        export_dir = run_dir / 'exports' if not is_re_run else run_dir / 'relative_entropy'
+        re_checkpoint_path = _re_checkpoint_path(run_dir, include_incomplete=args.include_incomplete)
+        params_path, params_error = _ensure_re_params_path(run_dir, config, include_incomplete=args.include_incomplete) if is_re_run else _ensure_params_path(config, run_dir, include_incomplete=args.include_incomplete)
+        checkpoint_path = re_checkpoint_path if is_re_run else _resolve_checkpoint_path(config, run_dir, include_incomplete=args.include_incomplete)
+        log_path = _latest_file(run_dir / 'relative_entropy' if is_re_run else run_dir, 'relative_entropy_loss.log' if is_re_run else 'train_*.log')
         slurm_path = _resolve_slurm_path(run_dir, include_incomplete=args.include_incomplete)
         run_date, run_name = _parse_run_dir_name(run_dir.name)
         plot_prefix = run_dir.name
@@ -1095,6 +1459,7 @@ def main() -> None:
             'model_context': config.get_model_context(),
             'model_id': config.get_model_id(),
             'status': 'ok',
+            'is_re_run': int(is_re_run),
             'job_id': '',
             'run_dir': str(run_dir),
             'analysis_dir': str(analysis_root),
@@ -1109,6 +1474,8 @@ def main() -> None:
             'force_vs_position_plot_path': '',
             'force_gaussian_plot_path': '',
             'force_gaussian_csv_path': '',
+            'force_eval_per_frame_csv_path': '',
+            'force_eval_worst_frames_json_path': '',
             'force_eval_plot_error': '',
             'export_dir': str(export_dir),
             'log_path': str(log_path) if log_path is not None else '',
@@ -1137,6 +1504,15 @@ def main() -> None:
             'detailed_mean_cosine_similarity': float('nan'),
             'detailed_r2_explained_variance': float('nan'),
             'detailed_variance_ratio_pred_to_ref': float('nan'),
+            'detailed_validation_per_frame_csv_path': '',
+            'detailed_validation_worst_frames_json_path': '',
+            'detailed_noised_rmse_model': float('nan'),
+            'detailed_noised_rmse_zero': float('nan'),
+            'detailed_noised_mean_cosine_similarity': float('nan'),
+            'detailed_noised_n_eval_samples': float('nan'),
+            'detailed_noised_per_frame_csv_path': '',
+            'detailed_noised_worst_frames_json_path': '',
+            'detailed_noised_eval_error': '',
             'tail_loss_intercept_last_third': float('nan'),
             'complete_eval_dir': '',
             'complete_eval_metrics_json_path': '',
@@ -1161,76 +1537,183 @@ def main() -> None:
 
         train_losses: List[float] = []
         val_losses: List[float] = []
-        if log_path is not None and log_path.exists():
-            train_losses, val_losses = _load_loss_history(log_path)
 
-        if train_losses:
-            tail_fit = _fit_tail_line(train_losses)
-            row['initial_train_loss'] = _safe_float(train_losses[0])
-            row['final_train_loss'] = _safe_float(train_losses[-1])
-            row['tail_loss_slope_last_third'] = _tail_slope(train_losses)
-            row['tail_loss_intercept_last_third'] = float(tail_fit['intercept']) if tail_fit is not None else float('nan')
-            row['n_logged_epochs'] = len(train_losses)
-            row['final_val_loss'] = _safe_float(val_losses[-1]) if val_losses else float('nan')
-            tail_plot_error = _save_tail_fit_plot(train_losses, val_losses, tail_plot_path, title=f'{run_dir.name}: tail loss linear fit')
-            if tail_plot_error:
-                row['tail_fit_plot_error'] = tail_plot_error
+        if is_re_run:
+            re_history = _load_re_training_history(run_dir)
+            if re_history:
+                objective_vals = []
+                for row_h in re_history:
+                    try:
+                        objective_vals.append(float(row_h.get('objective', float('nan'))))
+                    except (ValueError, TypeError):
+                        objective_vals.append(float('nan'))
+                train_losses = objective_vals
+                row['n_logged_epochs'] = len(re_history)
+                row['final_train_loss'] = objective_vals[-1] if objective_vals else float('nan')
+                row['initial_train_loss'] = objective_vals[0] if objective_vals else float('nan')
+                if len(objective_vals) >= 3:
+                    tail_start = len(objective_vals) // 3
+                    tail_vals = [v for v in objective_vals[tail_start:] if np.isfinite(v)]
+                    if tail_vals:
+                        row['tail_loss_slope_last_third'] = float(np.polyfit(range(len(tail_vals)), tail_vals, 1)[0])
+                    else:
+                        row['tail_loss_slope_last_third'] = float('nan')
+                else:
+                    row['tail_loss_slope_last_third'] = float('nan')
+                row['tail_loss_intercept_last_third'] = float('nan')
+                re_plot_error = _save_re_loss_plot(re_history, tail_plot_path, title=f'{run_dir.name}: RE training loss')
+                if re_plot_error:
+                    row['tail_fit_plot_error'] = re_plot_error
+                else:
+                    row['tail_fit_plot_path'] = str(tail_plot_path)
             else:
-                row['tail_fit_plot_path'] = str(tail_plot_path)
+                row['status'] = 'missing_re_history'
+                row['tail_fit_plot_error'] = 'RE history CSV not found'
+                row['initial_train_loss'] = float('nan')
+                row['final_train_loss'] = float('nan')
+                row['tail_loss_slope_last_third'] = float('nan')
+                row['tail_loss_intercept_last_third'] = float('nan')
+                row['n_logged_epochs'] = 0
+                row['final_val_loss'] = float('nan')
         else:
-            row['initial_train_loss'] = float('nan')
-            row['final_train_loss'] = float('nan')
-            row['tail_loss_slope_last_third'] = float('nan')
-            row['n_logged_epochs'] = 0
-            row['final_val_loss'] = float('nan')
-            row['status'] = 'missing_log'
-            row['tail_fit_plot_error'] = 'Training log missing or no parseable training-loss history found.'
+            if log_path is not None and log_path.exists():
+                train_losses, val_losses = _load_loss_history(log_path)
 
-        if checkpoint_path is not None and checkpoint_path.exists():
-            metadata = _load_checkpoint_metadata(checkpoint_path)
-            row['job_id'] = metadata.get('job_id', '')
-            row['epoch_wall_seconds'] = _mean_epoch_time_from_results(metadata.get('results', {}))
-            if not train_losses:
-                for result in metadata.get('results', {}).values():
-                    if isinstance(result, dict) and 'train_loss' in result:
-                        row['final_train_loss'] = _safe_float(result.get('train_loss'))
-                    if isinstance(result, dict) and 'val_loss' in result:
-                        row['final_val_loss'] = _safe_float(result.get('val_loss'))
-        else:
+            if train_losses:
+                tail_fit = _fit_tail_line(train_losses)
+                row['initial_train_loss'] = _safe_float(train_losses[0])
+                row['final_train_loss'] = _safe_float(train_losses[-1])
+                row['tail_loss_slope_last_third'] = _tail_slope(train_losses)
+                row['tail_loss_intercept_last_third'] = float(tail_fit['intercept']) if tail_fit is not None else float('nan')
+                row['n_logged_epochs'] = len(train_losses)
+                row['final_val_loss'] = _safe_float(val_losses[-1]) if val_losses else float('nan')
+                tail_plot_error = _save_tail_fit_plot(train_losses, val_losses, tail_plot_path, title=f'{run_dir.name}: tail loss linear fit')
+                if tail_plot_error:
+                    row['tail_fit_plot_error'] = tail_plot_error
+                else:
+                    row['tail_fit_plot_path'] = str(tail_plot_path)
+            else:
+                row['initial_train_loss'] = float('nan')
+                row['final_train_loss'] = float('nan')
+                row['tail_loss_slope_last_third'] = float('nan')
+                row['n_logged_epochs'] = 0
+                row['final_val_loss'] = float('nan')
+                row['status'] = 'missing_log'
+                row['tail_fit_plot_error'] = 'Training log missing or no parseable training-loss history found.'
+
+            if checkpoint_path is not None and checkpoint_path.exists():
+                metadata = _load_checkpoint_metadata(checkpoint_path)
+                row['job_id'] = metadata.get('job_id', '')
+                row['epoch_wall_seconds'] = _mean_epoch_time_from_results(metadata.get('results', {}))
+                if not train_losses:
+                    for result in metadata.get('results', {}).values():
+                        if isinstance(result, dict) and 'train_loss' in result:
+                            row['final_train_loss'] = _safe_float(result.get('train_loss'))
+                        if isinstance(result, dict) and 'val_loss' in result:
+                            row['final_val_loss'] = _safe_float(result.get('val_loss'))
+            else:
+                row['epoch_wall_seconds'] = float('nan')
+                if row['status'] == 'ok':
+                    row['status'] = 'missing_checkpoint'
+
+        if is_re_run:
             row['epoch_wall_seconds'] = float('nan')
-            if row['status'] == 'ok':
-                row['status'] = 'missing_checkpoint'
 
         if not args.skip_force_eval and params_path.exists():
             try:
-                force_eval_metrics = _run_basic_force_eval_subprocess(
-                    config_path=config_path,
-                    params_path=params_path,
-                    force_eval_plots_dir=force_eval_plots_dir,
-                    plot_prefix=plot_prefix,
-                    devices_per_run=int(args.devices_per_run),
-                    n_frames=int(args.force_eval_frames),
-                    seed=int(args.force_eval_seed),
-                )
-                for metric_key in (
-                    'force_eval_frames',
-                    'force_rmse',
-                    'force_mae',
-                    'force_error_magnitude_mean',
-                    'force_error_magnitude_std',
-                    'force_magnitude_diff_mean',
-                    'force_magnitude_diff_std',
-                    'force_magnitude_abs_diff_mean',
-                ):
-                    row[metric_key] = force_eval_metrics[metric_key]
-                row.update({
-                    'force_components_plot_path': force_eval_metrics['force_components_plot_path'],
-                    'force_distribution_plot_path': force_eval_metrics['force_distribution_plot_path'],
-                    'force_magnitude_plot_path': force_eval_metrics['force_magnitude_plot_path'],
-                    'force_vs_position_plot_path': force_eval_metrics['force_vs_position_plot_path'],
-                    'force_gaussian_plot_path': force_eval_metrics['force_gaussian_plot_path'],
-                    'force_gaussian_csv_path': force_eval_metrics['force_gaussian_csv_path'],
-                })
+                if is_re_run:
+                    force_eval_data = _collect_re_force_eval_data(
+                        config_path=config_path,
+                        params_path=params_path,
+                        run_dir=run_dir,
+                        n_frames=int(args.force_eval_frames),
+                        seed=int(args.force_eval_seed),
+                        devices_per_run=int(args.devices_per_run),
+                    )
+                    plot_paths = _save_force_eval_plots(force_eval_data, plot_prefix, force_eval_plots_dir)
+
+                    import json as _json
+                    per_frame_rows = force_eval_data.get('per_frame_errors', [])
+                    for rank, r in enumerate(per_frame_rows, start=1):
+                        r['rank_by_rmse'] = rank
+                    bad_csv_path = force_eval_plots_dir / f'{plot_prefix}_force_eval_per_frame_errors.csv'
+                    bad_json_path = force_eval_plots_dir / f'{plot_prefix}_force_eval_worst_frames_top50.json'
+                    if per_frame_rows:
+                        with bad_csv_path.open('w', newline='') as f:
+                            fieldnames = ['rank_by_rmse'] + [k for k in per_frame_rows[0].keys() if k != 'rank_by_rmse']
+                            writer = csv.DictWriter(f, fieldnames=fieldnames)
+                            writer.writeheader()
+                            writer.writerows(per_frame_rows)
+                    else:
+                        bad_csv_path.write_text('')
+                    bad_json_path.write_text(_json.dumps(per_frame_rows[:50], indent=2, sort_keys=True))
+
+                    force_eval_metrics = {
+                        'force_eval_frames': force_eval_data['force_eval_frames'],
+                        'force_rmse': force_eval_data['force_rmse'],
+                        'force_mae': force_eval_data['force_mae'],
+                        'force_error_magnitude_mean': force_eval_data['force_error_magnitude_mean'],
+                        'force_error_magnitude_std': force_eval_data['force_error_magnitude_std'],
+                        'force_magnitude_diff_mean': force_eval_data['force_magnitude_diff_mean'],
+                        'force_magnitude_diff_std': force_eval_data['force_magnitude_diff_std'],
+                        'force_magnitude_abs_diff_mean': force_eval_data['force_magnitude_abs_diff_mean'],
+                        'force_eval_per_frame_csv_path': str(bad_csv_path),
+                        'force_eval_worst_frames_json_path': str(bad_json_path),
+                    }
+                    force_eval_metrics.update(plot_paths)
+
+                    for metric_key in (
+                        'force_eval_frames',
+                        'force_rmse',
+                        'force_mae',
+                        'force_error_magnitude_mean',
+                        'force_error_magnitude_std',
+                        'force_magnitude_diff_mean',
+                        'force_magnitude_diff_std',
+                        'force_magnitude_abs_diff_mean',
+                    ):
+                        row[metric_key] = force_eval_metrics[metric_key]
+                    row.update({
+                        'force_components_plot_path': force_eval_metrics.get('force_components_plot_path', ''),
+                        'force_distribution_plot_path': force_eval_metrics.get('force_distribution_plot_path', ''),
+                        'force_magnitude_plot_path': force_eval_metrics.get('force_magnitude_plot_path', ''),
+                        'force_vs_position_plot_path': force_eval_metrics.get('force_vs_position_plot_path', ''),
+                        'force_gaussian_plot_path': force_eval_metrics.get('force_gaussian_plot_path', ''),
+                        'force_gaussian_csv_path': force_eval_metrics.get('force_gaussian_csv_path', ''),
+                        'force_eval_per_frame_csv_path': force_eval_metrics.get('force_eval_per_frame_csv_path', ''),
+                        'force_eval_worst_frames_json_path': force_eval_metrics.get('force_eval_worst_frames_json_path', ''),
+                    })
+                else:
+                    force_eval_metrics = _run_basic_force_eval_subprocess(
+                        config_path=config_path,
+                        params_path=params_path,
+                        force_eval_plots_dir=force_eval_plots_dir,
+                        plot_prefix=plot_prefix,
+                        devices_per_run=int(args.devices_per_run),
+                        n_frames=int(args.force_eval_frames),
+                        seed=int(args.force_eval_seed),
+                    )
+                    for metric_key in (
+                        'force_eval_frames',
+                        'force_rmse',
+                        'force_mae',
+                        'force_error_magnitude_mean',
+                        'force_error_magnitude_std',
+                        'force_magnitude_diff_mean',
+                        'force_magnitude_diff_std',
+                        'force_magnitude_abs_diff_mean',
+                    ):
+                        row[metric_key] = force_eval_metrics[metric_key]
+                    row.update({
+                        'force_components_plot_path': force_eval_metrics['force_components_plot_path'],
+                        'force_distribution_plot_path': force_eval_metrics['force_distribution_plot_path'],
+                        'force_magnitude_plot_path': force_eval_metrics['force_magnitude_plot_path'],
+                        'force_vs_position_plot_path': force_eval_metrics['force_vs_position_plot_path'],
+                        'force_gaussian_plot_path': force_eval_metrics['force_gaussian_plot_path'],
+                        'force_gaussian_csv_path': force_eval_metrics['force_gaussian_csv_path'],
+                        'force_eval_per_frame_csv_path': force_eval_metrics.get('force_eval_per_frame_csv_path', ''),
+                        'force_eval_worst_frames_json_path': force_eval_metrics.get('force_eval_worst_frames_json_path', ''),
+                    })
             except Exception as exc:
                 for key in (
                     'force_eval_frames',
@@ -1275,6 +1758,7 @@ def main() -> None:
                     shuffle_seed=int(args.force_eval_seed),
                     max_val_frames=args.detailed_max_val_frames,
                     batch_size=args.detailed_batch_size,
+                    use_train=bool(is_re_run),
                 )
                 row['detailed_metrics_json_path'] = str(detailed_metrics.get('metrics_json_path', ''))
                 row['detailed_metrics_csv_path'] = str(detailed_metrics.get('metrics_csv_path', ''))
@@ -1295,6 +1779,15 @@ def main() -> None:
                 row['detailed_mean_cosine_similarity'] = float(detailed_metrics.get('mean_cosine_similarity', float('nan')))
                 row['detailed_r2_explained_variance'] = float(detailed_metrics.get('r2_explained_variance', float('nan')))
                 row['detailed_variance_ratio_pred_to_ref'] = float(detailed_metrics.get('variance_ratio_pred_to_ref', float('nan')))
+                row['detailed_validation_per_frame_csv_path'] = str(detailed_metrics.get('validation_per_frame_csv_path', ''))
+                row['detailed_validation_worst_frames_json_path'] = str(detailed_metrics.get('validation_worst_frames_json_path', ''))
+                row['detailed_noised_rmse_model'] = float(detailed_metrics.get('noised_rmse_model', float('nan')))
+                row['detailed_noised_rmse_zero'] = float(detailed_metrics.get('noised_rmse_zero', float('nan')))
+                row['detailed_noised_mean_cosine_similarity'] = float(detailed_metrics.get('noised_mean_cosine_similarity', float('nan')))
+                row['detailed_noised_n_eval_samples'] = float(detailed_metrics.get('noised_n_eval_samples', float('nan')))
+                row['detailed_noised_per_frame_csv_path'] = str(detailed_metrics.get('noised_per_frame_csv_path', ''))
+                row['detailed_noised_worst_frames_json_path'] = str(detailed_metrics.get('noised_worst_frames_json_path', ''))
+                row['detailed_noised_eval_error'] = str(detailed_metrics.get('noised_eval_error', ''))
             except Exception as exc:
                 row['detailed_eval_error'] = str(exc)
 
@@ -1312,6 +1805,7 @@ def main() -> None:
                     smoothness_frames=int(args.smoothness_frames),
                     smoothness_perturbations=int(args.smoothness_perturbations),
                     smoothness_sigma=float(args.smoothness_sigma),
+                    use_train=bool(is_re_run),
                 )
                 row['complete_eval_metrics_json_path'] = str(ce_metrics.get('metrics_json_path', ''))
                 row['complete_eval_arrays_npz_path'] = str(ce_metrics.get('arrays_npz_path', ''))

@@ -7,7 +7,7 @@ Integrates with the cameo_cg framework for consistent data processing.
 
 Steps executed:
   1. h5_dataset_npz_transform  – Extract frames from each H5  →  per-protein NPZ
-  2. cg_1bead                  – Coarse-grain each NPZ to CA beads
+  2. cg_1bead / cg_backbone_cb – Coarse-grain each NPZ
   3. pad_and_combine_datasets  – Merge all CG NPZs into one padded dataset
   4. prior_fitting_script      – Fit bond/angle/dihedral priors  →  YAML + plots
 
@@ -89,7 +89,8 @@ from utils.logging import pipeline_logger  # noqa: E402
 
 # Local data_prep modules
 from h5_dataset_npz_transform import build_dataset  # noqa: E402
-from cg_1bead import build_cg_dataset  # noqa: E402
+from cg_1bead import build_cg_dataset as build_1bead_dataset  # noqa: E402
+from cg_backbone_cb import build_cg_dataset as build_backbone_cb_dataset  # noqa: E402
 from pad_and_combine_datasets import (  # noqa: E402
     combine_and_pad_npz,
     pad_individual_npz,
@@ -170,6 +171,16 @@ def main() -> None:
 
     # ===== Step 2 Options (Coarse-graining) =====
     parser.add_argument(
+        "--mapping",
+        choices=("1bead", "backbone_cb"),
+        default="1bead",
+        help=(
+            "Coarse-grained mapping strategy. '1bead' keeps CA per residue; "
+            "'backbone_cb' keeps N, CA, C, O, and residue-typed CB "
+            "(GLY assigns the residue-dependent type to CA)."
+        )
+    )
+    parser.add_argument(
         "--no_aggforce",
         action="store_true",
         default=False,
@@ -185,7 +196,7 @@ def main() -> None:
         "--use_4way_grouping",
         action="store_true",
         default=False,
-        help="4-way charge-based species grouping instead of per-AA."
+        help="4-way charge-based species grouping instead of per-AA (1bead mapping only)."
     )
 
     # ===== Step 3 Options (Dataset combination) =====
@@ -273,6 +284,13 @@ def main() -> None:
 
     # ===== Misc Options =====
     parser.add_argument(
+        "--skip_prior_fitting",
+        action="store_true",
+        default=False,
+        help="Stop after dataset padding/combination; useful for ML-only training."
+    )
+
+    parser.add_argument(
         "--verbose",
         action="store_true",
         default=False,
@@ -316,7 +334,7 @@ def main() -> None:
     for i, h5_path in enumerate(h5_files):
         protein_id: str = extract_protein_id(h5_path)
         raw_npz: Path = npz_dir / f"{protein_id}.npz"
-        cg_npz: Path = cg_dir / f"{protein_id}_cg.npz"
+        cg_npz: Path = cg_dir / f"{protein_id}_{args.mapping}_cg.npz"
 
         pipeline_logger.info(
             f"[{i + 1}/{len(h5_files)}] {h5_path.name}  (protein={protein_id})"
@@ -345,13 +363,25 @@ def main() -> None:
             pipeline_logger.debug(f"  step 2 skip – {cg_npz.name} exists")
         else:
             try:
-                build_cg_dataset(
-                    npz_in=str(raw_npz),
-                    npz_out=str(cg_npz),
-                    use_aggforce=not args.no_aggforce,
-                    normalize_forces=args.normalize_forces,
-                    use_4way_grouping=args.use_4way_grouping,
-                )
+                if args.mapping == "1bead":
+                    build_1bead_dataset(
+                        npz_in=str(raw_npz),
+                        npz_out=str(cg_npz),
+                        use_aggforce=not args.no_aggforce,
+                        normalize_forces=args.normalize_forces,
+                        use_4way_grouping=args.use_4way_grouping,
+                    )
+                else:
+                    if args.use_4way_grouping:
+                        pipeline_logger.warning(
+                            "  --use_4way_grouping is ignored for --mapping backbone_cb"
+                        )
+                    build_backbone_cb_dataset(
+                        npz_in=str(raw_npz),
+                        npz_out=str(cg_npz),
+                        use_aggforce=not args.no_aggforce,
+                        normalize_forces=args.normalize_forces,
+                    )
             except Exception as exc:
                 pipeline_logger.warning(f"  step 2 FAILED – {exc}")
                 n_failed += 1
@@ -402,50 +432,54 @@ def main() -> None:
         combine_and_pad_npz(cg_paths, str(combined_path))
         data_paths = [str(combined_path)]
 
-    # =============================================================================
-    # Step 4: Prior Fitting (subprocess to isolate JAX monkey-patching)
-    # =============================================================================
-    pipeline_logger.info("Step 4: prior fitting …")
-    yaml_path: Path = out_dir / "fitted_priors.yaml"
+    if args.skip_prior_fitting:
+        pipeline_logger.info("Step 4: prior fitting skipped (--skip_prior_fitting).")
+        yaml_path = None
+    else:
+        # =============================================================================
+        # Step 4: Prior Fitting (subprocess to isolate JAX monkey-patching)
+        # =============================================================================
+        pipeline_logger.info("Step 4: prior fitting …")
+        yaml_path: Optional[Path] = out_dir / "fitted_priors.yaml"
 
-    cmd: List[str] = [
-        sys.executable,
-        str(SCRIPT_DIR / "prior_fitting_script.py"),
-        "--out_yaml", str(yaml_path),
-        "--plots_dir", str(plots_dir),
-        "--T", str(args.T),
-        "--angle_terms", str(args.angle_terms),
-    ]
+        cmd: List[str] = [
+            sys.executable,
+            str(SCRIPT_DIR / "prior_fitting_script.py"),
+            "--out_yaml", str(yaml_path),
+            "--plots_dir", str(plots_dir),
+            "--T", str(args.T),
+            "--angle_terms", str(args.angle_terms),
+        ]
 
-    # Add all dataset paths
-    for dp in data_paths:
-        cmd.extend(["--data", dp])
+        # Add all dataset paths
+        for dp in data_paths:
+            cmd.extend(["--data", dp])
 
-    # Add spline fitting options if requested
-    if args.spline:
-        spline_out: str = (
-            args.spline_out
-            if args.spline_out is not None
-            else str(out_dir / "fitted_priors_spline.npz")
-        )
-        cmd.extend([
-            "--spline",
-            "--spline_out", spline_out,
-            "--angle_min_samples", str(args.angle_min_samples),
-            "--kde_bandwidth_factor", str(args.kde_bandwidth_factor),
-            "--spline_grid_points", str(args.spline_grid_points),
-        ])
-        if args.residue_specific_angles:
-            cmd.append("--residue_specific_angles")
+        # Add spline fitting options if requested
+        if args.spline:
+            spline_out: str = (
+                args.spline_out
+                if args.spline_out is not None
+                else str(out_dir / "fitted_priors_spline.npz")
+            )
+            cmd.extend([
+                "--spline",
+                "--spline_out", spline_out,
+                "--angle_min_samples", str(args.angle_min_samples),
+                "--kde_bandwidth_factor", str(args.kde_bandwidth_factor),
+                "--spline_grid_points", str(args.spline_grid_points),
+            ])
+            if args.residue_specific_angles:
+                cmd.append("--residue_specific_angles")
 
-    # Add optional flags
-    if args.skip_plots:
-        cmd.append("--skip_plots")
-    if args.verbose:
-        cmd.append("--verbose")
+        # Add optional flags
+        if args.skip_plots:
+            cmd.append("--skip_plots")
+        if args.verbose:
+            cmd.append("--verbose")
 
-    # Run prior fitting in subprocess
-    subprocess.run(cmd, check=True)
+        # Run prior fitting in subprocess
+        subprocess.run(cmd, check=True)
 
     # =============================================================================
     # Pipeline Complete
@@ -461,7 +495,10 @@ def main() -> None:
     else:
         pipeline_logger.info(f"  Combined dataset : {data_paths[0]}")
 
-    pipeline_logger.info(f"  Fitted priors    : {yaml_path}")
+    if yaml_path is not None:
+        pipeline_logger.info(f"  Fitted priors    : {yaml_path}")
+    else:
+        pipeline_logger.info("  Fitted priors    : skipped")
     pipeline_logger.info(f"  Plots            : {plots_dir}")
 
 

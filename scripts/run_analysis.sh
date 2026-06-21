@@ -105,7 +105,13 @@ if [[ -z "${_found_config}" ]]; then
     _found_config="$(find -L "${INPUT_DIR}" -maxdepth 4 -name "config_input.yaml" | sort | head -1)"
 fi
 if [[ -z "${_found_config}" ]]; then
-    echo "ERROR: Could not find config_runtime.yaml or config_input.yaml under ${INPUT_DIR}" >&2
+    _found_config="$(find -L "${INPUT_DIR}" -maxdepth 4 -name "config_runtime_re.yaml" | sort | head -1)"
+fi
+if [[ -z "${_found_config}" ]]; then
+    _found_config="$(find -L "${INPUT_DIR}" -maxdepth 4 -name "config_input_re.yaml" | sort | head -1)"
+fi
+if [[ -z "${_found_config}" ]]; then
+    echo "ERROR: Could not find config_runtime.yaml, config_input.yaml, config_runtime_re.yaml, or config_input_re.yaml under ${INPUT_DIR}" >&2
     exit 1
 fi
 export CONFIG_FILE="${_found_config}"

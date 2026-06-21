@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 _COORD_ALIASES = ["coords", "coordinates", "positions", "pos", "xyz"]
 _FORCE_ALIASES = ["forces", "force", "frc", "grads", "gradients"]
 _BOX_ALIASES   = ["box", "cell", "lattice"]
+_OPTIONAL_FRAME_ALIGNED_KEYS = ("hvp_probe", "HVP", "hvp_loss_mask")
 
 
 def _resolve_key(data, canonical: str, aliases: list[str], source: str = "") -> str:
@@ -170,6 +171,10 @@ def load_npz(path: PathLike) -> Dict[str, Any]:
             "box": box_value,
         }
 
+        for key in _OPTIONAL_FRAME_ALIGNED_KEYS:
+            if all(key in d for d in datasets):
+                result[key] = np.concatenate([d[key] for d in datasets], axis=0).astype(np.float32)
+
         return result
 
     data = np.load(path, allow_pickle=True)
@@ -189,6 +194,10 @@ def load_npz(path: PathLike) -> Dict[str, Any]:
         "aa_to_id": data["aa_to_id"].item() if "aa_to_id" in data else None,
         "source_name": np.full((int(data[r_key].shape[0]),), path.stem, dtype=object),
     }
+
+    for key in _OPTIONAL_FRAME_ALIGNED_KEYS:
+        if key in data:
+            result[key] = data[key].astype(np.float32)
 
     # Handle N_max being an array
     if isinstance(result["N_max"], np.ndarray):
@@ -500,6 +509,7 @@ def build_tiled_dataset(
     spatial_separation: bool = False,
     structure_gap: float = 25.0,
     seed: int = 0,
+    extra_per_atom_fields: Optional[Dict[str, np.ndarray]] = None,
 ) -> Dict[str, np.ndarray]:
     """
     Pack many small structures into disconnected tiled pseudo-structures.
@@ -533,7 +543,36 @@ def build_tiled_dataset(
         raise ValueError("R/F/mask/species must share the same leading dimension.")
 
     n_structures = int(R.shape[0])
+    n_atoms = int(R.shape[1])
     valid_counts = np.asarray(np.sum(mask > 0, axis=1), dtype=np.int32)
+    extra_per_atom_fields = extra_per_atom_fields or {}
+    extra_specs = {}
+    for key, value in extra_per_atom_fields.items():
+        arr = np.asarray(value)
+        if arr.shape[0] != n_structures:
+            raise ValueError(
+                f"extra_per_atom_fields[{key!r}] must have {n_structures} frames, "
+                f"got shape {arr.shape}."
+            )
+        if arr.ndim == 2 and arr.shape[1] == n_atoms:
+            atom_axis = 1
+            tile_shape = lambda capacity, arr=arr: (capacity,)
+        elif arr.ndim == 3 and arr.shape[1] == n_atoms:
+            atom_axis = 1
+            tile_shape = lambda capacity, arr=arr: (capacity, arr.shape[2])
+        elif arr.ndim == 3 and arr.shape[2] == n_atoms:
+            atom_axis = 2
+            tile_shape = lambda capacity, arr=arr: (arr.shape[1], capacity)
+        elif arr.ndim == 4 and arr.shape[2] == n_atoms:
+            atom_axis = 2
+            tile_shape = lambda capacity, arr=arr: (arr.shape[1], capacity, arr.shape[3])
+        else:
+            raise ValueError(
+                f"extra_per_atom_fields[{key!r}] shape {arr.shape} is unsupported. "
+                "Expected (frames,N), (frames,N,C), (frames,K,N), or (frames,K,N,C)."
+            )
+        extra_specs[key] = {"array": arr, "atom_axis": atom_axis, "tile_shape": tile_shape}
+    tile_extra = {key: [] for key in extra_specs}
     if structure_edge_estimates is not None:
         edge_counts_est = np.asarray(structure_edge_estimates, dtype=np.float64)
         if edge_counts_est.shape != (n_structures,):
@@ -638,6 +677,10 @@ def build_tiled_dataset(
         mask_out = np.zeros((capacity,), dtype=np.float32)
         species_out = np.zeros((capacity,), dtype=np.int32)
         segment_out = np.full((capacity,), -1, dtype=np.int32)
+        extra_out = {
+            key: np.zeros(spec["tile_shape"](capacity), dtype=spec["array"].dtype)
+            for key, spec in extra_specs.items()
+        }
 
         cursor = 0
         current_x = 0.0
@@ -665,6 +708,13 @@ def build_tiled_dataset(
             mask_out[sl] = 1.0
             species_out[sl] = species[struct_idx, valid_idx]
             segment_out[sl] = np.int32(seg_id)
+            for key, spec in extra_specs.items():
+                arr = spec["array"]
+                frame_extra = arr[struct_idx]
+                if spec["atom_axis"] == 1:
+                    extra_out[key][sl] = np.take(frame_extra, valid_idx, axis=0)
+                else:
+                    extra_out[key][:, sl, ...] = np.take(frame_extra, valid_idx, axis=1)
             cursor += n_valid
 
         tile_R.append(R_out)
@@ -672,6 +722,8 @@ def build_tiled_dataset(
         tile_mask.append(mask_out)
         tile_species.append(species_out)
         tile_segment_id.append(segment_out)
+        for key, value in extra_out.items():
+            tile_extra[key].append(value)
         tile_n_valid.append(np.int32(cursor))
         tile_n_segments.append(np.int32(len(tile_indices)))
         meta_batch_item_id.append(np.int32(tile_id))
@@ -707,13 +759,34 @@ def build_tiled_dataset(
         out[: arr.shape[0]] = arr
         return out
 
+    def _pad_extra(arr: np.ndarray) -> np.ndarray:
+        if arr.shape[0] == global_capacity or (arr.ndim >= 2 and arr.shape[1] == global_capacity):
+            return arr
+        if arr.ndim == 1:
+            out = np.zeros((global_capacity,), dtype=arr.dtype)
+            out[: arr.shape[0]] = arr
+            return out
+        if arr.ndim == 2 and arr.shape[0] != global_capacity:
+            out = np.zeros((global_capacity, arr.shape[1]), dtype=arr.dtype)
+            out[: arr.shape[0]] = arr
+            return out
+        if arr.ndim == 2:
+            out = np.zeros((arr.shape[0], global_capacity), dtype=arr.dtype)
+            out[:, : arr.shape[1]] = arr
+            return out
+        out = np.zeros((arr.shape[0], global_capacity, *arr.shape[2:]), dtype=arr.dtype)
+        out[:, : arr.shape[1], ...] = arr
+        return out
+
     tile_R = [_pad_2d(arr, fill=0.0) for arr in tile_R]
     tile_F = [_pad_2d(arr, fill=0.0) for arr in tile_F]
     tile_mask = [_pad_1d(arr, fill=0.0) for arr in tile_mask]
     tile_species = [_pad_1d(arr, fill=0) for arr in tile_species]
     tile_segment_id = [_pad_1d(arr, fill=-1) for arr in tile_segment_id]
 
-    return {
+    extra_result = {key: np.stack([_pad_extra(arr) for arr in values], axis=0) for key, values in tile_extra.items()}
+
+    result = {
         "R": np.stack(tile_R, axis=0),
         "F": np.stack(tile_F, axis=0),
         "mask": np.stack(tile_mask, axis=0),
@@ -735,6 +808,8 @@ def build_tiled_dataset(
         "meta_structure_size_max": np.asarray(meta_structure_size_max, dtype=np.int32),
         "meta_structure_size_std": np.asarray(meta_structure_size_std, dtype=np.float32),
     }
+    result.update(extra_result)
+    return result
 
 
 class DatasetLoader:
@@ -797,6 +872,17 @@ class DatasetLoader:
                 self.species = np.tile(raw_species[None, :], (len(indices), 1))
             else:
                 self.species = raw_species[indices]
+
+        self.extra_fields = {}
+        for key in _OPTIONAL_FRAME_ALIGNED_KEYS:
+            if key in raw_data:
+                value = np.asarray(raw_data[key][indices], dtype=np.float32)
+                self.extra_fields[key] = value
+                setattr(self, key, value)
+        if "hvp_probe" in self.extra_fields and "HVP" in self.extra_fields and "hvp_loss_mask" not in self.extra_fields:
+            value = self.mask[:, None, :].astype(np.float32)
+            self.extra_fields["hvp_loss_mask"] = value
+            self.hvp_loss_mask = value
 
         # Store metadata
         self.N_max = raw_data["N_max"]
@@ -871,13 +957,15 @@ class DatasetLoader:
 
     def get_all(self) -> Dict[str, jax.Array]:
         """Get complete dataset as dictionary."""
-        return {
+        data = {
             "R": self.R,
             "F": self.F,
             "mask": self.mask,
             "species": self.species,
             "source_name": self.source_name,
         }
+        data.update(getattr(self, "extra_fields", {}))
+        return data
 
     def split_train_val(self, val_fraction: float = 0.1) -> Tuple["DatasetLoader", "DatasetLoader"]:
         """
@@ -904,6 +992,11 @@ class DatasetLoader:
         train_loader.mask = self.mask[:n_train]
         train_loader.species = self.species[:n_train]
         train_loader.source_name = self.source_name[:n_train]
+        train_loader.extra_fields = {}
+        for key, value in getattr(self, "extra_fields", {}).items():
+            sliced = value[:n_train]
+            train_loader.extra_fields[key] = sliced
+            setattr(train_loader, key, sliced)
         train_loader.N_max = self.N_max
         train_loader.resid = self.resid
         train_loader.resname = self.resname
@@ -920,6 +1013,11 @@ class DatasetLoader:
         val_loader.mask = self.mask[n_train:]
         val_loader.species = self.species[n_train:]
         val_loader.source_name = self.source_name[n_train:]
+        val_loader.extra_fields = {}
+        for key, value in getattr(self, "extra_fields", {}).items():
+            sliced = value[n_train:]
+            val_loader.extra_fields[key] = sliced
+            setattr(val_loader, key, sliced)
         val_loader.N_max = self.N_max
         val_loader.resid = self.resid
         val_loader.resname = self.resname

@@ -15,17 +15,31 @@ Two new config keys are recognised under model.allegro (or model.allegro_cuEq / 
 
 import jax
 import jax.numpy as jnp
+from jax.sharding import PartitionSpec, get_abstract_mesh
 from jax_md import space, partition
+from pathlib import Path
 from typing import Optional, Any
 from jax_md_mod import custom_partition
 
 from .base_model import BaseMLModel, register_ml_model, resolve_compute_dtype
 from .allegro_model import _resolve_mlp_activation
 from .neighborlist_utils import resolve_neighbor_list_format, compute_avg_num_neighbors
+from training.edge_distance_gate import EdgeDistanceGateBank, edge_distance_gate_config
 from utils.logging import model_logger
 
 # allegro_cueq_v2 is imported lazily inside __init__ to avoid a hard dependency
 # on cuequivariance at import time (non-cueq runs would fail otherwise).
+
+
+def _replicate_params_when_mesh_active(params: Any) -> Any:
+    """Make parameter shardings explicit inside active mesh contexts."""
+    if get_abstract_mesh().empty:
+        return params
+    return jax.tree_util.tree_map(
+        lambda x: jax.lax.with_sharding_constraint(x, PartitionSpec())
+                  if isinstance(x, jax.Array) else x,
+        params,
+    )
 
 
 def _resolve_mlp_dtype(cfg_value) -> tuple[str, jnp.dtype]:
@@ -292,6 +306,38 @@ class AllegroModelCuEq(BaseMLModel):
             mode_token=True,
         )
         self._export_apply_cache: dict[str, Any] = {}
+
+        edge_gate_cfg = edge_distance_gate_config(config)
+        self.edge_distance_gate_enabled = bool(edge_gate_cfg.get("enabled", False))
+        self.edge_distance_gate_bank = None
+        if self.edge_distance_gate_enabled:
+            if ml_model_type != "allegro_cueq_fast":
+                raise ValueError("model.edge_distance_gate is supported only for ml_model=allegro_cueq_fast")
+            artifact_path = edge_gate_cfg.get("artifact_path")
+            if not artifact_path:
+                raise ValueError("model.edge_distance_gate.enabled=true requires artifact_path")
+            gate_path = Path(artifact_path)
+            if not gate_path.is_absolute():
+                config_relative = (Path(config.config_path).parent / gate_path).resolve()
+                cwd_relative = (Path.cwd() / gate_path).resolve()
+                gate_path = config_relative if config_relative.exists() else cwd_relative
+            self.edge_distance_gate_bank = EdgeDistanceGateBank.from_file(
+                gate_path,
+                falloff_percent=float(edge_gate_cfg.get("falloff_percent", 0.05)),
+                onset_percent=float(edge_gate_cfg.get("onset_percent", 0.0)),
+                offset_percent=float(edge_gate_cfg.get("offset_percent", edge_gate_cfg.get("falloff_percent", 0.05))),
+                floor=float(edge_gate_cfg.get("floor", 0.0)),
+                stop_gradient=bool(edge_gate_cfg.get("stop_gradient", True)),
+            )
+            model_logger.info(
+                "  edge distance gate = %s onset_percent=%.4g offset_percent=%.4g floor=%.4g stop_gradient=%s",
+                gate_path,
+                float(self.edge_distance_gate_bank.onset_percent),
+                float(self.edge_distance_gate_bank.offset_percent),
+                float(self.edge_distance_gate_bank.floor),
+                bool(self.edge_distance_gate_bank.stop_gradient),
+            )
+
         if ml_model_type == "allegro_cueq_fast":
             from .allegro_cueq_fast_1103 import (
                 allegro_neighborlist_pp,  # lazy cuequivariance import
@@ -314,6 +360,7 @@ class AllegroModelCuEq(BaseMLModel):
             mode="energy",
             logging=enable_logging,
             mlp_dtype=self.mlp_dtype,
+            **({"edge_distance_gate": self.edge_distance_gate_bank} if ml_model_type == "allegro_cueq_fast" else {}),
             **self.allegro_config,
         )
         # Per-atom version for export: per_particle=True in the closure so the
@@ -332,6 +379,7 @@ class AllegroModelCuEq(BaseMLModel):
             per_particle=True,
             logging=enable_logging,
             mlp_dtype=self.mlp_dtype,
+            **({"edge_distance_gate": self.edge_distance_gate_bank} if ml_model_type == "allegro_cueq_fast" else {}),
             **self.allegro_config,
         )
         if ml_model_type == "allegro_cueq_fast":
@@ -457,6 +505,14 @@ class AllegroModelCuEq(BaseMLModel):
         species_masked = jnp.where(valid_mask, species, 0).astype(jnp.int32)
         R_model = jnp.asarray(R_masked, dtype=self.compute_dtype)
 
+        # JAX >= 0.10 strictly enforces that arrays used inside shard_map's
+        # Manual mesh context must not carry Auto-mesh sharding. Haiku parameters
+        # are created with Auto-mesh sharding, so we re-annotate them with
+        # PartitionSpec() (replicated, no axis partitioning) which is valid in
+        # both Auto and Manual contexts. Skip when no mesh is active (e.g.,
+        # during export tracing) since with_sharding_constraint requires a mesh.
+        params = _replicate_params_when_mesh_active(params)
+
         E = apply_fn(
             params, R_model, nbrs, species_masked,
             mask=valid_mask.astype(jnp.bool_),
@@ -509,6 +565,8 @@ class AllegroModelCuEq(BaseMLModel):
         species_masked = jnp.where(valid_mask, species, 0).astype(jnp.int32)
         R_model = jnp.asarray(R_masked, dtype=self.compute_dtype)
 
+        params = _replicate_params_when_mesh_active(params)
+
         E = apply_fn(
             params,
             R_model,
@@ -530,6 +588,26 @@ class AllegroModelCuEq(BaseMLModel):
         """Compute cuEq Allegro energy for given coordinates."""
         return self._compute_energy_with_apply(
             self._apply_allegro_for_training,
+            params,
+            R,
+            mask,
+            species,
+            neighbor,
+            segment_id=segment_id,
+        )
+
+    def compute_per_atom_energy(
+        self,
+        params: Any,
+        R: jax.Array,
+        mask: jax.Array,
+        species: jax.Array,
+        neighbor: Optional[Any] = None,
+        segment_id: Optional[jax.Array] = None,
+    ) -> jax.Array:
+        """Compute per-atom cuEq Allegro energies for segment-level gating."""
+        return self._compute_per_atom_energy_with_apply(
+            self.apply_allegro_per_atom,
             params,
             R,
             mask,
@@ -604,10 +682,20 @@ class AllegroModelCuEq(BaseMLModel):
     @property
     def model_export_apply_fn(self):
         """Per-atom apply function for use in the MLIR export path."""
+        if self.edge_distance_gate_enabled:
+            raise NotImplementedError(
+                "MLIR export does not yet support model.edge_distance_gate; "
+                "disable the gate or use direct Python/JAX MD."
+            )
         return self.apply_allegro_per_atom
 
     def build_export_apply_fn(self, *, tp_method_override: Optional[str] = None):
         """Rebuild the raw apply_fn for export-time backend overrides."""
+        if self.edge_distance_gate_enabled:
+            raise NotImplementedError(
+                "MLIR export does not yet support model.edge_distance_gate; "
+                "disable the gate or use direct Python/JAX MD."
+            )
         if tp_method_override is None:
             return self.apply_allegro_per_atom
 
@@ -662,6 +750,7 @@ class AllegroModelCuEq(BaseMLModel):
             per_particle=True,
             logging=self._enable_logging,
             mlp_dtype=self.mlp_dtype,
+            edge_distance_gate=None,
             **export_allegro_config,
         )
         self._export_apply_cache[normalized_override] = export_apply

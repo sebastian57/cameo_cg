@@ -41,10 +41,11 @@ def write_lammps_dump(
     atom_types = species[valid] + 1        # 1-indexed LAMMPS types
 
     # Centre on the time-averaged centroid so the protein sits near the origin.
-    centroid   = R[:, valid, :].mean(axis=(0, 1))
+    # Use nanmean/nanmax so that blown-up NaN frames don't corrupt earlier frames.
+    centroid   = np.nanmean(R[:, valid, :], axis=(0, 1))
     R_centered = R - centroid[None, None, :]
 
-    half_span = np.abs(R_centered[:, valid, :]).max(axis=(0, 1)) + padding
+    half_span = np.nanmax(np.abs(R_centered[:, valid, :]), axis=(0, 1)) + padding
     bounds    = [(-h, h) for h in half_span]
 
     output_path = Path(output_dump)

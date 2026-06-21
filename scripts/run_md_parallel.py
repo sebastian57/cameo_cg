@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Run multiple MD replicas in parallel, one per visible GPU.
+"""Run multiple MD replicas in parallel, optionally oversubscribing GPUs.
 
-Spawns N child processes, each pinned to a different GPU via CUDA_VISIBLE_DEVICES.
+Spawns child processes pinned to GPU slots via CUDA_VISIBLE_DEVICES.
 Each child calls run_md.py --replica i and writes its own _repXX.npz file.
 All replicas start from the same initial coordinates but use different random seeds
 (base_seed + i), giving independent trajectories that can be concatenated for TICA.
 
-When n_replicas > n_gpus the replicas are run in sequential waves of n_gpus.
-For example, n_replicas=8 on 4 GPUs: wave 1 runs replicas 0-3 (one per GPU),
-then wave 2 runs replicas 4-7 (one per GPU).  Total wall time is 2× a single
-replica, not 8×.
+When n_replicas exceeds the wave size, replicas are run in sequential waves.
+The wave size is n_gpus * procs_per_gpu. For example, n_replicas=8 on 4 GPUs
+with procs_per_gpu=1 runs replicas 0-3, then replicas 4-7. With
+procs_per_gpu=2, all 8 replicas run in one wave, two processes per GPU.
 
 Requirements:
   - The YAML config must have n_replicas set (read automatically from the config).
@@ -21,6 +21,9 @@ Usage:
 
   # Override GPU count (e.g. if CUDA_VISIBLE_DEVICES is not set):
   python scripts/run_md_parallel.py configs/my_md.yaml --n-gpus 4
+
+  # Run 4 replica processes per GPU (16 total processes on 4 GPUs):
+  python scripts/run_md_parallel.py configs/my_md.yaml --n-gpus 4 --procs-per-gpu 4
 
   # Dry-run to see the commands without launching:
   python scripts/run_md_parallel.py configs/my_md.yaml --dry-run
@@ -69,6 +72,19 @@ def _read_n_replicas(config_file: str) -> int:
         return int(raw.get("md", {}).get("n_replicas", 1))
     except Exception:
         return 1
+
+
+def _build_waves(n_replicas: int, n_gpus: int, procs_per_gpu: int) -> list[list[int]]:
+    """Return replica-index waves for the requested GPU oversubscription."""
+    if n_gpus < 1:
+        raise ValueError("n_gpus must be >= 1")
+    if procs_per_gpu < 1:
+        raise ValueError("procs_per_gpu must be >= 1")
+    wave_size = n_gpus * procs_per_gpu
+    return [
+        list(range(start, min(start + wave_size, n_replicas)))
+        for start in range(0, n_replicas, wave_size)
+    ]
 
 
 def _run_wave(
@@ -138,6 +154,13 @@ def main() -> None:
         help="GPUs available. Default: auto-detect from CUDA_VISIBLE_DEVICES / nvidia-smi.",
     )
     ap.add_argument(
+        "--procs-per-gpu",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Replica processes to run concurrently on each GPU (default: 1).",
+    )
+    ap.add_argument(
         "--job-id",
         default=None,
         metavar="ID",
@@ -158,6 +181,10 @@ def main() -> None:
     args = ap.parse_args()
 
     n_gpus = args.n_gpus if args.n_gpus is not None else _detect_n_gpus()
+    if n_gpus < 1:
+        raise SystemExit("--n-gpus must be >= 1")
+    if args.procs_per_gpu < 1:
+        raise SystemExit("--procs-per-gpu must be >= 1")
     n_replicas = _read_n_replicas(args.config_file)
     job_id = args.job_id or os.environ.get("SLURM_JOB_ID", "local")
 
@@ -166,23 +193,24 @@ def main() -> None:
     log_dir = args.log_dir or Path(__file__).resolve().parent.parent / "slurm"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    n_waves = (n_replicas + n_gpus - 1) // n_gpus
+    waves = _build_waves(n_replicas, n_gpus, args.procs_per_gpu)
+    n_waves = len(waves)
+    wave_size = n_gpus * args.procs_per_gpu
     print(
         f"[run_md_parallel] {n_replicas} replicas  {n_gpus} GPUs  "
+        f"{args.procs_per_gpu} proc/GPU  wave_size={wave_size}  "
         f"→ {n_waves} wave(s)  (job_id={job_id})"
     )
-    if n_replicas < n_gpus:
+    if n_replicas < wave_size:
         print(
-            f"  Note: n_replicas={n_replicas} < n_gpus={n_gpus}. "
-            f"Only {n_replicas} replicas will run ({n_gpus - n_replicas} GPU(s) idle)."
+            f"  Note: n_replicas={n_replicas} < wave_size={wave_size}. "
+            f"Only {n_replicas} replicas will run in the single wave."
         )
 
     t0 = time.perf_counter()
     all_failed: list[int] = []
 
-    for wave_num in range(n_waves):
-        wave_start = wave_num * n_gpus
-        wave = list(range(wave_start, min(wave_start + n_gpus, n_replicas)))
+    for wave_num, wave in enumerate(waves):
         if n_waves > 1:
             print(f"\n── Wave {wave_num + 1}/{n_waves}: replicas {wave} ──")
         failed = _run_wave(

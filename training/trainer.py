@@ -23,6 +23,7 @@ from chemtrain.data.data_loaders import DataLoaders
 from config.types import PretrainResult, TrainingResults, StageResult
 from .optimizers import create_optimizer_from_config
 from .dsm import add_dsm_noise_fields, dsm_config, dsm_enabled, dsm_error, make_dsm_quantity
+from .hvp_matching import hvp_config, hvp_error, make_hvp_quantity
 from .safety_regularization import (
     SAFETY_FIELD_KEYS,
     make_safety_quantities,
@@ -38,6 +39,9 @@ from .noised_residual import (
 from .diagnostics import log_neighbor_debug_once
 from utils.logging import training_logger
 from data.loader import build_tiled_dataset, attach_batch_metadata
+
+
+HVP_FIELD_KEYS = ("hvp_probe", "HVP", "hvp_loss_mask")
 
 
 def valid_component_mse(predictions, targets, weights=None):
@@ -123,6 +127,10 @@ class Trainer:
         if self._dsm_cfg["enabled"]:
             self.gammas = dict(self.gammas)
             self.gammas["DSM"] = float(self._dsm_cfg["lambda"])
+        self._hvp_cfg = hvp_config(config)
+        if self._hvp_cfg["enabled"]:
+            self.gammas = dict(self.gammas)
+            self.gammas.setdefault("HVP", float(self._hvp_cfg["lambda"]))
         self._safety_cfg = safety_config(config)
         if self._safety_cfg["enabled"]:
             self.gammas = dict(self.gammas)
@@ -1414,6 +1422,7 @@ class Trainer:
                 "dsm_eps",
                 "dsm_sigma",
                 "dsm_loss_mask",
+                *HVP_FIELD_KEYS,
                 *SAFETY_FIELD_KEYS,
             ):
                 loader_kwargs[key] = value
@@ -1461,6 +1470,11 @@ class Trainer:
             spatial_separation=self._tile_spatial_separation,
             structure_gap=self._tile_structure_gap,
             seed=epoch_seed,
+            extra_per_atom_fields={
+                key: np.asarray(train_source[key], dtype=np.float32)
+                for key in HVP_FIELD_KEYS
+                if key in train_source
+            },
         )
         t_build_end = time.perf_counter()
         tiled = attach_batch_metadata(
@@ -1599,6 +1613,8 @@ class Trainer:
             fns["F"] = valid_component_mse
         if self._dsm_cfg["enabled"]:
             fns["DSM"] = dsm_error
+        if self._hvp_cfg["enabled"]:
+            fns["HVP"] = hvp_error
         if self._safety_cfg["enabled"]:
             fns.update(safety_error_fns(self.config))
         return fns or None
@@ -1612,6 +1628,8 @@ class Trainer:
             keys["F"] = "force_loss_weights"
         if self._dsm_cfg["enabled"]:
             keys["DSM"] = "dsm_loss_mask"
+        if self._hvp_cfg["enabled"]:
+            keys["HVP"] = str(self._hvp_cfg["loss_mask_key"])
         if self._safety_cfg["enabled"]:
             keys.update(safety_weights_keys(self.config))
         return keys or None
@@ -1623,6 +1641,14 @@ class Trainer:
             targets["DSM"] = make_dsm_quantity(
                 self.model.dsm_energy_fn_template,
                 kT=float(self._dsm_cfg["kT"]),
+            )
+        if self._hvp_cfg["enabled"]:
+            hvp_energy_template = getattr(self.model, "hvp_energy_fn_template", None)
+            if hvp_energy_template is None:
+                hvp_energy_template = self.model.energy_fn_template
+            targets["HVP"] = make_hvp_quantity(
+                hvp_energy_template,
+                probe_key=str(self._hvp_cfg["probe_key"]),
             )
         if self._safety_cfg["enabled"]:
             targets.update(make_safety_quantities(self.model, self.config))
@@ -1653,6 +1679,31 @@ class Trainer:
             reference_data[key] = value
         return reference_data
 
+    def _numpy_loader_reference_data(self, loader: NumpyDataLoader) -> Dict[str, Any]:
+        if hasattr(loader, "reference_data"):
+            reference_data = getattr(loader, "reference_data")
+            if isinstance(reference_data, dict):
+                return reference_data
+        if hasattr(loader, "_reference_data"):
+            reference_data = getattr(loader, "_reference_data")
+            if isinstance(reference_data, dict):
+                return reference_data
+        return self._loader_reference_data(loader)
+
+    def _validate_hvp_reference_data(self, reference_data: Dict[str, Any], label: str) -> None:
+        if not self._hvp_cfg["enabled"] or not self._hvp_cfg.get("require_targets", True):
+            return
+        missing = [
+            key
+            for key in (str(self._hvp_cfg["probe_key"]), str(self._hvp_cfg["target_key"]))
+            if key not in reference_data
+        ]
+        if missing:
+            raise ValueError(
+                f"training.hvp.enabled=true requires {label} batch data to contain "
+                f"{missing}; available keys: {sorted(reference_data.keys())}"
+            )
+
     def _create_chemtrain_loaders(self) -> DataLoaders:
         """
         Create chemtrain DataLoaders from our loaders.
@@ -1663,20 +1714,26 @@ class Trainer:
         # Convert our DatasetLoader to NumpyDataLoader if needed.
         # DatasetLoader stores NumPy arrays, so no device transfer is required.
         if not isinstance(self.train_loader, NumpyDataLoader):
+            train_reference_data = self._loader_reference_data(self.train_loader)
+            self._validate_hvp_reference_data(train_reference_data, "training")
             train_np_loader = NumpyDataLoader(
                 copy=False,
-                **self._loader_reference_data(self.train_loader),
+                **train_reference_data,
             )
         else:
+            self._validate_hvp_reference_data(self._numpy_loader_reference_data(self.train_loader), "training")
             train_np_loader = self.train_loader
 
         if self.val_loader is not None:
             if not isinstance(self.val_loader, NumpyDataLoader):
+                val_reference_data = self._loader_reference_data(self.val_loader)
+                self._validate_hvp_reference_data(val_reference_data, "validation")
                 val_np_loader = NumpyDataLoader(
                     copy=False,
-                    **self._loader_reference_data(self.val_loader),
+                    **val_reference_data,
                 )
             else:
+                self._validate_hvp_reference_data(self._numpy_loader_reference_data(self.val_loader), "validation")
                 val_np_loader = self.val_loader
         else:
             val_np_loader = train_np_loader  # Use training data for validation

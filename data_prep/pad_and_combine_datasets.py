@@ -40,19 +40,29 @@ def _load_datasets(paths):
             "resid": data["resid"].astype(np.int32) if "resid" in data else None,
             "resname": _normalize_resname_array(data["resname"]) if "resname" in data else None,
             "species": data["species"].astype(np.int32) if "species" in data else None,
+            "atom_name": _normalize_resname_array(data["atom_name"]) if "atom_name" in data else None,
+            "type_label": _normalize_resname_array(data["type_label"]) if "type_label" in data else None,
         }
         datasets.append(d)
     return datasets
 
 
+def _label_field(datasets):
+    if any(d.get("type_label") is not None for d in datasets):
+        return "type_label"
+    return "resname"
+
+
 def _build_global_aa_mapping(datasets, pad_resname="PAD"):
-    """Build a global AA→ID mapping across all datasets that have resname."""
-    all_resnames = set()
+    """Build a global label->ID mapping across all datasets."""
+    label_key = _label_field(datasets)
+    all_labels = set()
     for d in datasets:
-        if d["resname"] is not None:
-            all_resnames.update(set(d["resname"].tolist()))
-    all_resnames.discard(pad_resname)
-    id_to_aa = sorted(all_resnames)
+        labels = d.get(label_key)
+        if labels is not None:
+            all_labels.update(set(labels.tolist()))
+    all_labels.discard(pad_resname)
+    id_to_aa = sorted(all_labels)
     aa_to_id = {aa: i for i, aa in enumerate(id_to_aa)}
     return aa_to_id, id_to_aa
 
@@ -75,6 +85,7 @@ def _combine_datasets(datasets, paths, aa_to_id, id_to_aa, out_path,
         logger.debug(f"  [{i}] {Path(p).name}: {T} frames, {N} atoms")
 
     has_metadata = any(d["resname"] is not None for d in datasets)
+    label_key = _label_field(datasets)
 
     R_all = np.zeros((T_total, N_max, 3), dtype=np.float32)
     F_all = np.zeros((T_total, N_max, 3), dtype=np.float32)
@@ -88,6 +99,10 @@ def _combine_datasets(datasets, paths, aa_to_id, id_to_aa, out_path,
         Z_all = np.full((T_total, N_max), pad_Z, dtype=np.int32)
         resname_all = np.empty((T_total, N_max), dtype=object)
         resname_all[:] = pad_resname
+        atom_name_all = np.empty((T_total, N_max), dtype=object)
+        atom_name_all[:] = pad_resname
+        type_label_all = np.empty((T_total, N_max), dtype=object)
+        type_label_all[:] = pad_resname
 
     cursor = 0
     for pid, (p, d) in enumerate(zip(paths, datasets)):
@@ -95,8 +110,9 @@ def _combine_datasets(datasets, paths, aa_to_id, id_to_aa, out_path,
         T, N, _ = R.shape
         sl = slice(cursor, cursor + T)
 
-        if d["resname"] is not None:
-            species_1d = np.array([aa_to_id[aa] for aa in d["resname"]], dtype=np.int32)
+        labels = d.get(label_key)
+        if labels is not None:
+            species_1d = np.array([aa_to_id[label] for label in labels], dtype=np.int32)
         else:
             species_1d = d["species"]
 
@@ -106,6 +122,10 @@ def _combine_datasets(datasets, paths, aa_to_id, id_to_aa, out_path,
             Z_all[sl, :N] = d["Z"][None, :]
             resid_all[sl, :N] = d["resid"][None, :]
             resname_all[sl, :N] = d["resname"][None, :]
+            if d.get("atom_name") is not None:
+                atom_name_all[sl, :N] = d["atom_name"][None, :]
+            if d.get("type_label") is not None:
+                type_label_all[sl, :N] = d["type_label"][None, :]
         species_all[sl, :N] = species_1d[None, :]
         mask_all[sl, :N] = 1.0
         n_atoms_all[sl] = N
@@ -130,6 +150,8 @@ def _combine_datasets(datasets, paths, aa_to_id, id_to_aa, out_path,
             Z=Z_all,
             resid=resid_all,
             resname=resname_all,
+            atom_name=atom_name_all,
+            type_label=type_label_all,
             aa_to_id=np.array([aa_to_id], dtype=object),
             id_to_aa=np.array([id_to_aa], dtype=object),
         )
@@ -149,7 +171,8 @@ def combine_and_pad_npz(
 ):
     """
     Combine multiple NPZ datasets with different N into one padded NPZ.
-    Adds `species` computed from a GLOBAL AA->ID mapping across all datasets.
+    Adds `species` computed from a GLOBAL label->ID mapping across all datasets.
+    If input files contain `type_label`, it is used; otherwise `resname` is used.
 
     Output keys:
       R, F, Z, resid, resname, species, mask, n_atoms, protein_id, paths,
@@ -215,14 +238,27 @@ def pad_individual_npz(
         resname_pad[:] = pad_resname
         species_pad = np.full((T, N_max), pad_species, dtype=np.int32)
         mask_pad = np.zeros((T, N_max), dtype=np.float32)
+        atom_name_pad = np.empty((T, N_max), dtype=object)
+        atom_name_pad[:] = pad_resname
+        type_label_pad = np.empty((T, N_max), dtype=object)
+        type_label_pad[:] = pad_resname
 
-        species_1d = np.array([aa_to_id[aa] for aa in d["resname"]], dtype=np.int32)
+        label_key = _label_field(datasets)
+        labels = d.get(label_key)
+        if labels is not None:
+            species_1d = np.array([aa_to_id[label] for label in labels], dtype=np.int32)
+        else:
+            species_1d = d["species"]
 
         R_pad[:, :N, :] = d["R"]
         F_pad[:, :N, :] = d["F"]
         Z_pad[:, :N] = d["Z"][None, :]
         resid_pad[:, :N] = d["resid"][None, :]
         resname_pad[:, :N] = d["resname"][None, :]
+        if d.get("atom_name") is not None:
+            atom_name_pad[:, :N] = d["atom_name"][None, :]
+        if d.get("type_label") is not None:
+            type_label_pad[:, :N] = d["type_label"][None, :]
         species_pad[:, :N] = species_1d[None, :]
         mask_pad[:, :N] = 1.0
 
@@ -233,6 +269,8 @@ def pad_individual_npz(
             Z=Z_pad,
             resid=resid_pad,
             resname=resname_pad,
+            atom_name=atom_name_pad,
+            type_label=type_label_pad,
             species=species_pad,
             mask=mask_pad,
             n_atoms=np.full((T,), N, dtype=np.int32),
@@ -264,8 +302,9 @@ def combine_and_pad_npz_bucketed(
     buckets. Each bucket's NPZ is padded only to that bucket's N_max,
     reducing wasted compute when training on proteins of varied lengths.
 
-    A GLOBAL aa_to_id mapping is built across ALL proteins so species IDs
-    are consistent across all bucket files.
+    A GLOBAL label mapping is built across ALL proteins so species IDs
+    are consistent across all bucket files. If input files contain `type_label`,
+    it is used; otherwise `resname` is used.
 
     Args:
         paths:             list of input per-protein CG NPZ paths

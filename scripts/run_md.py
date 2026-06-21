@@ -52,6 +52,8 @@ from models.combined_model import CombinedModel
 from md.runner import MDRunner
 from md.units import to_akma
 from md.dump import write_lammps_dump
+from training.path_utils import repo_root_from_file, resolve_from_config_or_repo
+from training.support_gate import build_support_gate_bank, support_gate_config, support_gate_enabled
 from utils.logging import md_logger
 
 
@@ -74,6 +76,48 @@ def _replica_output_path(base_path: Path, replica_idx: int, n_replicas: int) -> 
     if n_replicas <= 1:
         return base_path
     return base_path.with_name(f"{base_path.stem}_rep{replica_idx:02d}{base_path.suffix}")
+
+
+def _build_support_gate_bank_for_md(training_config: ConfigManager):
+    """Rebuild the training-data support gate bank for direct Python/JAX MD."""
+    if not support_gate_enabled(training_config):
+        return None
+
+    cfg = support_gate_config(training_config)
+    descriptor = str(cfg.get("descriptor", "pairwise_distances")).strip().lower()
+    if descriptor != "pairwise_distances":
+        raise ValueError(
+            "training.support_gate.descriptor currently supports only 'pairwise_distances'."
+        )
+
+    data_path = resolve_from_config_or_repo(
+        training_config.get_data_path(),
+        training_config.config_path,
+        repo_root_from_file(__file__),
+    )
+    gate_loader = DatasetLoader(
+        str(data_path),
+        max_frames=training_config.get_max_frames(),
+        seed=training_config.get_seed(),
+    )
+    bank = build_support_gate_bank(
+        R=np.asarray(gate_loader.R, dtype=np.float32),
+        mask=np.asarray(gate_loader.mask, dtype=np.float32),
+        max_centers=int(cfg.get("max_centers", 512)),
+        sigma_multiplier=float(cfg.get("sigma_multiplier", 1.0)),
+        seed=int(cfg.get("seed", training_config.get_seed())),
+        floor=float(cfg.get("floor", 0.0)),
+        stop_gradient=bool(cfg.get("stop_gradient", False)),
+    )
+    md_logger.info(
+        "[SupportGate] Runtime bank rebuilt from %s: centers=%d sigma=%.6g floor=%.3g stop_gradient=%s",
+        data_path,
+        int(bank.centers.shape[0]),
+        float(bank.sigma),
+        float(bank.floor),
+        bool(bank.stop_gradient),
+    )
+    return bank
 
 
 def _save_outputs(
@@ -160,6 +204,38 @@ def main(config_file: str, job_id: str = None, replica_idx: int = None) -> None:
             "Use for prior-residual models (F_total = F_ML + F_prior)."
         )
 
+    if "ml_energy_scale" in md_cfg:
+        training_config.set("model", "ml_energy_scale", float(md_cfg["ml_energy_scale"]))
+        md_logger.info(
+            "[Config] md.ml_energy_scale=%.4g: scaling ML energy/forces during MD.",
+            float(md_cfg["ml_energy_scale"]),
+        )
+    if "prior_energy_scale" in md_cfg:
+        training_config.set("model", "prior_energy_scale", float(md_cfg["prior_energy_scale"]))
+        md_logger.info(
+            "[Config] md.prior_energy_scale=%.4g: scaling prior energy/forces during MD.",
+            float(md_cfg["prior_energy_scale"]),
+        )
+
+    if "robustness_gate" in md_cfg:
+        gate_cfg = dict(md_cfg.get("robustness_gate") or {})
+        training_config.set("model", "robustness_gate", gate_cfg)
+        md_logger.info("[Config] md.robustness_gate=%s", gate_cfg)
+
+    if "local_extrapolation_gate" in md_cfg:
+        local_gate_cfg = dict(md_cfg.get("local_extrapolation_gate") or {})
+        if local_gate_cfg.get("artifact_path"):
+            local_gate_cfg["artifact_path"] = str(_resolve(local_gate_cfg["artifact_path"], root))
+        training_config.set("model", "local_extrapolation_gate", local_gate_cfg)
+        md_logger.info("[Config] md.local_extrapolation_gate=%s", local_gate_cfg)
+
+    if "edge_distance_gate" in md_cfg:
+        edge_gate_cfg = dict(md_cfg.get("edge_distance_gate") or {})
+        if edge_gate_cfg.get("artifact_path"):
+            edge_gate_cfg["artifact_path"] = str(_resolve(edge_gate_cfg["artifact_path"], root))
+        training_config.set("model", "edge_distance_gate", edge_gate_cfg)
+        md_logger.info("[Config] md.edge_distance_gate=%s", edge_gate_cfg)
+
     if md_cfg.get("cell_list", False):
         training_config.set("model", "neighbor_disable_cell_list", False)
         md_logger.info(
@@ -209,6 +285,7 @@ def main(config_file: str, job_id: str = None, replica_idx: int = None) -> None:
             f"Using n_species={n_species} from training config "
             f"(dataset contains species ids up to {data_n_species - 1})."
         )
+    support_gate_bank = _build_support_gate_bank_for_md(training_config)
     model = CombinedModel(
         config=training_config,
         R0=R0,
@@ -216,6 +293,7 @@ def main(config_file: str, job_id: str = None, replica_idx: int = None) -> None:
         species=species,
         N_max=loader.N_max,
         n_species_override=n_species,
+        support_gate_bank=support_gate_bank,
     )
     md_logger.info(f"Model: {model}")
 
@@ -273,7 +351,13 @@ def main(config_file: str, job_id: str = None, replica_idx: int = None) -> None:
     # ------------------------------------------------------------------
     # partial_output_path is updated per-replica before each run() call.
     md_cfg_runner = dict(md_cfg)
-    md_cfg_runner["_partial_output_path"] = None
+    first_output_path = _replica_output_path(base_output_path, replicas_to_run[0], n_replicas)
+    first_partial_path = first_output_path.with_name(
+        first_output_path.stem + ".partial" + first_output_path.suffix
+    )
+    md_cfg_runner["_partial_output_path"] = (
+        str(first_partial_path) if md_cfg.get("continuous_output") else None
+    )
     runner = MDRunner(model, params, md_cfg_runner)
 
     # ------------------------------------------------------------------

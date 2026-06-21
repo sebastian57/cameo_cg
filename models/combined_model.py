@@ -15,6 +15,8 @@ from .base_model import get_ml_model_class
 from .prior_energy import PriorEnergy
 from .topology import TopologyBuilder
 from utils.logging import model_logger
+from training.support_gate import SupportGateBank, rbf_segment_supports, rbf_structure_support, support_gate_scope
+from .local_extrapolation_gate import LocalExtrapolationGate
 
 # Eagerly import standard backends so their @register_ml_model fires.
 # cuEq variants are registered on import of allegro_cueq_model (lazy).
@@ -49,7 +51,8 @@ class CombinedModel:
     def __init__(self, config, R0: jax.Array, box: jax.Array, species: jax.Array, N_max: int,
                  init_mask: Optional[jax.Array] = None,
                  prior_only: bool = False, n_species_override: Optional[int] = None,
-                 id_to_aa: Optional[Dict[int, str]] = None):
+                 id_to_aa: Optional[Dict[int, str]] = None,
+                 support_gate_bank: Optional[SupportGateBank] = None):
         """
         Initialize combined model.
 
@@ -64,6 +67,8 @@ class CombinedModel:
                 force a consistent embedding size across datasets/buckets.
             id_to_aa: Optional species->resname mapping from dataset metadata,
                 used by typed prior terms (DH/stickiness/salt_bridge).
+            support_gate_bank: Optional fitted support bank used to gate the ML
+                residual energy by distance to training structures.
         """
         self.config = config
         self.N_max = N_max
@@ -92,6 +97,72 @@ class CombinedModel:
         )
         model_logger.info(f"ML backbone: {self.ml_model_type}")
 
+        self.ml_energy_scale = float(config.get("model", "ml_energy_scale", default=1.0))
+        self.prior_energy_scale = float(config.get("model", "prior_energy_scale", default=1.0))
+        gate_cfg = config.get("model", "robustness_gate", default={}) or {}
+        self.robustness_gate_enabled = bool(gate_cfg.get("enabled", False))
+        self.robustness_gate_threshold = float(gate_cfg.get("threshold", 250.0))
+        self.robustness_gate_width = max(float(gate_cfg.get("width", 50.0)), 1.0e-6)
+        self.robustness_gate_floor = float(gate_cfg.get("floor", 0.0))
+        self.robustness_gate_stop_gradient = bool(gate_cfg.get("stop_gradient", True))
+        self.local_extrapolation_gate = None
+        self.local_extrapolation_ml_apply_fn = None
+        local_gate_cfg = config.get("model", "local_extrapolation_gate", default={}) or {}
+        self.local_extrapolation_gate_enabled = bool(local_gate_cfg.get("enabled", False))
+        self.local_extrapolation_gate_stop_gradient = bool(local_gate_cfg.get("stop_gradient_gate", True))
+        if self.local_extrapolation_gate_enabled:
+            artifact_path = local_gate_cfg.get("artifact_path")
+            if not artifact_path:
+                raise ValueError("model.local_extrapolation_gate.enabled=true requires artifact_path")
+            self.local_extrapolation_gate = LocalExtrapolationGate.from_file(artifact_path)
+            if hasattr(self.ml_model, "build_export_apply_fn"):
+                self.local_extrapolation_ml_apply_fn = self.ml_model.build_export_apply_fn(
+                    tp_method_override="naive"
+                )
+            model_logger.info(
+                "Runtime local extrapolation gate: descriptor=%s artifact=%s onset=%.4g offset=%.4g stop_gradient=%s",
+                self.local_extrapolation_gate.artifact.get("descriptor", "unknown"),
+                artifact_path,
+                self.local_extrapolation_gate.onset,
+                self.local_extrapolation_gate.offset,
+                self.local_extrapolation_gate_stop_gradient,
+            )
+
+        self.support_gate_bank = support_gate_bank
+        support_cfg = config.get("training", "support_gate", default={}) or {}
+        self.support_gate_scope = support_gate_scope(config)
+        if self.support_gate_scope not in ("segment", "batch"):
+            raise ValueError("training.support_gate.scope must be 'segment' or 'batch'")
+        self.support_gate_enabled = bool(support_cfg.get("enabled", False)) and support_gate_bank is not None
+        if bool(support_cfg.get("enabled", False)) and support_gate_bank is None:
+            model_logger.warning(
+                "training.support_gate.enabled=true but no support gate bank was provided; "
+                "ML energy will not be support-gated."
+            )
+        if self.ml_energy_scale != 1.0 or self.prior_energy_scale != 1.0:
+            model_logger.info(
+                "Runtime energy scales: ml_energy_scale=%.4g prior_energy_scale=%.4g",
+                self.ml_energy_scale,
+                self.prior_energy_scale,
+            )
+        if self.robustness_gate_enabled:
+            model_logger.info(
+                "Runtime robustness gate: threshold=%.4g width=%.4g floor=%.4g stop_gradient=%s",
+                self.robustness_gate_threshold,
+                self.robustness_gate_width,
+                self.robustness_gate_floor,
+                self.robustness_gate_stop_gradient,
+            )
+        if self.support_gate_enabled:
+            model_logger.info(
+                "Runtime support gate: scope=%s centers=%d sigma=%.4g floor=%.4g stop_gradient=%s",
+                self.support_gate_scope,
+                int(self.support_gate_bank.centers.shape[0]),
+                float(self.support_gate_bank.sigma),
+                float(self.support_gate_bank.floor),
+                bool(self.support_gate_bank.stop_gradient),
+            )
+
         if config.use_pbc_enabled() and self.use_priors:
             model_logger.warning(
                 "PBC mode is active with priors enabled. Prior bond/angle/dihedral/repulsive "
@@ -118,6 +189,112 @@ class CombinedModel:
                 model_logger.info(
                     "DSM residual-prior mode: DSM forces will use ML + frozen prior energy."
                 )
+
+    def _robustness_gate_alpha(self, E_prior: jax.Array) -> jax.Array:
+        if not self.robustness_gate_enabled:
+            return jnp.asarray(1.0, dtype=jnp.asarray(E_prior).dtype)
+        x = (jnp.asarray(E_prior) - self.robustness_gate_threshold) / self.robustness_gate_width
+        alpha = self.robustness_gate_floor + (1.0 - self.robustness_gate_floor) * jax.nn.sigmoid(-x)
+        alpha = jnp.clip(alpha, self.robustness_gate_floor, 1.0)
+        if self.robustness_gate_stop_gradient:
+            alpha = jax.lax.stop_gradient(alpha)
+        return alpha
+
+    def _support_gate_alpha(
+        self,
+        R: jax.Array,
+        mask: jax.Array,
+        segment_id: Optional[jax.Array] = None,
+    ) -> jax.Array:
+        if not self.support_gate_enabled or self.support_gate_bank is None:
+            return jnp.asarray(1.0, dtype=jnp.asarray(R).dtype)
+        if self.support_gate_scope == "segment" and segment_id is not None:
+            num_segments = int(R.shape[0])
+            alphas = rbf_segment_supports(
+                R, mask, segment_id, self.support_gate_bank, num_segments=num_segments
+            )
+            active = ((mask > 0) & (segment_id >= 0)).astype(jnp.float32)
+            denom = jnp.maximum(jnp.sum(active), 1.0)
+            atom_alpha = alphas[jnp.clip(segment_id, 0, num_segments - 1)]
+            return jnp.sum(jnp.where(active > 0, atom_alpha, 0.0)) / denom
+        return rbf_structure_support(R, mask, self.support_gate_bank)
+
+    def _support_gated_ml_energy(
+        self,
+        ml_params: Any,
+        R: jax.Array,
+        mask: jax.Array,
+        species: jax.Array,
+        neighbor: Optional[Any],
+        segment_id: Optional[jax.Array],
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+        if self.local_extrapolation_gate_enabled and self.local_extrapolation_gate is not None:
+            if not hasattr(self.ml_model, "compute_per_atom_energy"):
+                raise NotImplementedError(
+                    "model.local_extrapolation_gate requires the ML backend to expose compute_per_atom_energy()."
+                )
+            if (
+                self.local_extrapolation_ml_apply_fn is not None
+                and hasattr(self.ml_model, "_compute_per_atom_energy_with_apply")
+            ):
+                per_atom_raw = self.ml_model._compute_per_atom_energy_with_apply(
+                    self.local_extrapolation_ml_apply_fn,
+                    ml_params,
+                    R,
+                    mask,
+                    species,
+                    neighbor,
+                    segment_id=segment_id,
+                )
+            else:
+                per_atom_raw = self.ml_model.compute_per_atom_energy(
+                    ml_params, R, mask, species, neighbor, segment_id=segment_id
+                )
+            per_atom = self.ml_energy_scale * per_atom_raw
+            gates = self.local_extrapolation_gate.compute_gates(R, mask)
+            if self.local_extrapolation_gate_stop_gradient:
+                gates = jax.lax.stop_gradient(gates)
+            valid = (mask > 0).astype(jnp.float32)
+            E_ml_raw = jnp.sum(jnp.where(valid > 0, per_atom, 0.0))
+            E_ml = jnp.sum(jnp.where(valid > 0, gates * per_atom, 0.0))
+            mean_alpha = jnp.sum(jnp.where(valid > 0, gates, 0.0)) / jnp.maximum(jnp.sum(valid), 1.0)
+            return E_ml, E_ml_raw, mean_alpha
+
+        if (
+            not self.support_gate_enabled
+            or self.support_gate_bank is None
+            or self.support_gate_scope == "batch"
+            or segment_id is None
+        ):
+            E_ml_raw = self.ml_energy_scale * self.ml_model.compute_energy(
+                ml_params, R, mask, species, neighbor, segment_id=segment_id
+            )
+            if not self.support_gate_enabled or self.support_gate_bank is None:
+                one = jnp.asarray(1.0, dtype=jnp.float32)
+                return E_ml_raw, E_ml_raw, one
+            support_alpha = self._support_gate_alpha(R, mask)
+            return support_alpha * E_ml_raw, E_ml_raw, support_alpha
+        if not hasattr(self.ml_model, "compute_per_atom_energy"):
+            raise NotImplementedError(
+                "training.support_gate.scope='segment' requires the ML backend to expose "
+                "compute_per_atom_energy(). Use scope='batch' for this backend."
+            )
+        per_atom = self.ml_energy_scale * self.ml_model.compute_per_atom_energy(
+            ml_params, R, mask, species, neighbor, segment_id=segment_id
+        )
+        num_segments = int(R.shape[0])
+        seg_safe = jnp.where((mask > 0) & (segment_id >= 0), segment_id, 0).astype(jnp.int32)
+        seg_energy = jax.ops.segment_sum(per_atom, seg_safe, num_segments=num_segments)
+        alphas = rbf_segment_supports(
+            R, mask, segment_id, self.support_gate_bank, num_segments=num_segments
+        )
+        E_ml_raw = jnp.sum(per_atom)
+        E_ml = jnp.sum(seg_energy * alphas)
+        active = ((mask > 0) & (segment_id >= 0)).astype(jnp.float32)
+        denom = jnp.maximum(jnp.sum(active), 1.0)
+        atom_alpha = alphas[jnp.clip(segment_id, 0, num_segments - 1)]
+        mean_alpha = jnp.sum(jnp.where(active > 0, atom_alpha, 0.0)) / denom
+        return E_ml, E_ml_raw, mean_alpha
 
     def initialize_params(self, rng_key: jax.random.PRNGKey) -> Dict[str, Any]:
         """
@@ -177,8 +354,8 @@ class CombinedModel:
                     R_masked, mask, species=species, segment_id=segment_id
                 )
 
-        E_ml = self.ml_model.compute_energy(
-            params['ml'], R, mask, species, neighbor, segment_id=segment_id
+        E_ml, _, _ = self._support_gated_ml_energy(
+            params['ml'], R, mask, species, neighbor, segment_id
         )
 
         if self.use_priors:
@@ -195,7 +372,8 @@ class CombinedModel:
                 E_prior = self.prior.compute_total_energy(
                     R_masked, mask, species=species, segment_id=segment_id
                 )
-            return E_ml + E_prior
+            alpha = self._robustness_gate_alpha(E_prior)
+            return alpha * E_ml + self.prior_energy_scale * E_prior
         else:
             return E_ml
 
@@ -275,13 +453,16 @@ class CombinedModel:
         """
         if self.prior_only:
             E_ml = 0.0
+            support_alpha = jnp.asarray(1.0)
         else:
-            E_ml = self.ml_model.compute_energy(
-                params['ml'], R, mask, species, neighbor
+            E_ml, E_ml_raw_scaled, support_alpha = self._support_gated_ml_energy(
+                params['ml'], R, mask, species, neighbor, None
             )
 
         components = {
             "E_ml": E_ml,
+            "E_ml_raw_scaled": E_ml_raw_scaled,
+            "E_ml_support_alpha": support_alpha,
         }
 
         if self.use_priors:
@@ -300,6 +481,7 @@ class CombinedModel:
                 "E_repulsive": prior_components["E_repulsive"],
                 "E_dihedral": prior_components["E_dihedral"],
                 "E_excluded_volume": prior_components["E_excluded_volume"],
+                "E_lj": prior_components.get("E_lj", 0.0),
                 "E_wca": prior_components.get("E_wca", 0.0),
                 "E_fene": prior_components.get("E_fene", 0.0),
                 "E_leash": prior_components.get("E_leash", 0.0),
@@ -308,11 +490,16 @@ class CombinedModel:
                 "E_salt_bridge": prior_components.get("E_salt_bridge", 0.0),
                 "E_local_in": prior_components.get("E_local_in", 0.0),
                 "E_local_bond_in": prior_components.get("E_local_bond_in", 0.0),
+                "E_crowding_wall": prior_components.get("E_crowding_wall", 0.0),
                 "E_prior_total": prior_components["E_total"],
             })
-            components["E_total"] = E_ml + prior_components["E_total"]
+            gate_alpha = self._robustness_gate_alpha(prior_components["E_total"])
+            components["E_ml_gate_alpha"] = gate_alpha
+            components["E_ml"] = gate_alpha * components["E_ml"]
+            components["E_prior_total"] = self.prior_energy_scale * components["E_prior_total"]
+            components["E_total"] = components["E_ml"] + self.prior_energy_scale * prior_components["E_total"]
         else:
-            components["E_total"] = E_ml
+            components["E_total"] = components["E_ml"]
 
         return components
 
@@ -354,18 +541,20 @@ class CombinedModel:
                     comps["E_repulsive"],
                     comps["E_dihedral"],
                     comps["E_excluded_volume"],
+                    comps.get("E_lj", 0.0),
                     comps.get("E_wca", 0.0),
                     comps.get("E_fene", 0.0),
                     comps.get("E_leash", 0.0),
                     comps.get("E_local_in", 0.0),
                     comps.get("E_local_bond_in", 0.0),
+                    comps.get("E_crowding_wall", 0.0),
                 )
 
             # Single forward pass; vjp_fn holds stored residuals for backward.
             _, vjp_fn = jax.vjp(all_energies, R)
 
             # Each vjp_fn call is a backward-only pass (no re-forward).
-            def _force(idx, n=12):
+            def _force(idx, n=14):
                 ct = tuple(1.0 if i == idx else 0.0 for i in range(n))
                 return -vjp_fn(ct)[0]
 
@@ -377,11 +566,13 @@ class CombinedModel:
                 "F_repulsive":       _force(4),
                 "F_dihedral":        _force(5),
                 "F_excluded_volume": _force(6),
-                "F_wca":             _force(7),
-                "F_fene":            _force(8),
-                "F_leash":           _force(9),
-                "F_local_in":        _force(10),
-                "F_local_bond_in":   _force(11),
+                "F_lj":              _force(7),
+                "F_wca":             _force(8),
+                "F_fene":            _force(9),
+                "F_leash":           _force(10),
+                "F_local_in":        _force(11),
+                "F_local_bond_in":   _force(12),
+                "F_crowding_wall":   _force(13),
             }
         else:
             def all_energies(R_):
@@ -439,7 +630,7 @@ class CombinedModel:
             segment_id = kwargs.get("segment_id")
 
             species = jnp.where(mask > 0, species, 0).astype(jnp.int32)
-            E_ml = self.ml_model.compute_energy(
+            E_ml_raw = self.ml_model.compute_energy(
                 params["ml"],
                 R,
                 mask,
@@ -447,6 +638,7 @@ class CombinedModel:
                 neighbor,
                 segment_id=segment_id,
             )
+            E_ml = self.ml_energy_scale * E_ml_raw
 
             R_detached = jax.lax.stop_gradient(R)
             mask_3d = mask[:, None]
@@ -457,7 +649,8 @@ class CombinedModel:
                 species=species,
                 segment_id=segment_id,
             )
-            return E_ml + E_prior
+            alpha = self._robustness_gate_alpha(E_prior)
+            return alpha * E_ml + self.prior_energy_scale * E_prior
 
         return energy_fn
 

@@ -65,6 +65,14 @@ model:
   neighbor_list_format: dense   # dense | sparse
   pbc: false                    # true = periodic boundary conditions (requires 'box' key in NPZ)
 
+  # --- Edge-distance gate for allegro_cueq_fast ------------------------------
+  edge_distance_gate:
+    enabled: false              # true = gate directed edge energies by train-set type-pair distance support
+    artifact_path: null         # .npz from data_prep/precompute_edge_distance_gate.py
+    falloff_percent: 0.05       # relative width outside observed min/max before reaching floor
+    floor: 0.0
+    stop_gradient: true
+
   # --- Allegro hyperparameters -----------------------------------------------
   allegro:
     num_types: 22
@@ -349,6 +357,31 @@ training:
     cache_path: null
     force_recompute: false
     compute_batch_size: 128
+
+  # --- Relative-entropy fine-tuning (standalone script) ---
+  # Run with: python scripts/train_relative_entropy.py <config.yaml>
+  # Requires training.init_from_checkpoint.enabled=true and a warm-start checkpoint.
+  relative_entropy:
+    enabled: false
+    reference_data_path: null   # null = use data.path; or point to a mapped-AA reference NPZ
+    optimizer: adam
+    iterations: 100
+    reference_batch_size: 16
+    n_replicas: 8
+    steps_per_iteration: 200
+    burn_in_steps: 50
+    sample_stride: 10
+    dt: 0.02045
+    kT: 0.636
+    gamma: 0.000977
+    mass: 12.011
+    start_frame_mode: reference_random
+    checkpoint_freq: 10
+    max_force: 1.0e4
+    min_pair_distance: 1.5
+    reject_on_instability: true
+    seed_offset: 9117
+    output_dir: null
 
   # --- Noised-residual training (requires prior_residual.enabled=true) ---
   noised_residual_training:

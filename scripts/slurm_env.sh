@@ -83,8 +83,7 @@ export SELECTED_VENV
 # ---------------------------------------------------------------------------
 # Load modules and activate environment
 # ---------------------------------------------------------------------------
-source "${PROJECT_ROOT}/env_setup/load_modules.sh"
-#source "/p/project1/cameo/schmidt36/load_modules.sh"
+source "${PROJECT_ROOT}/env_setup/load_modules_2026.sh"
 source "${SELECTED_VENV}/bin/activate"
 PYTHON_BIN="$(command -v python)"
 if [[ -z "${PYTHON_BIN}" ]]; then
@@ -92,7 +91,7 @@ if [[ -z "${PYTHON_BIN}" ]]; then
     return 1 2>/dev/null || exit 1
 fi
 export PYTHON_BIN
-source "${PROJECT_ROOT}/env_setup/set_lammps_paths.sh"
+source "${PROJECT_ROOT}/env_setup/set_lammps_paths_2026.sh"
 
 echo "Selected ml_model: ${MODEL_TYPE_CANON} -> activated ${SELECTED_VENV_NAME}"
 echo "JAX version: $(${PYTHON_BIN} -c 'import jax; print(jax.__version__)' 2>&1)"
@@ -110,7 +109,7 @@ SITE_PACKAGES="$(${PYTHON_BIN} -c 'import site; print(site.getsitepackages()[0])
 export LD_LIBRARY_PATH="${CUDA_ROOT}:${SITE_PACKAGES}/nvidia/cudnn/lib:${SITE_PACKAGES}/nvidia/cuda_runtime/lib:${SITE_PACKAGES}/nvidia/cublas/lib:${SITE_PACKAGES}/nvidia/cusolver/lib:${LD_LIBRARY_PATH:-}"
 
 export XLA_FLAGS="--xla_gpu_cuda_data_dir=${CUDA_HOME} --xla_gpu_autotune_level=0"
-export ALLEGRO_TP_METHOD_FALLBACK="${ALLEGRO_TP_METHOD_FALLBACK:-naive}"
+export ALLEGRO_TP_METHOD_FALLBACK="${ALLEGRO_TP_METHOD_FALLBACK:-error}"
 
 # ---------------------------------------------------------------------------
 # JAX / XLA / NCCL runtime settings

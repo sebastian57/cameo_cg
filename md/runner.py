@@ -83,6 +83,14 @@ class MDRunner:
         # random force on the COM that causes diffusive drift — especially
         # visible for small molecules.  Default on.
         self.zero_com_velocity = bool(md_config.get("zero_com_velocity", True))
+        self.rescale_initial_temperature = bool(
+            md_config.get("rescale_initial_temperature", False)
+        )
+        self.initial_temperature_scale = float(
+            md_config.get("initial_temperature_scale", 1.0)
+        )
+        if self.initial_temperature_scale < 0.0:
+            raise ValueError("initial_temperature_scale must be non-negative.")
 
         # Scalar observables (logged to CSV, independent cadence from trajectory)
         self.observables_every = int(md_config.get("observables_every", self.output_every))
@@ -172,6 +180,13 @@ class MDRunner:
         if self.equilibrate and self.n_equil_steps > 0:
             md_logger.info(f"  equilibration: {self.n_equil_steps} steps (not recorded)")
         md_logger.info(f"  zero_com_velocity: {self.zero_com_velocity}")
+        if self.rescale_initial_temperature:
+            target_T = self.kT * self.initial_temperature_scale / _kB_KCAL
+            md_logger.info(
+                "  initial temperature rescale: ON  "
+                f"target={target_T:.2f} K "
+                f"(scale={self.initial_temperature_scale:.4g})"
+            )
         if self.h_constraints:
             md_logger.info(
                 "  H constraints: ON  "
@@ -252,6 +267,25 @@ class MDRunner:
                     s.momentum - s.mass * v_com[None, :],
                     s.momentum,
                 )
+            )
+
+        @jax.jit
+        def _rescale_initial_temperature(s):
+            p2 = jnp.sum(s.momentum ** 2, axis=-1)
+            per_atom_ke = jnp.asarray(0.5, dtype=p2.dtype) * p2 / s.mass[..., 0]
+            ke = jnp.sum(jnp.where(valid_mask, per_atom_ke, 0.0))
+            target_ke = (
+                jnp.asarray(0.5, dtype=p2.dtype)
+                * jnp.asarray(n_dof, dtype=p2.dtype)
+                * jnp.asarray(self.kT * self.initial_temperature_scale, dtype=p2.dtype)
+            )
+            scale = jnp.where(
+                (ke > 0.0) & (target_ke > 0.0),
+                jnp.sqrt(target_ke / ke),
+                jnp.asarray(0.0, dtype=p2.dtype),
+            )
+            return s.set(
+                momentum=jnp.where(valid_mask[:, None], s.momentum * scale, 0.0)
             )
 
         constraint_h_idx = jnp.asarray([], dtype=jnp.int32)
@@ -389,6 +423,8 @@ class MDRunner:
             state = _apply_h_constraints(state)
         if self.zero_com_velocity:
             state = _remove_com_velocity(state)
+        if self.rescale_initial_temperature:
+            state = _rescale_initial_temperature(state)
         if self.h_constraints:
             nbrs = ml.nneigh_fn.update(state.position, nbrs, mask=valid_mask)
             state = _refresh_force(state, nbrs)
@@ -442,9 +478,8 @@ class MDRunner:
         # ── Record helpers ──────────────────────────────────────────────
         def _ke(s):
             p2 = jnp.sum(s.momentum ** 2, axis=-1)
-            return float(np.asarray(
-                jnp.sum(jnp.asarray(0.5, dtype=p2.dtype) * p2 / s.mass[..., 0])
-            ))
+            per_atom_ke = jnp.asarray(0.5, dtype=p2.dtype) * p2 / s.mass[..., 0]
+            return float(np.asarray(jnp.sum(jnp.where(valid_mask, per_atom_ke, 0.0))))
 
         def _pe(s, nb):
             return float(np.asarray(

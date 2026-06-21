@@ -1,9 +1,9 @@
 #!/bin/bash
 # SLURM submission script for parallel multi-replica CAMEO CG MD.
 #
-# Runs n_replicas replicas simultaneously, one per GPU, using
-# scripts/run_md_parallel.py.  Set n_replicas in the YAML to match
-# the GPU count requested below (--gres=gpu:N).
+# Runs n_replicas replicas in GPU-sized waves using scripts/run_md_parallel.py.
+# Use PROCS_PER_GPU to oversubscribe small systems; default 4 on 4 GPUs = 16
+# concurrent replicas per wave.
 #
 # Usage:
 #   sbatch scripts/submit_md_parallel.sh configs/my_md.yaml
@@ -33,20 +33,27 @@ echo "Node        : $SLURMD_NODENAME"
 echo "CUDA devices: $CUDA_VISIBLE_DEVICES"
 echo "============================================================"
 
-source "$PROJECT_ROOT/../load_modules.sh"
-source "$PROJECT_ROOT/../venv_cameocg_jupiter/bin/activate"
+source "$PROJECT_ROOT/../load_modules_2026.sh"
+source "$PROJECT_ROOT/../venv_cameocg_jupiter2026/bin/activate"
+source "$PROJECT_ROOT/../set_lammps_paths_2026.sh"
 
 mkdir -p "$PROJECT_ROOT/slurm"
 cd "$PROJECT_ROOT"
 
-# Allocate most GPU memory to JAX upfront; leave some headroom for cuEquivariance.
-export XLA_PYTHON_CLIENT_PREALLOCATE=true
-export XLA_PYTHON_CLIENT_MEM_FRACTION=0.75
+# Multiple tiny-replica JAX processes share each GPU; avoid one process
+# preallocating most memory before its siblings start.
+export XLA_PYTHON_CLIENT_PREALLOCATE=${XLA_PYTHON_CLIENT_PREALLOCATE:-false}
+export XLA_PYTHON_CLIENT_MEM_FRACTION=${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.20}
 
 # Count allocated GPUs from SLURM
-N_GPUS=$(echo "$CUDA_VISIBLE_DEVICES" | tr ',' '\n' | wc -l)
-echo "Launching $N_GPUS replicas..."
+N_GPUS=$(echo "$CUDA_VISIBLE_DEVICES" | awk -F, '{print NF}')
+PROCS_PER_GPU=${PROCS_PER_GPU:-4}
+WAVE_SIZE=$((N_GPUS * PROCS_PER_GPU))
+echo "Launching MD replicas with $N_GPUS GPU(s), $PROCS_PER_GPU process(es)/GPU, wave size $WAVE_SIZE"
+echo "XLA_PYTHON_CLIENT_PREALLOCATE=$XLA_PYTHON_CLIENT_PREALLOCATE"
+echo "XLA_PYTHON_CLIENT_MEM_FRACTION=$XLA_PYTHON_CLIENT_MEM_FRACTION"
 
 python scripts/run_md_parallel.py "$CONFIG" \
     --n-gpus "$N_GPUS" \
+    --procs-per-gpu "$PROCS_PER_GPU" \
     --job-id "$SLURM_JOB_ID"
