@@ -22,6 +22,7 @@ from chemtrain.data.data_loaders import DataLoaders
 
 from config.types import PretrainResult, TrainingResults, StageResult
 from .optimizers import create_optimizer_from_config
+from .swa import SWAState, save_swa_checkpoint
 from .dsm import add_dsm_noise_fields, dsm_config, dsm_enabled, dsm_error, make_dsm_quantity
 from .hvp_matching import hvp_config, hvp_error, make_hvp_quantity
 from .safety_regularization import (
@@ -1744,6 +1745,101 @@ class Trainer:
             test_loader=None
         )
 
+    def _create_swa_state_for_stage(
+        self, optimizer_name: str, epochs: int
+    ) -> Tuple[Optional[SWAState], Optional[Dict[str, Any]]]:
+        """Create SWA state for the selected training stage, if enabled."""
+        cfg = self.config.get_swa_config()
+        if not cfg["enabled"] or cfg["stage"] != optimizer_name:
+            return None, None
+
+        if cfg["start_epoch"] is None:
+            start_epoch = int(np.ceil(float(epochs) * float(cfg["start_fraction"])))
+        else:
+            start_epoch = int(cfg["start_epoch"])
+
+        state = SWAState(
+            stage=optimizer_name,
+            start_epoch=start_epoch,
+            sample_freq_epochs=int(cfg["sample_freq_epochs"]),
+            use_best_params=bool(cfg["use_best_params"]),
+        )
+        training_logger.info(
+            "[SWA] Enabled for stage=%s start_epoch=%d sample_freq_epochs=%d "
+            "use_best_params=%s",
+            optimizer_name,
+            start_epoch,
+            state.sample_freq_epochs,
+            state.use_best_params,
+        )
+        return state, cfg
+
+    def _install_swa_sampler(
+        self, trainer: Any, state: SWAState, stage_start_epoch: int
+    ) -> None:
+        """Attach a post-epoch task that averages selected parameter samples."""
+
+        def _sample_swa(chemtrain_trainer, *args, **kwargs):
+            completed_epoch = int(
+                stage_start_epoch + getattr(chemtrain_trainer, "_epoch", 0) + 1
+            )
+            if not state.should_sample(completed_epoch):
+                return
+            params = (
+                chemtrain_trainer.best_inference_params
+                if state.use_best_params
+                else chemtrain_trainer.params
+            )
+            state.update(params, epoch=completed_epoch)
+            training_logger.info(
+                "[SWA] Sampled stage=%s epoch=%d sample_count=%d",
+                state.stage,
+                completed_epoch,
+                state.n_samples,
+            )
+
+        trainer.add_task("post_epoch", _sample_swa)
+
+    def _save_swa_checkpoint_if_ready(
+        self,
+        state: Optional[SWAState],
+        cfg: Optional[Dict[str, Any]],
+        optimizer_name: str,
+        completed_epochs: int,
+        final_losses: Dict[str, Any],
+        trainer: Any,
+    ) -> None:
+        """Persist SWA params as a separate checkpoint artifact when configured."""
+        if state is None or cfg is None:
+            return
+        final_losses["swa_sample_count"] = int(state.n_samples)
+        final_losses["swa_sample_epochs"] = list(state.sample_epochs)
+        if state.n_samples <= 0:
+            training_logger.warning(
+                "[SWA] Enabled for stage=%s but collected no samples; no SWA checkpoint written.",
+                optimizer_name,
+            )
+            return
+        if not cfg["save_checkpoint"]:
+            return
+
+        output_path = self.checkpoint_path / f"swa_{optimizer_name}_epoch{completed_epochs}.pkl"
+        metadata = {
+            "stage": optimizer_name,
+            "completed_epochs": int(completed_epochs),
+            "train_losses": list(trainer.train_losses),
+            "val_losses": list(trainer.val_losses),
+            "swa_config": dict(cfg),
+        }
+        save_swa_checkpoint(output_path, state, metadata)
+        final_losses["swa_checkpoint"] = str(output_path)
+        training_logger.info(
+            "[SWA] Saved checkpoint: %s (samples=%d epochs=%s)",
+            output_path,
+            state.n_samples,
+            state.sample_epochs,
+        )
+
     def train_stage(
         self,
         optimizer_name: str,
@@ -1774,6 +1870,7 @@ class Trainer:
 
         # Create optimizer
         optimizer = create_optimizer_from_config(self.config, optimizer_name)
+        swa_state, swa_cfg = self._create_swa_state_for_stage(optimizer_name, epochs)
 
         # Create chemtrain loaders
         t_loader_start = time.perf_counter()
@@ -1837,6 +1934,8 @@ class Trainer:
         self._install_batch_fetch_profiler(trainer, stage="training")
         self._install_epochwise_tile_rebuild(trainer, stage_start_epoch=start_epoch)
         self._install_dsm_step_refresh(trainer)
+        if swa_state is not None:
+            self._install_swa_sampler(trainer, swa_state, stage_start_epoch=start_epoch)
         self._log_neighbor_debug_once()
 
         # Restore optimizer state from checkpoint if available.
@@ -1943,6 +2042,14 @@ class Trainer:
         }
         if trace_dir is not None:
             final_losses["jax_trace_dir"] = str(trace_dir)
+        self._save_swa_checkpoint_if_ready(
+            swa_state,
+            swa_cfg,
+            optimizer_name,
+            epochs,
+            final_losses,
+            trainer,
+        )
 
         training_logger.info(
             f"Stage wall time: {stage_wall_seconds:.2f} s "

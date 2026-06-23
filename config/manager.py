@@ -736,6 +736,48 @@ class ConfigManager:
                 )
         return result
 
+    def get_swa_config(self) -> Dict[str, Any]:
+        """Return normalized stochastic weight averaging config."""
+        raw = self.get("training", "swa", default={}) or {}
+        stages = self.get_training_stages()
+        nonzero_stages = [s for s in stages if int(s.get("epochs", 0)) > 0]
+        default_stage = nonzero_stages[-1]["optimizer"] if nonzero_stages else None
+
+        cfg = {
+            "enabled": bool(raw.get("enabled", False)),
+            "stage": raw.get("stage", default_stage),
+            "start_epoch": raw.get("start_epoch", None),
+            "start_fraction": float(raw.get("start_fraction", 0.75)),
+            "sample_freq_epochs": int(raw.get("sample_freq_epochs", 1)),
+            "save_checkpoint": bool(raw.get("save_checkpoint", True)),
+            "use_best_params": bool(raw.get("use_best_params", False)),
+        }
+
+        if cfg["stage"] is None:
+            cfg["stage"] = default_stage
+        if cfg["stage"] is not None and cfg["stage"] not in {s["optimizer"] for s in stages}:
+            raise ValueError(
+                f"training.swa.stage={cfg['stage']!r} is not present in training.stages."
+            )
+        if not 0.0 <= cfg["start_fraction"] <= 1.0:
+            raise ValueError(
+                "training.swa.start_fraction must be between 0.0 and 1.0, "
+                f"got {cfg['start_fraction']}."
+            )
+        if cfg["start_epoch"] is not None:
+            cfg["start_epoch"] = int(cfg["start_epoch"])
+            if cfg["start_epoch"] < 0:
+                raise ValueError(
+                    "training.swa.start_epoch must be >= 0 when provided, "
+                    f"got {cfg['start_epoch']}."
+                )
+        if cfg["sample_freq_epochs"] < 1:
+            raise ValueError(
+                "training.swa.sample_freq_epochs must be >= 1, "
+                f"got {cfg['sample_freq_epochs']}."
+            )
+        return cfg
+
     def get_stage1_optimizer(self) -> str:
         stages = self.get_training_stages()
         return stages[0]["optimizer"] if stages else "adabelief"

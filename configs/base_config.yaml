@@ -318,6 +318,16 @@ training:
 
   force_loss_normalization: legacy_mean  # legacy_mean | valid_components | per_structure_components
 
+  # --- Multi-checkpoint stochastic weight averaging ---
+  swa:
+    enabled: false
+    stage: null                  # null = last nonzero training stage
+    start_epoch: null            # null = ceil(stage_epochs * start_fraction)
+    start_fraction: 0.75
+    sample_freq_epochs: 1
+    save_checkpoint: true
+    use_best_params: false       # false = average live trainer.params
+
   # --- Denoising score-matching auxiliary loss ---
   dsm:
     enabled: false
