@@ -635,6 +635,13 @@ def _copy_hvp_fields_from_dataset(target: dict, dataset: dict, start: int, stop:
         ).astype(np.float32)
 
 
+def _copy_teacher_distillation_fields(target: dict, dataset: dict, start: int, stop: int) -> None:
+    """Attach optional frozen-AA-teacher targets to a split."""
+    for key in ("TeacherFeature", "teacher_feature_mask", "TeacherForce", "teacher_force_mask"):
+        if key in dataset:
+            target[key] = np.asarray(dataset[key][start:stop], dtype=np.float32)
+
+
 def _hvp_extra_per_atom_fields(split: dict) -> dict:
     """Return optional HVP arrays for tiled packing."""
     return {
@@ -686,6 +693,12 @@ def _build_loader_kwargs(split: dict) -> dict:
             "dsm_sigma",
             "dsm_loss_mask",
             *HVP_FIELD_KEYS,
+            "teacher_features",
+            "teacher_feature_mask",
+            "teacher_cg_forces",
+            "teacher_force_mask",
+            "TeacherFeature",
+            "TeacherForce",
             "is_noised_frame",
             "noise_level_id",
             *SAFETY_FIELD_KEYS,
@@ -758,6 +771,7 @@ def _build_validation_split(dataset: dict, start: int, stop: int) -> dict:
         ),
     }
     _copy_hvp_fields_from_dataset(val_split, dataset, start, stop)
+    _copy_teacher_distillation_fields(val_split, dataset, start, stop)
     sample_ids = np.arange(start, stop, dtype=np.int32)
     return _attach_batch_metadata(val_split, sample_ids)
 
@@ -850,6 +864,7 @@ def _build_tiled_train_source(dataset: dict, n_train: int) -> dict:
         "structure_ids": np.arange(n_train, dtype=np.int32),
     }
     _copy_hvp_fields_from_dataset(train_source, dataset, 0, n_train)
+    _copy_teacher_distillation_fields(train_source, dataset, 0, n_train)
     return train_source
 
 
@@ -1433,6 +1448,7 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         trainer.initialize_params_from_checkpoint(
             str(init_path),
             source_key=str(init_ckpt_cfg.get("source_key", "best_params")),
+            partial_matching=bool(init_ckpt_cfg.get("partial_matching", False)),
         )
 
     # Handle resume from checkpoint

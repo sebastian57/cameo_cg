@@ -64,7 +64,7 @@ class RelativeEntropyConfigTests(unittest.TestCase):
         self.assertEqual(cfg.iterations, 100)
         self.assertEqual(cfg.retained_samples_per_replica, 15)
         self.assertEqual(cfg.total_model_samples, 120)
-        self.assertEqual(cfg.optimizer_gradient_scale, -1.0)
+        self.assertEqual(cfg.optimizer_gradient_scale, 1.0)
         self.assertEqual(cfg.gradient_batch_size, 0)
         self.assertEqual(cfg.diagnostics_interval, 1)
 
@@ -396,7 +396,7 @@ class RelativeEntropyTrainerTests(unittest.TestCase):
 
         metrics = trainer.train_step(0)
 
-        self.assertGreater(float(trainer.params["ml"]["w"]), 2.0)
+        self.assertLess(float(trainer.params["ml"]["w"]), 2.0)
         self.assertIs(trainer.params["prior"], params["prior"])
         self.assertFalse(metrics["rejected"])
         self.assertEqual(len(trainer.history), 1)

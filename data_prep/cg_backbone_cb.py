@@ -6,8 +6,6 @@ from collections import OrderedDict
 
 import numpy as np
 
-from aggforce import LinearMap, guess_pairwise_constraints, project_forces
-
 from cg_1bead import load_npz, per_type_force_normalization
 
 
@@ -104,6 +102,14 @@ def _selection_from_pdb(pdbProteinAtoms):
 
 
 def _project_forces_to_selected_atoms(forces, coords, selected_indices):
+    try:
+        from aggforce import LinearMap, guess_pairwise_constraints, project_forces
+    except ImportError as exc:
+        raise ImportError(
+            "aggforce is required when use_aggforce=True. "
+            "Install aggforce or rerun with --no_aggforce for local CPU smoke data."
+        ) from exc
+
     cmap = LinearMap([[int(i)] for i in selected_indices], n_fg_sites=coords.shape[1])
     constraints = guess_pairwise_constraints(coords[0:100], threshold=5e-3)
     return project_forces(

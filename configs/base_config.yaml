@@ -328,6 +328,15 @@ training:
     save_checkpoint: true
     use_best_params: false       # false = average live trainer.params
 
+  # --- Micro-batch sharpness-aware minimization ---
+  msam:
+    enabled: false
+    stage: null                  # null = last nonzero training stage
+    start_epoch: null            # null = ceil(stage_epochs * start_fraction)
+    start_fraction: 0.80
+    rho: 0.01
+    epsilon: 1.0e-12
+
   # --- Denoising score-matching auxiliary loss ---
   dsm:
     enabled: false

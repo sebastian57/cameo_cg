@@ -47,6 +47,7 @@ class HVPConfigTests(unittest.TestCase):
         self.assertEqual(cfg["target_key"], "HVP")
         self.assertEqual(cfg["probe_key"], "hvp_probe")
         self.assertEqual(cfg["loss_mask_key"], "hvp_loss_mask")
+        self.assertEqual(cfg["energy_template"], "auto")
         self.assertAlmostEqual(cfg["lambda"], 0.01)
         self.assertTrue(cfg["stop_gradient_target"])
 
@@ -139,6 +140,45 @@ class HVPTrainerHookTests(unittest.TestCase):
         self.assertIsNotNone(trainer._force_matching_error_fns()["HVP"])
         self.assertEqual(trainer._force_matching_weights_keys()["HVP"], "hvp_loss_mask")
         self.assertIn("HVP", trainer._force_matching_additional_targets())
+
+    def test_trainer_hvp_can_force_ml_only_template(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.yaml"
+            _write_config(
+                config_path,
+                """
+    enabled: true
+    energy_template: ml_only
+""",
+            )
+            config = ConfigManager(config_path)
+
+        trainer = Trainer.__new__(Trainer)
+        trainer.config = config
+        trainer._hvp_cfg = hvp_config(config)
+        trainer._dsm_cfg = {"enabled": False}
+        trainer._safety_cfg = {"enabled": False}
+        trainer._force_loss_normalization = "valid_components"
+        trainer.model = type(
+            "Model",
+            (),
+            {
+                "energy_fn_template": staticmethod(lambda params: (lambda R, **kwargs: jnp.sum(R))),
+                "hvp_energy_fn_template": staticmethod(lambda params: (lambda R, **kwargs: 2.0 * jnp.sum(R))),
+            },
+        )()
+
+        quantity = trainer._force_matching_additional_targets()["HVP"]
+        state = type("State", (), {"position": jnp.ones((1, 3), dtype=jnp.float32)})()
+        out = quantity(
+            state,
+            energy_params={},
+            hvp_probe=jnp.ones((1, 1, 3), dtype=jnp.float32),
+            mask=jnp.ones((1,), dtype=jnp.float32),
+            species=jnp.ones((1,), dtype=jnp.int32),
+        )
+
+        np.testing.assert_allclose(np.asarray(out), np.zeros((1, 1, 3), dtype=np.float32))
 
 
 

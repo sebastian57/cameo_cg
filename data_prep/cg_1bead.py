@@ -5,10 +5,6 @@ import sys
 import numpy as np
 import jax.numpy as jnp
 
-from aggforce import (LinearMap,
-                      guess_pairwise_constraints,
-                      project_forces,
-                      )
 import re
 import mdtraj as md
 import tempfile
@@ -24,6 +20,13 @@ logger.setLevel(logging.INFO)
 
 
 def generate_optim_forcematch(forces, coords, pdb_string):
+    try:
+        from aggforce import LinearMap, guess_pairwise_constraints, project_forces
+    except ImportError as exc:
+        raise ImportError(
+            "aggforce is required when use_aggforce=True. "
+            "Install aggforce or rerun with --no_aggforce for local CPU smoke data."
+        ) from exc
 
     inds = []
 

@@ -20,7 +20,12 @@ logger = logging.getLogger(__name__)
 _COORD_ALIASES = ["coords", "coordinates", "positions", "pos", "xyz"]
 _FORCE_ALIASES = ["forces", "force", "frc", "grads", "gradients"]
 _BOX_ALIASES   = ["box", "cell", "lattice"]
-_OPTIONAL_FRAME_ALIGNED_KEYS = ("hvp_probe", "HVP", "hvp_loss_mask")
+_OPTIONAL_FRAME_ALIGNED_KEYS = (
+    "hvp_probe", "HVP", "hvp_loss_mask",
+    "teacher_features", "teacher_feature_mask",
+    "teacher_cg_forces", "teacher_force_mask",
+    "TeacherFeature", "TeacherForce",
+)
 
 
 def _resolve_key(data, canonical: str, aliases: list[str], source: str = "") -> str:

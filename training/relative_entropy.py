@@ -41,7 +41,7 @@ class RelativeEntropyConfig:
     reject_on_instability: bool = True
     seed_offset: int = 9117
     output_dir: Optional[str] = None
-    optimizer_gradient_scale: float = -1.0
+    optimizer_gradient_scale: float = 1.0
     gradient_batch_size: int = 0
     diagnostics_interval: int = 1
     mc_mala: Optional[MALAConfig] = None
@@ -137,7 +137,7 @@ def relative_entropy_config(config) -> RelativeEntropyConfig:
         reject_on_instability=bool(cfg.get("reject_on_instability", True)),
         seed_offset=int(cfg.get("seed_offset", 9117)),
         output_dir=str(cfg["output_dir"]) if cfg.get("output_dir") is not None else None,
-        optimizer_gradient_scale=float(cfg.get("optimizer_gradient_scale", -1.0)),
+        optimizer_gradient_scale=float(cfg.get("optimizer_gradient_scale", 1.0)),
         gradient_batch_size=_nonnegative_int(
             "gradient_batch_size", cfg.get("gradient_batch_size", 0)
         ),

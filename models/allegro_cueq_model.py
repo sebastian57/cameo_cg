@@ -15,7 +15,15 @@ Two new config keys are recognised under model.allegro (or model.allegro_cuEq / 
 
 import jax
 import jax.numpy as jnp
-from jax.sharding import PartitionSpec, get_abstract_mesh
+from jax.sharding import PartitionSpec
+try:
+    from jax.sharding import get_abstract_mesh
+except ImportError:
+    class _EmptyAbstractMesh:
+        empty = True
+
+    def get_abstract_mesh():
+        return _EmptyAbstractMesh()
 from jax_md import space, partition
 from pathlib import Path
 from typing import Optional, Any
@@ -321,22 +329,70 @@ class AllegroModelCuEq(BaseMLModel):
                 config_relative = (Path(config.config_path).parent / gate_path).resolve()
                 cwd_relative = (Path.cwd() / gate_path).resolve()
                 gate_path = config_relative if config_relative.exists() else cwd_relative
+            fragment_torsion_gate_path = edge_gate_cfg.get(
+                "fragment_torsion_gate_path",
+                edge_gate_cfg.get("torsion_gate_path"),
+            )
+            ala2_combined_gate_path = edge_gate_cfg.get(
+                "ala2_combined_gate_path",
+                edge_gate_cfg.get("combined_gate_path"),
+            )
+            torsion_gate_path = None
+            if fragment_torsion_gate_path:
+                torsion_gate_path = Path(fragment_torsion_gate_path)
+                if not torsion_gate_path.is_absolute():
+                    config_relative = (
+                        Path(config.config_path).parent / torsion_gate_path
+                    ).resolve()
+                    cwd_relative = (Path.cwd() / torsion_gate_path).resolve()
+                    torsion_gate_path = (
+                        config_relative if config_relative.exists() else cwd_relative
+                    )
+            combined_gate_path = None
+            if ala2_combined_gate_path:
+                combined_gate_path = Path(ala2_combined_gate_path)
+                if not combined_gate_path.is_absolute():
+                    config_relative = (
+                        Path(config.config_path).parent / combined_gate_path
+                    ).resolve()
+                    cwd_relative = (Path.cwd() / combined_gate_path).resolve()
+                    combined_gate_path = (
+                        config_relative if config_relative.exists() else cwd_relative
+                    )
             self.edge_distance_gate_bank = EdgeDistanceGateBank.from_file(
                 gate_path,
                 falloff_percent=float(edge_gate_cfg.get("falloff_percent", 0.05)),
                 onset_percent=float(edge_gate_cfg.get("onset_percent", 0.0)),
                 offset_percent=float(edge_gate_cfg.get("offset_percent", edge_gate_cfg.get("falloff_percent", 0.05))),
                 floor=float(edge_gate_cfg.get("floor", 0.0)),
+                alpha_power=float(edge_gate_cfg.get("alpha_power", 1.0)),
                 stop_gradient=bool(edge_gate_cfg.get("stop_gradient", True)),
+                fragment_torsion_gate_path=torsion_gate_path,
+                ala2_combined_gate_path=combined_gate_path,
             )
             model_logger.info(
-                "  edge distance gate = %s onset_percent=%.4g offset_percent=%.4g floor=%.4g stop_gradient=%s",
+                "  edge distance gate = %s onset_percent=%.4g offset_percent=%.4g floor=%.4g alpha_power=%.4g stop_gradient=%s",
                 gate_path,
                 float(self.edge_distance_gate_bank.onset_percent),
                 float(self.edge_distance_gate_bank.offset_percent),
                 float(self.edge_distance_gate_bank.floor),
+                float(self.edge_distance_gate_bank.alpha_power),
                 bool(self.edge_distance_gate_bank.stop_gradient),
             )
+            if self.edge_distance_gate_bank.has_fragment_torsion_gate:
+                model_logger.info(
+                    "  fragment torsion gate = %s k=%d onset_score=%.4gdeg offset_score=%.4gdeg",
+                    torsion_gate_path,
+                    int(self.edge_distance_gate_bank.fragment_torsion_k),
+                    float(self.edge_distance_gate_bank.fragment_torsion_onset_score_deg),
+                    float(self.edge_distance_gate_bank.fragment_torsion_offset_score_deg),
+                )
+            if self.edge_distance_gate_bank.has_ala2_combined_gate:
+                model_logger.info(
+                    "  ala2 combined gate = %s components=%s",
+                    combined_gate_path,
+                    ",".join(self.edge_distance_gate_bank.ala2_combined_components),
+                )
 
         if ml_model_type == "allegro_cueq_fast":
             from .allegro_cueq_fast_1103 import (

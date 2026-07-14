@@ -159,6 +159,41 @@ def _save_outputs(
                 writer.writerow([float(traj[f"obs_{k}"][i]) for k in obs_keys])
         md_logger.info(f"Observables CSV: {obs_path}  ({n_rows} rows, cols: {obs_keys})")
 
+    if "decomp_step" in traj:
+        decomp_path = output_path.with_name(output_path.stem + "_decomp.csv")
+        mask = np.asarray(traj.get("mask", np.ones(traj["R"].shape[1], dtype=np.float32)), dtype=bool)
+        f_ml = np.asarray(traj.get("decomp_F_ml", np.zeros((0, traj["R"].shape[1], 3))), dtype=np.float32)
+        f_prior = np.asarray(traj.get("decomp_F_prior", np.zeros_like(f_ml)), dtype=np.float32)
+        with open(decomp_path, "w", newline="") as fh:
+            writer = csv.writer(fh)
+            writer.writerow([
+                "step",
+                "E_ml",
+                "E_prior",
+                "F_ml_rms",
+                "F_prior_rms",
+                "gate_combined_alpha",
+                "gate_torsion_alpha",
+                "gate_distance_matrix_alpha",
+                "gate_angular_alpha",
+            ])
+            n_rows = int(np.asarray(traj["decomp_step"]).shape[0])
+            for i in range(n_rows):
+                fml_i = f_ml[i][mask] if f_ml.shape[0] else np.zeros((0, 3), dtype=np.float32)
+                fprior_i = f_prior[i][mask] if f_prior.shape[0] else np.zeros((0, 3), dtype=np.float32)
+                writer.writerow([
+                    int(np.asarray(traj["decomp_step"])[i]),
+                    float(np.asarray(traj.get("decomp_E_ml", np.zeros(n_rows)))[i]),
+                    float(np.asarray(traj.get("decomp_E_prior", np.zeros(n_rows)))[i]),
+                    float(np.sqrt(np.mean(fml_i ** 2))) if fml_i.size else 0.0,
+                    float(np.sqrt(np.mean(fprior_i ** 2))) if fprior_i.size else 0.0,
+                    float(np.asarray(traj.get("decomp_gate_combined_alpha", np.ones(n_rows)))[i]),
+                    float(np.asarray(traj.get("decomp_gate_torsion_alpha", np.ones(n_rows)))[i]),
+                    float(np.asarray(traj.get("decomp_gate_distance_matrix_alpha", np.ones(n_rows)))[i]),
+                    float(np.asarray(traj.get("decomp_gate_angular_alpha", np.ones(n_rows)))[i]),
+                ])
+        md_logger.info(f"Decomposition CSV: {decomp_path}  ({n_rows} rows)")
+
     # OVITO dump
     if md_cfg.get("dump_for_ovito", False):
         dump_path = output_path.with_suffix(".dump")
@@ -204,6 +239,14 @@ def main(config_file: str, job_id: str = None, replica_idx: int = None) -> None:
             "Use for prior-residual models (F_total = F_ML + F_prior)."
         )
 
+    if md_cfg.get("prior_only", False):
+        training_config.set("model", "use_priors", True)
+        training_config.set("model", "train_priors", False)
+        training_config.set("model", "prior_only", True)
+        md_logger.info(
+            "[Config] prior_only=true: MD evaluates only the configured fixed priors."
+        )
+
     if "ml_energy_scale" in md_cfg:
         training_config.set("model", "ml_energy_scale", float(md_cfg["ml_energy_scale"]))
         md_logger.info(
@@ -216,6 +259,30 @@ def main(config_file: str, job_id: str = None, replica_idx: int = None) -> None:
             "[Config] md.prior_energy_scale=%.4g: scaling prior energy/forces during MD.",
             float(md_cfg["prior_energy_scale"]),
         )
+
+    if "aa_integrated_baseline_component_scales" in md_cfg:
+        priors_cfg = dict(training_config.get("model", "priors", default={}) or {})
+        baseline_cfg = dict(priors_cfg.get("aa_integrated_baseline", {}) or {})
+        component_scales = dict(md_cfg["aa_integrated_baseline_component_scales"] or {})
+        baseline_cfg["component_scales"] = component_scales
+        priors_cfg["aa_integrated_baseline"] = baseline_cfg
+        training_config.set("model", "priors", priors_cfg)
+        md_logger.info(
+            "[Config] aa_integrated_baseline component scales=%s", component_scales
+        )
+
+    if "prior_overrides" in md_cfg:
+        priors_cfg = dict(training_config.get("model", "priors", default={}) or {})
+        overrides = dict(md_cfg["prior_overrides"] or {})
+        for key, value in overrides.items():
+            if isinstance(value, dict) and isinstance(priors_cfg.get(key), dict):
+                merged = dict(priors_cfg[key])
+                merged.update(value)
+                priors_cfg[key] = merged
+            else:
+                priors_cfg[key] = value
+        training_config.set("model", "priors", priors_cfg)
+        md_logger.info("[Config] applied md.prior_overrides keys=%s", sorted(overrides))
 
     if "robustness_gate" in md_cfg:
         gate_cfg = dict(md_cfg.get("robustness_gate") or {})
@@ -250,7 +317,20 @@ def main(config_file: str, job_id: str = None, replica_idx: int = None) -> None:
 
     md_logger.info(f"Dataset: {dataset_path}")
     loader    = DatasetLoader(str(dataset_path))
-    frame_idx = int(md_cfg.get("frame_idx", 0))
+    frame_indices_raw = md_cfg.get("frame_indices", None)
+    if frame_indices_raw is None:
+        frame_indices = [int(md_cfg.get("frame_idx", 0))]
+    else:
+        frame_indices = [int(idx) for idx in frame_indices_raw]
+        if not frame_indices:
+            raise ValueError("md.frame_indices was provided but is empty.")
+    for idx in frame_indices:
+        if idx < 0 or idx >= loader.R.shape[0]:
+            raise IndexError(
+                f"Initial frame index {idx} is out of range for dataset with "
+                f"{loader.R.shape[0]} frames."
+            )
+    frame_idx = frame_indices[0]
 
     R0      = jnp.asarray(loader.R[frame_idx], dtype=jnp.float32)
     mask    = jnp.asarray(loader.mask[frame_idx], dtype=jnp.float32)
@@ -260,6 +340,8 @@ def main(config_file: str, job_id: str = None, replica_idx: int = None) -> None:
         f"Initial frame: idx={frame_idx} N_atoms={loader.N_max} "
         f"n_valid={int(mask.sum())} n_species={int(loader.species.max())+1}"
     )
+    if len(frame_indices) > 1:
+        md_logger.info(f"Replica initial frames: {frame_indices}")
 
     # Build box from coordinate extents (free-space mode).
     cutoff = training_config.get_cutoff()
@@ -269,9 +351,23 @@ def main(config_file: str, job_id: str = None, replica_idx: int = None) -> None:
         park_multiplier=training_config.get_park_multiplier(),
     )
     box, R_shift = preprocessor.compute_box_extent(loader.R, loader.mask)
-    R0 = jnp.asarray(preprocessor.center_and_park(
-        np.asarray(R0)[None], np.asarray(mask)[None], box, R_shift
-    )[0], dtype=jnp.float32)
+    R0_frames = []
+    mask_frames = []
+    species_frames = []
+    for idx in frame_indices:
+        mask_i = np.asarray(loader.mask[idx], dtype=np.float32)
+        R_i = preprocessor.center_and_park(
+            np.asarray(loader.R[idx], dtype=np.float32)[None],
+            mask_i[None],
+            box,
+            R_shift,
+        )[0]
+        R0_frames.append(jnp.asarray(R_i, dtype=jnp.float32))
+        mask_frames.append(jnp.asarray(mask_i, dtype=jnp.float32))
+        species_frames.append(jnp.asarray(loader.species[idx], dtype=jnp.int32))
+    R0 = R0_frames[0]
+    mask = mask_frames[0]
+    species = species_frames[0]
     md_logger.info(f"Box: {jax.device_get(box)}")
 
     # ------------------------------------------------------------------
@@ -292,6 +388,7 @@ def main(config_file: str, job_id: str = None, replica_idx: int = None) -> None:
         box=box,
         species=species,
         N_max=loader.N_max,
+        prior_only=training_config.prior_only_enabled(),
         n_species_override=n_species,
         support_gate_bank=support_gate_bank,
     )
@@ -330,6 +427,12 @@ def main(config_file: str, job_id: str = None, replica_idx: int = None) -> None:
     # ------------------------------------------------------------------
     n_replicas = int(md_cfg.get("n_replicas", 1))
     base_seed  = int(md_cfg.get("seed", 0))
+    if len(frame_indices) not in (1, n_replicas):
+        raise ValueError(
+            "md.frame_indices must contain either one frame index or exactly "
+            f"n_replicas entries. Got {len(frame_indices)} frame index/indices "
+            f"for n_replicas={n_replicas}."
+        )
 
     if replica_idx is not None:
         if replica_idx < 0 or replica_idx >= n_replicas:
@@ -365,6 +468,11 @@ def main(config_file: str, job_id: str = None, replica_idx: int = None) -> None:
     # ------------------------------------------------------------------
     for i in replicas_to_run:
         replica_seed = base_seed + i
+        start_slot = i if len(frame_indices) > 1 else 0
+        start_frame_idx = frame_indices[start_slot]
+        R0_i = R0_frames[start_slot]
+        mask_i = mask_frames[start_slot]
+        species_i = species_frames[start_slot]
         output_path  = _replica_output_path(base_output_path, i, n_replicas)
         partial_path = output_path.with_name(
             output_path.stem + ".partial" + output_path.suffix
@@ -376,12 +484,20 @@ def main(config_file: str, job_id: str = None, replica_idx: int = None) -> None:
             md_logger.info(
                 f"\n{'='*60}\n"
                 f"Replica {i} / {n_replicas - 1}  seed={replica_seed}  "
+                f"frame_idx={start_frame_idx}  "
                 f"→ {output_path.name}\n"
                 f"{'='*60}"
             )
 
         rng  = jax.random.PRNGKey(replica_seed)
-        traj = runner.run(R0, mask, species, rng)
+        traj = runner.run(R0_i, mask_i, species_i, rng)
+        traj["initial_frame_idx"] = np.asarray(start_frame_idx, dtype=np.int32)
+        if hasattr(loader, "raw_data") and isinstance(getattr(loader, "raw_data"), dict):
+            source_indices = loader.raw_data.get("source_indices")
+            if source_indices is not None:
+                traj["initial_source_index"] = np.asarray(
+                    int(np.asarray(source_indices)[start_frame_idx]), dtype=np.int32
+                )
 
         _save_outputs(traj, output_path, md_cfg, output_dir)
 

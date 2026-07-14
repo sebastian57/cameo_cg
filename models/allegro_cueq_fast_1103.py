@@ -95,6 +95,76 @@ def _irrep_offsets(irreps: cue.Irreps) -> Dict[Tuple[int, int], List[Tuple[int, 
     return offsets
 
 
+def _rep_irrep_norm_features(rep: cuex.RepArray) -> jnp.ndarray:
+    """Return rotation-invariant per-irrep norm features for each edge."""
+    irreps = rep.irreps if isinstance(rep.irreps, cue.Irreps) else rep.irreps.irreps
+    offset = 0
+    parts = []
+    for mul, ir in irreps:
+        width = int(mul) * int(ir.dim)
+        chunk = rep.array[:, offset : offset + width]
+        block = chunk.reshape(chunk.shape[0], int(mul), int(ir.dim))
+        parts.append(jnp.linalg.norm(block, axis=-1))
+        offset += width
+    if parts:
+        return jnp.concatenate(parts, axis=-1)
+    return jnp.zeros((rep.array.shape[0], 0), dtype=rep.array.dtype)
+
+
+def _axis_irrep_norm_features(axis_array: jnp.ndarray, irreps: cue.Irreps) -> jnp.ndarray:
+    """Return per-irrep norms for arrays shaped [n_edges, axis, irreps_dim]."""
+    if hasattr(irreps, "irreps"):
+        irreps = irreps.irreps
+    n_edges = axis_array.shape[0]
+    n_axis = axis_array.shape[1]
+    flat = axis_array.reshape(n_edges * n_axis, axis_array.shape[-1])
+    offset = 0
+    parts = []
+    for mul, ir in irreps:
+        width = int(mul) * int(ir.dim)
+        chunk = flat[:, offset : offset + width]
+        block = chunk.reshape(chunk.shape[0], int(mul), int(ir.dim))
+        norm = jnp.linalg.norm(block, axis=-1).reshape(n_edges, n_axis * int(mul))
+        parts.append(norm)
+        offset += width
+    if parts:
+        return jnp.concatenate(parts, axis=-1)
+    return jnp.zeros((n_edges, 0), dtype=axis_array.dtype)
+
+
+def _axis_irrep_group_ids(axis_array: jnp.ndarray, irreps: cue.Irreps) -> jnp.ndarray:
+    """Return feature-group IDs matching _axis_irrep_norm_features output columns."""
+    if hasattr(irreps, "irreps"):
+        irreps = irreps.irreps
+    n_axis = int(axis_array.shape[1])
+    groups = []
+    group_id = 0
+    for mul, _ir in irreps:
+        groups.extend([group_id] * (n_axis * int(mul)))
+        group_id += 1
+    return jnp.asarray(groups, dtype=jnp.int32)
+
+
+def _rep_scalar_features_and_group_ids(rep: cuex.RepArray) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Extract 0e scalar TP features and group IDs per scalar irrep block."""
+    irreps = rep.irreps if isinstance(rep.irreps, cue.Irreps) else rep.irreps.irreps
+    offset = 0
+    parts = []
+    groups = []
+    group_id = 0
+    for mul, ir in irreps:
+        width = int(mul) * int(ir.dim)
+        chunk = rep.array[:, offset : offset + width]
+        if int(ir.l) == 0 and int(ir.p) == 1:
+            parts.append(chunk)
+            groups.extend([group_id] * width)
+            group_id += 1
+        offset += width
+    if parts:
+        return jnp.concatenate(parts, axis=-1), jnp.asarray(groups, dtype=jnp.int32)
+    return jnp.zeros((rep.array.shape[0], 0), dtype=rep.array.dtype), jnp.zeros((0,), dtype=jnp.int32)
+
+
 def _normalize_tp_mode(tp_mode: str) -> str:
     """Normalize TP mode aliases to internal names."""
     aliases = {
@@ -1003,7 +1073,8 @@ class AllegroLayer(hk.Module):
         V: cuex.RepArray,
         senders: jnp.ndarray,
         species: jnp.ndarray,
-        num_nodes: int
+        num_nodes: int,
+        return_intermediates: bool = False,
     ) -> Tuple[jnp.ndarray, cuex.RepArray]:
         """Apply tensor product layer using axis-based approach.
 
@@ -1062,7 +1133,6 @@ class AllegroLayer(hk.Module):
 
 
             V_axis, V_red_irreps = unflatten_mul_to_axis(V.array, V.irreps, mul_gcd)
-
 
             tp_desc = self._build_tp_descriptor(Y_irreps, V_red_irreps)
 
@@ -1143,6 +1213,19 @@ class AllegroLayer(hk.Module):
         lengths = jnp.linalg.norm(vectors.array, axis=-1)
         envelope = polynomial_envelope(lengths, p=self.envelope_p, cutoff=1.0)
         y = envelope[:, None] * y
+
+        if return_intermediates:
+            tp_scalar_only, tp_scalar_groups = _rep_scalar_features_and_group_ids(V_new)
+            return y, V_out, {
+                "env_norm_features": _axis_irrep_norm_features(wY_axis, Y_irreps),
+                "env_norm_feature_groups": _axis_irrep_group_ids(wY_axis, Y_irreps),
+                "tp_norm_features": _axis_irrep_norm_features(out_axis, tp_output_irreps),
+                "tp_norm_feature_groups": _axis_irrep_group_ids(out_axis, tp_output_irreps),
+                "tp_scalar_features": x_new,
+                "tp_scalar_only_features": tp_scalar_only,
+                "tp_scalar_only_feature_groups": tp_scalar_groups,
+                "scalar_update_features": y,
+            }
 
         return y, V_out
 
@@ -1645,20 +1728,63 @@ class Allegro(hk.Module):
 
         x, V = self.embedding_layer(vectors, senders, receivers, species)
         source_V = V if self.fast_force_source == "embedding" else None
+        latent_norm_parts = []
+        env_norm_parts = []
+        env_norm_group_parts = []
+        tp_norm_parts = []
+        tp_norm_group_parts = []
+        tp_scalar_parts = []
+        tp_scalar_only_parts = []
+        tp_scalar_only_group_parts = []
+        scalar_update_parts = []
+        x_state_parts = []
+        if return_al_features:
+            latent_norm = _rep_irrep_norm_features(V)
+            if latent_norm.shape[-1] > 0:
+                latent_norm_parts.append(latent_norm)
+            x_state_parts.append(x)
 
         for i, layer in enumerate(self.layers):
             if self.remat_layers:
-                y, V_new = hk.remat(
+                layer_out = hk.remat(
                     lambda vectors_, x_, V_, senders_, species_, layer=layer: layer(
-                        vectors_, x_, V_, senders_, species_, num_nodes
+                        vectors_, x_, V_, senders_, species_, num_nodes,
+                        return_intermediates=return_al_features,
                     )
                 )(vectors, x, V, senders, species)
             else:
-                y, V_new = layer(vectors, x, V, senders, species, num_nodes)
+                layer_out = layer(
+                    vectors,
+                    x,
+                    V,
+                    senders,
+                    species,
+                    num_nodes,
+                    return_intermediates=return_al_features,
+                )
+
+            if return_al_features:
+                y, V_new, layer_aux = layer_out
+                layer_group_offset = i * 10000
+                env_norm_parts.append(layer_aux["env_norm_features"])
+                env_norm_group_parts.append(layer_aux["env_norm_feature_groups"] + layer_group_offset)
+                tp_norm_parts.append(layer_aux["tp_norm_features"])
+                tp_norm_group_parts.append(layer_aux["tp_norm_feature_groups"] + layer_group_offset)
+                tp_scalar_parts.append(layer_aux["tp_scalar_features"])
+                tp_scalar_only_parts.append(layer_aux["tp_scalar_only_features"])
+                tp_scalar_only_group_parts.append(layer_aux["tp_scalar_only_feature_groups"] + layer_group_offset)
+                scalar_update_parts.append(layer_aux["scalar_update_features"])
+            else:
+                y, V_new = layer_out
 
             alpha = _mesh_safe_softplus(self.alpha)
             x = (x + alpha * y) / (1.0 + alpha)
             V = V_new
+            if return_al_features:
+                latent_norm = _rep_irrep_norm_features(V)
+                if latent_norm.shape[-1] > 0:
+                    latent_norm_parts.append(latent_norm)
+                x_state_parts.append(x)
             if self.fast_force_source == f"layer{i}":
                 source_V = V
 
@@ -1687,6 +1813,46 @@ class Allegro(hk.Module):
                     return energies, fast_forces, al_aux
                 return energies, fast_forces
             if return_al_features:
+                if latent_norm_parts:
+                    tensor_norm_features = jnp.concatenate(latent_norm_parts, axis=-1)
+                else:
+                    tensor_norm_features = _rep_irrep_norm_features(V)
+                tensor_envelope = polynomial_envelope(
+                    jnp.linalg.norm(vectors.array, axis=-1),
+                    p=self.readout_layer.envelope_p,
+                    cutoff=1.0,
+                )
+                al_aux["tensor_norm_features"] = tensor_norm_features
+                al_aux["tensor_norm_features_enveloped"] = (
+                    tensor_norm_features * tensor_envelope[:, None]
+                )
+                if env_norm_parts:
+                    env_norm_features = jnp.concatenate(env_norm_parts, axis=-1)
+                    al_aux["env_norm_features"] = env_norm_features
+                    al_aux["env_norm_features_enveloped"] = env_norm_features * tensor_envelope[:, None]
+                    al_aux["env_norm_feature_groups"] = jnp.concatenate(env_norm_group_parts, axis=0)
+                if tp_norm_parts:
+                    tp_norm_features = jnp.concatenate(tp_norm_parts, axis=-1)
+                    al_aux["tp_norm_features"] = tp_norm_features
+                    al_aux["tp_norm_features_enveloped"] = tp_norm_features * tensor_envelope[:, None]
+                    al_aux["tp_norm_feature_groups"] = jnp.concatenate(tp_norm_group_parts, axis=0)
+                if tp_scalar_parts:
+                    tp_scalar_features = jnp.concatenate(tp_scalar_parts, axis=-1)
+                    al_aux["tp_scalar_features"] = tp_scalar_features
+                    al_aux["tp_scalar_features_enveloped"] = tp_scalar_features * tensor_envelope[:, None]
+                if tp_scalar_only_parts:
+                    tp_scalar_only_features = jnp.concatenate(tp_scalar_only_parts, axis=-1)
+                    al_aux["tp_scalar_only_features"] = tp_scalar_only_features
+                    al_aux["tp_scalar_only_features_enveloped"] = tp_scalar_only_features * tensor_envelope[:, None]
+                    al_aux["tp_scalar_only_feature_groups"] = jnp.concatenate(tp_scalar_only_group_parts, axis=0)
+                if scalar_update_parts:
+                    scalar_update_features = jnp.concatenate(scalar_update_parts, axis=-1)
+                    al_aux["scalar_update_features"] = scalar_update_features
+                    al_aux["scalar_update_features_enveloped"] = scalar_update_features * tensor_envelope[:, None]
+                if x_state_parts:
+                    x_state_features = jnp.concatenate(x_state_parts, axis=-1)
+                    al_aux["x_state_features"] = x_state_features
+                    al_aux["x_state_features_enveloped"] = x_state_features * tensor_envelope[:, None]
                 return energies, al_aux
             return energies
 
@@ -1839,7 +2005,12 @@ def allegro_neighborlist_pp(
         )
 
         if mode == "energy":
-            per_edge_energies = net(
+            needs_latent_gate = (
+                edge_distance_gate is not None
+                and edge_distance_gate.has_ala2_combined_gate
+                and "latent" in edge_distance_gate.ala2_combined_components
+            )
+            edge_out = net(
                 vectors_rep,
                 senders,
                 receivers,
@@ -1847,9 +2018,20 @@ def allegro_neighborlist_pp(
                 n_nodes,
                 return_fast_forces=False,
                 compute_energy=True,
+                return_al_features=needs_latent_gate,
             )
+            if needs_latent_gate:
+                per_edge_energies, al_aux = edge_out
+            else:
+                per_edge_energies = edge_out
+                al_aux = {}
             per_edge_values = per_edge_energies.array.squeeze(-1)
             if edge_distance_gate is not None:
+                latent_feature_key = getattr(
+                    edge_distance_gate,
+                    "ala2_latent_feature_key",
+                    "tensor_norm_features_enveloped",
+                )
                 edge_alpha = compute_edge_distance_gate(
                     distances=distances,
                     senders=senders,
@@ -1857,6 +2039,8 @@ def allegro_neighborlist_pp(
                     species=species,
                     valid_edges=valid_edges,
                     bank=edge_distance_gate,
+                    positions=position,
+                    edge_latent_features=al_aux.get(latent_feature_key),
                 )
                 per_edge_values = per_edge_values * edge_alpha
             per_node_energies = jax.ops.segment_sum(
@@ -1884,15 +2068,38 @@ def allegro_neighborlist_pp(
                 compute_energy=True,
                 return_al_features=True,
             )
-            return {
+            out = {
                 "edge_features": al_aux["scalar_features_enveloped"],
                 "edge_features_unenveloped": al_aux["scalar_features"],
+                "edge_tensor_norm_features": al_aux["tensor_norm_features_enveloped"],
+                "edge_tensor_norm_features_unenveloped": al_aux["tensor_norm_features"],
                 "per_edge_energy": per_edge_energies.array.squeeze(-1),
                 "senders": senders,
                 "receivers": receivers,
                 "distances": distances,
                 "valid_edges": valid_edges,
             }
+            optional_feature_keys = (
+                "env_norm_features",
+                "env_norm_features_enveloped",
+                "env_norm_feature_groups",
+                "tp_norm_features",
+                "tp_norm_features_enveloped",
+                "tp_norm_feature_groups",
+                "tp_scalar_features",
+                "tp_scalar_features_enveloped",
+                "tp_scalar_only_features",
+                "tp_scalar_only_features_enveloped",
+                "tp_scalar_only_feature_groups",
+                "scalar_update_features",
+                "scalar_update_features_enveloped",
+                "x_state_features",
+                "x_state_features_enveloped",
+            )
+            for key in optional_feature_keys:
+                if key in al_aux:
+                    out[key] = al_aux[key]
+            return out
 
         if mode == "energy_and_fast_forces":
             per_edge_energies, fast_forces = net(
@@ -1913,6 +2120,7 @@ def allegro_neighborlist_pp(
                     species=species,
                     valid_edges=valid_edges,
                     bank=edge_distance_gate,
+                    positions=position,
                 )
                 per_edge_values = per_edge_values * edge_alpha
             per_node_energies = jax.ops.segment_sum(

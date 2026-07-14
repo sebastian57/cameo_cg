@@ -8,6 +8,7 @@ Supports pure ML, pure prior, or combined training via config.
 import jax
 import jax.numpy as jnp
 import inspect
+import haiku as hk
 from typing import Dict, Any, Optional
 
 from config.types import EnergyComponents, ForceComponents
@@ -16,6 +17,7 @@ from .prior_energy import PriorEnergy
 from .topology import TopologyBuilder
 from utils.logging import model_logger
 from training.support_gate import SupportGateBank, rbf_segment_supports, rbf_structure_support, support_gate_scope
+from training.edge_distance_gate import compute_ala2_combined_gate_diagnostics
 from .local_extrapolation_gate import LocalExtrapolationGate
 
 # Eagerly import standard backends so their @register_ml_model fires.
@@ -98,6 +100,31 @@ class CombinedModel:
         model_logger.info(f"ML backbone: {self.ml_model_type}")
 
         self.ml_energy_scale = float(config.get("model", "ml_energy_scale", default=1.0))
+        teacher_cfg = config.get("training", "teacher_distillation", default={}) or {}
+        teacher_feature_cfg = teacher_cfg.get("feature", {}) if isinstance(teacher_cfg, dict) else {}
+        self.teacher_feature_distillation_enabled = bool(teacher_feature_cfg.get("enabled", False))
+        self.teacher_feature_key = str(teacher_feature_cfg.get("feature_key", "edge_features"))
+        self.teacher_feature_source_dim = int(teacher_feature_cfg.get("source_dim", 32))
+        self.teacher_feature_target_dim = int(teacher_feature_cfg.get("target_dim", 32))
+        self.teacher_feature_projection_hidden_dim = int(teacher_feature_cfg.get("projection_hidden_dim", 64))
+        self._teacher_projection_init = None
+        self._teacher_projection_apply = None
+        if self.teacher_feature_distillation_enabled:
+            def _teacher_projection(x):
+                x = hk.Linear(self.teacher_feature_projection_hidden_dim, name="hidden")(x)
+                x = jax.nn.silu(x)
+                return hk.Linear(self.teacher_feature_target_dim, name="output")(x)
+
+            self._teacher_projection_init, self._teacher_projection_apply = hk.without_apply_rng(
+                hk.transform(_teacher_projection)
+            )
+            model_logger.info(
+                "Teacher feature distillation head: %s [%d -> %d -> %d]",
+                self.teacher_feature_key,
+                self.teacher_feature_source_dim,
+                self.teacher_feature_projection_hidden_dim,
+                self.teacher_feature_target_dim,
+            )
         self.prior_energy_scale = float(config.get("model", "prior_energy_scale", default=1.0))
         gate_cfg = config.get("model", "robustness_gate", default={}) or {}
         self.robustness_gate_enabled = bool(gate_cfg.get("enabled", False))
@@ -116,9 +143,16 @@ class CombinedModel:
                 raise ValueError("model.local_extrapolation_gate.enabled=true requires artifact_path")
             self.local_extrapolation_gate = LocalExtrapolationGate.from_file(artifact_path)
             if hasattr(self.ml_model, "build_export_apply_fn"):
-                self.local_extrapolation_ml_apply_fn = self.ml_model.build_export_apply_fn(
-                    tp_method_override="naive"
-                )
+                try:
+                    self.local_extrapolation_ml_apply_fn = self.ml_model.build_export_apply_fn(
+                        tp_method_override="naive"
+                    )
+                except NotImplementedError as exc:
+                    model_logger.info(
+                        "Runtime local extrapolation gate: export-compatible per-atom apply_fn "
+                        "unavailable (%s); using direct compute_per_atom_energy().",
+                        exc,
+                    )
             model_logger.info(
                 "Runtime local extrapolation gate: descriptor=%s artifact=%s onset=%.4g offset=%.4g stop_gradient=%s",
                 self.local_extrapolation_gate.artifact.get("descriptor", "unknown"),
@@ -187,7 +221,8 @@ class CombinedModel:
             model_logger.info(f"Mode: Pure {self.ml_model_type.upper()} (no priors)")
             if self._residual_dsm_prior is not None:
                 model_logger.info(
-                    "DSM residual-prior mode: DSM forces will use ML + frozen prior energy."
+                    "DSM/HVP residual-prior mode: auxiliary curvature/noise targets will use "
+                    "ML + frozen prior energy."
                 )
 
     def _robustness_gate_alpha(self, E_prior: jax.Array) -> jax.Array:
@@ -303,9 +338,13 @@ class CombinedModel:
         Returns:
             Dictionary with 'ml' (ML backbone params) and optionally 'prior'.
         """
-        params = {
-            'ml': self.ml_model.initialize_params(rng_key),
-        }
+        params = {'ml': self.ml_model.initialize_params(rng_key)}
+
+        if self.teacher_feature_distillation_enabled:
+            dummy = jnp.zeros((1, self.teacher_feature_source_dim), dtype=jnp.float32)
+            params['teacher_projection'] = self._teacher_projection_init(
+                jax.random.fold_in(rng_key, 173), dummy
+            )
 
         if self.use_priors:
             params['prior'] = self.prior.params
@@ -423,6 +462,36 @@ class CombinedModel:
             segment_id=segment_id,
         )
 
+    def compute_teacher_projected_features(
+        self,
+        params: Dict[str, Any],
+        R: jax.Array,
+        mask: jax.Array,
+        species: jax.Array,
+        neighbor: Optional[Any] = None,
+        segment_id: Optional[jax.Array] = None,
+    ) -> jax.Array:
+        """Return learned AA-teacher-space node scalars for auxiliary training only."""
+        if not self.teacher_feature_distillation_enabled or self._teacher_projection_apply is None:
+            raise ValueError("Teacher feature projection is not enabled in this model config.")
+        if "teacher_projection" not in params:
+            raise KeyError("Model params do not contain teacher_projection.")
+        aux = self.compute_al_features(params, R, mask, species, neighbor, segment_id=segment_id)
+        if self.teacher_feature_key not in aux:
+            raise KeyError(f"Requested teacher feature key {self.teacher_feature_key!r} is unavailable.")
+        features = jnp.asarray(aux[self.teacher_feature_key])
+        valid = jnp.asarray(aux["valid_edges"], dtype=features.dtype)
+        senders = jnp.where(jnp.asarray(aux["valid_edges"], dtype=bool), aux["senders"], 0)
+        sums = jax.ops.segment_sum(features * valid[:, None], senders, num_segments=R.shape[0])
+        counts = jax.ops.segment_sum(valid, senders, num_segments=R.shape[0])
+        node_features = sums / jnp.maximum(counts[:, None], 1.0)
+        if node_features.shape[-1] != self.teacher_feature_source_dim:
+            raise ValueError(
+                "Teacher projection source dimension mismatch: "
+                f"expected {self.teacher_feature_source_dim}, got {node_features.shape[-1]}."
+            )
+        return self._teacher_projection_apply(params["teacher_projection"], node_features)
+
     def compute_components(
         self,
         params: Dict[str, Any],
@@ -464,6 +533,22 @@ class CombinedModel:
             "E_ml_raw_scaled": E_ml_raw_scaled,
             "E_ml_support_alpha": support_alpha,
         }
+        if (
+            hasattr(self.ml_model, "edge_distance_gate_bank")
+            and self.ml_model.edge_distance_gate_bank is not None
+            and self.ml_model.edge_distance_gate_bank.has_ala2_combined_gate
+        ):
+            gate_diag = compute_ala2_combined_gate_diagnostics(
+                R,
+                mask,
+                self.ml_model.edge_distance_gate_bank,
+            )
+            components.update({
+                "E_ml_edge_gate_torsion_alpha": gate_diag["torsion_alpha"],
+                "E_ml_edge_gate_distance_matrix_alpha": gate_diag["distance_matrix_alpha"],
+                "E_ml_edge_gate_angular_alpha": gate_diag["angular_alpha"],
+                "E_ml_edge_gate_combined_structure_alpha": gate_diag["combined_structure_alpha"],
+            })
 
         if self.use_priors:
             R_detached = jax.lax.stop_gradient(R)
@@ -491,6 +576,11 @@ class CombinedModel:
                 "E_local_in": prior_components.get("E_local_in", 0.0),
                 "E_local_bond_in": prior_components.get("E_local_bond_in", 0.0),
                 "E_crowding_wall": prior_components.get("E_crowding_wall", 0.0),
+                "E_five_particle_flat_bottom": prior_components.get("E_five_particle_flat_bottom", 0.0),
+                "E_aa_integrated_baseline": prior_components.get("E_aa_integrated_baseline", 0.0),
+                "E_ala2_feature_recovery": prior_components.get("E_ala2_feature_recovery", 0.0),
+                "E_ala2_rama_recovery": prior_components.get("E_ala2_rama_recovery", 0.0),
+                "E_ala2_geometry_support_recovery": prior_components.get("E_ala2_geometry_support_recovery", 0.0),
                 "E_prior_total": prior_components["E_total"],
             })
             gate_alpha = self._robustness_gate_alpha(prior_components["E_total"])
@@ -653,6 +743,17 @@ class CombinedModel:
             return alpha * E_ml + self.prior_energy_scale * E_prior
 
         return energy_fn
+
+    def hvp_energy_fn_template(self, params: Dict[str, Any]):
+        """
+        Energy template for HVP targets.
+
+        In residual-prior training, force matching fits ML to ``F_ref - F_prior``.
+        HVP targets, however, are full reference curvature targets and should be
+        compared against the exported potential that MD samples: ML + frozen
+        prior. Reuse the DSM total-potential template for that case.
+        """
+        return self.dsm_energy_fn_template(params)
 
     @property
     def initial_neighbors(self) -> Any:

@@ -21,6 +21,7 @@ def hvp_config(config) -> Dict[str, Any]:
         "target_key": str(cfg.get("target_key", "HVP")),
         "probe_key": str(cfg.get("probe_key", "hvp_probe")),
         "loss_mask_key": str(cfg.get("loss_mask_key", "hvp_loss_mask")),
+        "energy_template": str(cfg.get("energy_template", "auto")),
         "require_targets": bool(cfg.get("require_targets", True)),
         "stop_gradient_target": bool(cfg.get("stop_gradient_target", True)),
     }

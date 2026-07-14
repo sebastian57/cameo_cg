@@ -347,6 +347,9 @@ class ConfigManager:
         "dh": 0.0,
         "stickiness": 0.0,
         "salt_bridge": 0.0,
+        "five_particle_flat_bottom": 0.0,
+        "ala2_feature_recovery": 0.0,
+        "ala2_rama_recovery": 0.0,
     }
 
     def get_prior_weights(self) -> Dict[str, float]:
@@ -775,6 +778,50 @@ class ConfigManager:
             raise ValueError(
                 "training.swa.sample_freq_epochs must be >= 1, "
                 f"got {cfg['sample_freq_epochs']}."
+            )
+        return cfg
+
+    def get_msam_config(self) -> Dict[str, Any]:
+        """Return normalized micro-batch SAM config."""
+        raw = self.get("training", "msam", default={}) or {}
+        stages = self.get_training_stages()
+        nonzero_stages = [s for s in stages if int(s.get("epochs", 0)) > 0]
+        default_stage = nonzero_stages[-1]["optimizer"] if nonzero_stages else None
+
+        cfg = {
+            "enabled": bool(raw.get("enabled", False)),
+            "stage": raw.get("stage", default_stage),
+            "start_epoch": raw.get("start_epoch", None),
+            "start_fraction": float(raw.get("start_fraction", 0.80)),
+            "rho": float(raw.get("rho", 0.01)),
+            "epsilon": float(raw.get("epsilon", 1.0e-12)),
+        }
+
+        if cfg["stage"] is None:
+            cfg["stage"] = default_stage
+        if cfg["stage"] is not None and cfg["stage"] not in {s["optimizer"] for s in stages}:
+            raise ValueError(
+                f"training.msam.stage={cfg['stage']!r} is not present in training.stages."
+            )
+        if not 0.0 <= cfg["start_fraction"] <= 1.0:
+            raise ValueError(
+                "training.msam.start_fraction must be between 0.0 and 1.0, "
+                f"got {cfg['start_fraction']}."
+            )
+        if cfg["start_epoch"] is not None:
+            cfg["start_epoch"] = int(cfg["start_epoch"])
+            if cfg["start_epoch"] < 0:
+                raise ValueError(
+                    "training.msam.start_epoch must be >= 0 when provided, "
+                    f"got {cfg['start_epoch']}."
+                )
+        if cfg["rho"] <= 0.0:
+            raise ValueError(
+                f"training.msam.rho must be > 0, got {cfg['rho']}."
+            )
+        if cfg["epsilon"] <= 0.0:
+            raise ValueError(
+                f"training.msam.epsilon must be > 0, got {cfg['epsilon']}."
             )
         return cfg
 

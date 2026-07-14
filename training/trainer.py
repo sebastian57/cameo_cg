@@ -23,6 +23,7 @@ from chemtrain.data.data_loaders import DataLoaders
 from config.types import PretrainResult, TrainingResults, StageResult
 from .optimizers import create_optimizer_from_config
 from .swa import SWAState, save_swa_checkpoint
+from .msam import shmap_msam_update_fn
 from .dsm import add_dsm_noise_fields, dsm_config, dsm_enabled, dsm_error, make_dsm_quantity
 from .hvp_matching import hvp_config, hvp_error, make_hvp_quantity
 from .safety_regularization import (
@@ -38,6 +39,15 @@ from .noised_residual import (
     noised_residual_config_parsed,
 )
 from .diagnostics import log_neighbor_debug_once
+from .teacher_distillation import (
+    config_parsed as teacher_distillation_config,
+    enabled as teacher_distillation_enabled,
+    error_fns as teacher_distillation_error_fns,
+    gammas as teacher_distillation_gammas,
+    quantities as teacher_distillation_quantities,
+    required_fields as teacher_distillation_required_fields,
+    weights_keys as teacher_distillation_weights_keys,
+)
 from utils.logging import training_logger
 from data.loader import build_tiled_dataset, attach_batch_metadata
 
@@ -139,6 +149,22 @@ class Trainer:
             training_logger.info(
                 "[Safety] Regularization enabled: gammas=%s",
                 {k: self.gammas[k] for k in safety_gammas(config)},
+            )
+        self._teacher_distillation_cfg = teacher_distillation_config(config)
+        if teacher_distillation_enabled(config):
+            available = self._loader_reference_data(train_loader)
+            missing = [key for key in teacher_distillation_required_fields(config) if key not in available]
+            if missing:
+                raise ValueError(
+                    "training.teacher_distillation requires dataset fields "
+                    f"{missing}; available keys: {sorted(available.keys())}"
+                )
+            self.gammas = dict(self.gammas)
+            self.gammas.update(teacher_distillation_gammas(config))
+            training_logger.info(
+                "[TeacherDistillation] enabled: feature=%s force=%s",
+                self._teacher_distillation_cfg["feature"],
+                self._teacher_distillation_cfg["force"],
             )
         self._dsm_refresh_interval_steps = int(self._dsm_cfg.get("refresh_interval_steps", 0))
         self._noised_residual_cfg = noised_residual_config_parsed(config)
@@ -1618,6 +1644,8 @@ class Trainer:
             fns["HVP"] = hvp_error
         if self._safety_cfg["enabled"]:
             fns.update(safety_error_fns(self.config))
+        if teacher_distillation_enabled(self.config):
+            fns.update(teacher_distillation_error_fns(self.config))
         return fns or None
 
     def _force_matching_weights_keys(self) -> Optional[Dict[str, str]]:
@@ -1633,6 +1661,8 @@ class Trainer:
             keys["HVP"] = str(self._hvp_cfg["loss_mask_key"])
         if self._safety_cfg["enabled"]:
             keys.update(safety_weights_keys(self.config))
+        if teacher_distillation_enabled(self.config):
+            keys.update(teacher_distillation_weights_keys(self.config))
         return keys or None
 
     def _force_matching_additional_targets(self) -> Optional[Dict[str, Callable]]:
@@ -1644,15 +1674,27 @@ class Trainer:
                 kT=float(self._dsm_cfg["kT"]),
             )
         if self._hvp_cfg["enabled"]:
-            hvp_energy_template = getattr(self.model, "hvp_energy_fn_template", None)
-            if hvp_energy_template is None:
+            hvp_template_mode = str(self._hvp_cfg.get("energy_template", "auto")).strip().lower()
+            if hvp_template_mode in ("ml", "ml_only", "residual_ml"):
                 hvp_energy_template = self.model.energy_fn_template
+            elif hvp_template_mode in ("auto", "combined", "combined_ml_prior", "total", "exported"):
+                hvp_energy_template = getattr(self.model, "hvp_energy_fn_template", None)
+                if hvp_energy_template is None:
+                    hvp_energy_template = self.model.energy_fn_template
+            else:
+                raise ValueError(
+                    "training.hvp.energy_template must be one of "
+                    "'auto', 'combined_ml_prior', or 'ml_only'; "
+                    f"got {hvp_template_mode!r}."
+                )
             targets["HVP"] = make_hvp_quantity(
                 hvp_energy_template,
                 probe_key=str(self._hvp_cfg["probe_key"]),
             )
         if self._safety_cfg["enabled"]:
             targets.update(make_safety_quantities(self.model, self.config))
+        if teacher_distillation_enabled(self.config):
+            targets.update(teacher_distillation_quantities(self.model, self.config))
         return targets or None
 
     def _loader_reference_data(self, loader: Any) -> Dict[str, Any]:
@@ -1840,6 +1882,81 @@ class Trainer:
             state.sample_epochs,
         )
 
+    def _create_msam_config_for_stage(
+        self, optimizer_name: str, epochs: int
+    ) -> Optional[Dict[str, Any]]:
+        """Return mSAM config for this stage, if enabled."""
+        cfg = self.config.get_msam_config()
+        if not cfg["enabled"] or cfg["stage"] != optimizer_name:
+            return None
+
+        if cfg["start_epoch"] is None:
+            start_epoch = int(np.ceil(float(epochs) * float(cfg["start_fraction"])))
+        else:
+            start_epoch = int(cfg["start_epoch"])
+
+        stage_cfg = dict(cfg)
+        stage_cfg["start_epoch"] = start_epoch
+        if self._grad_accum_steps <= 1:
+            training_logger.warning(
+                "[mSAM] Enabled with grad_accum_steps=%d; this runs full-batch SAM "
+                "rather than micro-batch SAM.",
+                self._grad_accum_steps,
+            )
+        training_logger.info(
+            "[mSAM] Enabled for stage=%s start_epoch=%d rho=%.6g epsilon=%.3g "
+            "grad_accum_steps=%d grad_accum_mode=%s",
+            optimizer_name,
+            start_epoch,
+            float(stage_cfg["rho"]),
+            float(stage_cfg["epsilon"]),
+            self._grad_accum_steps,
+            self._grad_accum_mode,
+        )
+        return stage_cfg
+
+    def _install_msam_update(
+        self,
+        trainer: Any,
+        optimizer: optax.GradientTransformation,
+        cfg: Dict[str, Any],
+        stage_start_epoch: int,
+    ) -> None:
+        """Attach an epoch-windowed mSAM update wrapper to a Chemtrain trainer."""
+        if getattr(trainer, "_disable_shmap", False):
+            raise NotImplementedError(
+                "training.msam currently supports Chemtrain shmap training only; "
+                "disable_shmap/pmap mode is not supported."
+            )
+
+        base_update_fn = trainer._update_fn
+        msam_update_fn = shmap_msam_update_fn(
+            trainer.batched_model,
+            trainer._loss_fn,
+            optimizer,
+            getattr(trainer, "_penalty_fn", None),
+            rho=float(cfg["rho"]),
+            epsilon=float(cfg["epsilon"]),
+        )
+        start_epoch = int(cfg["start_epoch"])
+        activated = [False]
+
+        def _msam_windowed_update_fn(*args, **kwargs):
+            stage_epoch = int(stage_start_epoch + getattr(trainer, "_epoch", 0))
+            if stage_epoch < start_epoch:
+                return base_update_fn(*args, **kwargs)
+            if not activated[0]:
+                activated[0] = True
+                training_logger.info(
+                    "[mSAM] Activating updates at stage-local epoch=%d "
+                    "(configured start_epoch=%d).",
+                    stage_epoch,
+                    start_epoch,
+                )
+            return msam_update_fn(*args, **kwargs)
+
+        trainer._update_fn = _msam_windowed_update_fn
+
     def train_stage(
         self,
         optimizer_name: str,
@@ -1871,6 +1988,7 @@ class Trainer:
         # Create optimizer
         optimizer = create_optimizer_from_config(self.config, optimizer_name)
         swa_state, swa_cfg = self._create_swa_state_for_stage(optimizer_name, epochs)
+        msam_cfg = self._create_msam_config_for_stage(optimizer_name, epochs)
 
         # Create chemtrain loaders
         t_loader_start = time.perf_counter()
@@ -1936,6 +2054,13 @@ class Trainer:
         self._install_dsm_step_refresh(trainer)
         if swa_state is not None:
             self._install_swa_sampler(trainer, swa_state, stage_start_epoch=start_epoch)
+        if msam_cfg is not None:
+            self._install_msam_update(
+                trainer,
+                optimizer,
+                msam_cfg,
+                stage_start_epoch=start_epoch,
+            )
         self._log_neighbor_debug_once()
 
         # Restore optimizer state from checkpoint if available.
@@ -2540,6 +2665,7 @@ class Trainer:
         self,
         input_path: str,
         source_key: str = "best_params",
+        partial_matching: bool = False,
     ) -> None:
         """Initialize model params from a checkpoint without resuming optimizer state."""
         input_path = Path(input_path)
@@ -2572,14 +2698,37 @@ class Trainer:
                 f"Unsupported initial params payload from {input_path}: {type(params)}"
             )
 
-        self.params = jax.tree_util.tree_map(jnp.asarray, params)
+        if partial_matching:
+            copied = [0]
+            skipped = [0]
+
+            def merge(target, source):
+                if isinstance(target, dict) and isinstance(source, dict):
+                    return {
+                        key: merge(value, source[key]) if key in source else value
+                        for key, value in target.items()
+                    }
+                if hasattr(target, "shape") and hasattr(source, "shape") and target.shape == source.shape:
+                    copied[0] += 1
+                    return jnp.asarray(source)
+                skipped[0] += 1
+                return target
+
+            self.params = merge(self.params, params)
+            training_logger.info(
+                "Partially initialized matching checkpoint tensors from %s: copied=%d skipped_or_unmatched=%d",
+                input_path, copied[0], skipped[0],
+            )
+        else:
+            self.params = jax.tree_util.tree_map(jnp.asarray, params)
         self.best_params = self.params
         self._resume_opt_state = None
         training_logger.info(
-            "Initialized model params from checkpoint %s (source_key=%s); "
+            "Initialized model params from checkpoint %s (source_key=%s, partial_matching=%s); "
             "optimizer state was not restored.",
             input_path,
             key,
+            partial_matching,
         )
 
     def get_best_params(self) -> Dict[str, Any]:

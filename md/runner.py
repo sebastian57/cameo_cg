@@ -466,6 +466,10 @@ class MDRunner:
             out_F_ml    = np.zeros((n_decomp_frames, R0.shape[0], 3), dtype=np.float32)
             out_F_prior = np.zeros((n_decomp_frames, R0.shape[0], 3), dtype=np.float32)
             out_decomp_step = np.zeros(n_decomp_frames, dtype=np.int32)
+            out_gate_combined = np.ones(n_decomp_frames, dtype=np.float32)
+            out_gate_torsion = np.ones(n_decomp_frames, dtype=np.float32)
+            out_gate_distance = np.ones(n_decomp_frames, dtype=np.float32)
+            out_gate_angular = np.ones(n_decomp_frames, dtype=np.float32)
 
         # ── Pre-allocate observable arrays ──────────────────────────────
         n_obs_frames  = self.n_steps // self.observables_every + 1
@@ -523,6 +527,10 @@ class MDRunner:
             )
             e_ml    = float(np.asarray(comps.get("E_ml", 0.0)))
             e_prior = float(np.asarray(comps.get("E_prior_total", 0.0)))
+            gate_combined = float(np.asarray(comps.get("E_ml_edge_gate_combined_structure_alpha", comps.get("E_ml_support_alpha", 1.0))))
+            gate_torsion = float(np.asarray(comps.get("E_ml_edge_gate_torsion_alpha", 1.0)))
+            gate_distance = float(np.asarray(comps.get("E_ml_edge_gate_distance_matrix_alpha", 1.0)))
+            gate_angular = float(np.asarray(comps.get("E_ml_edge_gate_angular_alpha", 1.0)))
 
             # ── force components via vjp (one forward pass, two backward) ─
             if use_priors:
@@ -548,6 +556,10 @@ class MDRunner:
             out_F_ml[idx]    = f_ml
             out_F_prior[idx] = f_prior
             out_decomp_step[idx] = step
+            out_gate_combined[idx] = gate_combined
+            out_gate_torsion[idx] = gate_torsion
+            out_gate_distance[idx] = gate_distance
+            out_gate_angular[idx] = gate_angular
 
             # Log a brief summary for the first and then every 10th decomp frame.
             if idx == 0 or idx % 10 == 0:
@@ -556,6 +568,7 @@ class MDRunner:
                 md_logger.info(
                     f"  [decomp step={step}]  E_ml={e_ml:.3f}  E_prior={e_prior:.3f} kcal/mol"
                     f"  |F_ml|_rms={f_ml_rms:.3f}  |F_prior|_rms={f_prior_rms:.3f} kcal/mol/Å"
+                    f"  gate={gate_combined:.3f} tors={gate_torsion:.3f} dist={gate_distance:.3f} ang={gate_angular:.3f}"
                 )
 
         # ── Box (static for free-space) ─────────────────────────────────
@@ -593,6 +606,10 @@ class MDRunner:
                 traj["decomp_E_prior"] = out_E_prior[:decomp_count]
                 traj["decomp_F_ml"]    = out_F_ml[:decomp_count]
                 traj["decomp_F_prior"] = out_F_prior[:decomp_count]
+                traj["decomp_gate_combined_alpha"] = out_gate_combined[:decomp_count]
+                traj["decomp_gate_torsion_alpha"] = out_gate_torsion[:decomp_count]
+                traj["decomp_gate_distance_matrix_alpha"] = out_gate_distance[:decomp_count]
+                traj["decomp_gate_angular_alpha"] = out_gate_angular[:decomp_count]
             return traj
 
         def _write_partial(traj_count, obs_count, decomp_count=0, interrupted=False):

@@ -631,8 +631,8 @@ def _extract_edge_features_for_batch(model, params: Mapping, preprocessor, box, 
 
 
 def _edge_table(edge_outputs: list[dict[str, np.ndarray]], batch: OODBatch) -> dict[str, np.ndarray]:
-    features = []
-    features_un = []
+    feature_lists: dict[str, list[np.ndarray]] = {}
+    feature_groups: dict[str, np.ndarray] = {}
     distances = []
     energies = []
     senders = []
@@ -644,8 +644,11 @@ def _edge_table(edge_outputs: list[dict[str, np.ndarray]], batch: OODBatch) -> d
         v = aux["valid_edges"].astype(bool)
         s = aux["senders"].astype(np.int32)
         r = aux["receivers"].astype(np.int32)
-        features.append(aux["edge_features"])
-        features_un.append(aux["edge_features_unenveloped"])
+        for key, value in aux.items():
+            if key.endswith("_features") or key.endswith("_features_unenveloped") or key.endswith("_features_enveloped"):
+                feature_lists.setdefault(key, []).append(np.asarray(value))
+            elif key.endswith("_feature_groups"):
+                feature_groups.setdefault(key, np.asarray(value, dtype=np.int32))
         distances.append(aux["distances"].astype(np.float32))
         energies.append(aux["per_edge_energy"].astype(np.float32))
         senders.append(s)
@@ -657,9 +660,7 @@ def _edge_table(edge_outputs: list[dict[str, np.ndarray]], batch: OODBatch) -> d
     senders_a = np.concatenate(senders)
     receivers_a = np.concatenate(receivers)
     frame_a = np.concatenate(frame)
-    return {
-        "edge_features": np.concatenate(features).astype(np.float32),
-        "edge_features_unenveloped": np.concatenate(features_un).astype(np.float32),
+    out = {
         "distances": np.concatenate(distances).astype(np.float32),
         "per_edge_energy": np.concatenate(energies).astype(np.float32),
         "senders": senders_a,
@@ -670,6 +671,12 @@ def _edge_table(edge_outputs: list[dict[str, np.ndarray]], batch: OODBatch) -> d
         "sender_types": batch.species[frame_a, np.clip(senders_a, 0, batch.species.shape[1] - 1)],
         "receiver_types": batch.species[frame_a, np.clip(receivers_a, 0, batch.species.shape[1] - 1)],
     }
+    for key, values in feature_lists.items():
+        if values:
+            out[key] = np.concatenate(values).astype(np.float32)
+    for key, value in feature_groups.items():
+        out[key] = np.asarray(value, dtype=np.int32)
+    return out
 
 
 def _center_descriptor(R: np.ndarray, mask: np.ndarray) -> np.ndarray:

@@ -180,6 +180,9 @@ class AllegroModel(BaseMLModel):
         # Keep backward compatibility with chemutils kwargs naming.
         self.allegro_config["mlp_activation"] = self.mlp_hidden_activation
         self.allegro_config["mlp_output_activation"] = self.mlp_output_activation
+        # The copied local chemutils backend hardcodes mlp_activation inside
+        # allegro_neighborlist_pp, so passing it here would duplicate the kwarg.
+        self.allegro_config.pop("mlp_activation", None)
         # Optional graph-cap controls from YAML:
         #   model.allegro.max_edge_multiplier: float (default 1.25)
         #   model.allegro.max_edges: int (default None -> inferred)

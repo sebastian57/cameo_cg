@@ -46,6 +46,7 @@ configs_further_tests/
 tiling_testing/
 full_eval/
 saved_models/
+.DS_Store
 
 # --- crash dumps / core files ---
 core.*
