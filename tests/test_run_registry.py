@@ -110,3 +110,55 @@ def test_start_is_idempotent_and_does_not_erase_launcher_fields(
     assert record["outputs"] == ["/work/run"]
     assert record["source"] == "hook"
     assert record["partition"] == "booster"
+
+
+def test_render_orders_active_before_recent_and_escapes_tables(
+    registry: Registry,
+):
+    registry.start(
+        {
+            "identity": "11",
+            "job_id": "11",
+            "state": "RUNNING",
+            "run_type": "md",
+            "description": "A | B",
+            "outputs": ["/work/md", "/work/log"],
+            "source": "hook",
+        }
+    )
+    registry.start(
+        {
+            "identity": "10",
+            "job_id": "10",
+            "state": "RUNNING",
+            "run_type": "training",
+            "description": "done",
+            "outputs": [],
+            "source": "hook",
+        }
+    )
+    registry.finish("10", 0, "2026-08-10T12:00:00+00:00")
+
+    rendered = registry.render()
+
+    assert rendered.index("## Active runs") < rendered.index("## Recent runs")
+    assert "A \\| B" in rendered
+    assert "/work/md<br>/work/log" in rendered
+    assert "| 10 | COMPLETED |" in rendered
+    assert registry.markdown_path.read_text() == rendered
+
+
+def test_status_summarizes_states_and_show_returns_decoded_record(
+    registry: Registry,
+):
+    registry.start(
+        {
+            "identity": "21",
+            "job_id": "21",
+            "state": "PENDING",
+            "tags": ["queued"],
+            "source": "discovered",
+        }
+    )
+
+    assert registry.status() == "1 active, 0 completed, 0 failed/cancelled"

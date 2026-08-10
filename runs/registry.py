@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import getpass
 import json
 import os
 import sqlite3
+import tempfile
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -206,6 +208,76 @@ class Registry:
             if cursor.rowcount == 0:
                 raise KeyError(f"unknown run identity: {identity}")
 
+    def show(self, identity: str) -> dict[str, Any] | None:
+        return self.get(identity)
+
+    def status(self) -> str:
+        records = self.all()
+        active = sum(record["state"] in {"PENDING", "RUNNING", "UNKNOWN"} for record in records)
+        completed = sum(record["state"] == "COMPLETED" for record in records)
+        failed = len(records) - active - completed
+        return f"{active} active, {completed} completed, {failed} failed/cancelled"
+
+    @staticmethod
+    def _markdown_value(value: object) -> str:
+        if value in (None, "", []):
+            return "—"
+        if isinstance(value, list):
+            return "<br>".join(Registry._markdown_value(item) for item in value)
+        return str(value).replace("|", "\\|").replace("\n", " ")
+
+    def render(self) -> str:
+        records = self.all()
+        active_states = {"PENDING", "RUNNING", "UNKNOWN"}
+        active = sorted(
+            (record for record in records if record["state"] in active_states),
+            key=lambda record: (record.get("parent_job_id") or record["identity"], record["identity"]),
+        )
+        recent = sorted(
+            (record for record in records if record["state"] not in active_states),
+            key=lambda record: record.get("finished_at") or "",
+            reverse=True,
+        )
+        lines = [
+            "# Run Registry",
+            "",
+            f"_Updated: {utc_now()}_",
+            "",
+            "## Active runs",
+            "",
+            "| Job | Type | User | Started | Description | Output |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ]
+        for record in active:
+            values = [
+                record["identity"], record.get("run_type"), record.get("user"),
+                record.get("started_at") or record.get("submitted_at"),
+                record.get("description") or record.get("job_name"), record.get("outputs"),
+            ]
+            lines.append("| " + " | ".join(self._markdown_value(value) for value in values) + " |")
+        lines.extend([
+            "", "## Recent runs", "",
+            "| Job | Status | Started | Finished | Description | Output |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ])
+        for record in recent:
+            values = [
+                record["identity"], record.get("state"), record.get("started_at"),
+                record.get("finished_at"), record.get("description") or record.get("job_name"),
+                record.get("outputs"),
+            ]
+            lines.append("| " + " | ".join(self._markdown_value(value) for value in values) + " |")
+        rendered = "\n".join(lines) + "\n"
+        self.markdown_path.parent.mkdir(parents=True, exist_ok=True)
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.lock_path.open("a+") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            with tempfile.NamedTemporaryFile("w", dir=self.markdown_path.parent, delete=False) as tmp:
+                tmp.write(rendered)
+                temporary_path = Path(tmp.name)
+            temporary_path.replace(self.markdown_path)
+        return rendered
+
 
 def default_registry() -> Registry:
     return Registry(
@@ -268,6 +340,10 @@ def build_parser() -> argparse.ArgumentParser:
     finish = subparsers.add_parser("finish")
     finish.add_argument("--identity", required=True)
     finish.add_argument("--exit-code", required=True, type=int)
+    subparsers.add_parser("render")
+    subparsers.add_parser("status")
+    show = subparsers.add_parser("show")
+    show.add_argument("identity")
     return parser
 
 
@@ -276,9 +352,21 @@ def main(argv: list[str] | None = None) -> int:
     registry = default_registry()
     if args.command == "start":
         registry, identity = _start_record(args)
+        registry.render()
         print(identity)
     elif args.command == "finish":
         registry.finish(args.identity, args.exit_code)
+        registry.render()
+    elif args.command == "render":
+        registry.render()
+    elif args.command == "status":
+        print(registry.status())
+    elif args.command == "show":
+        record = registry.show(args.identity)
+        if record is None:
+            print(f"Run not found: {args.identity}", file=os.sys.stderr)
+            return 1
+        print(json.dumps(record, indent=2, sort_keys=True))
     return 0
 
 
