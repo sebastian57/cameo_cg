@@ -1,0 +1,53 @@
+# Portable multi-replica MD example derived from a recent production run.
+# Supply a trained checkpoint and a dataset containing at least eight frames.
+
+md:
+  units: physical
+
+  training_config_path: configs/example_training.yaml
+  params_path: local_work/outputs/example_training/checkpoints/example_checkpoint.pkl
+
+  dataset_path: local_work/input_data/example_md_starting_structures.npz
+  frame_indices:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    - 6
+    - 7
+
+  zero_com_velocity: true
+
+  equilibrate:   false
+  n_equil_steps: 0
+
+  integrator: nvt_langevin
+  n_steps:    1500000
+  dt:         2.0
+  kT:         298.0
+  gamma:      5.0
+
+  mass: [12.011, 14.007, 12.011, 12.011, 12.011, 14.007]
+
+  output_dir: local_work/md_runs/example_md
+  output_filename: trajectory.npz
+  output_every:    100
+
+  n_replicas: 8
+  seed:       42
+
+  continuous_output:       false
+  continuous_output_every: 10
+
+  observables_every: 50
+  observables:
+    - step
+    - T
+    - KE
+    - PE
+    - E_total
+
+  dump_for_ovito: false
+  dump_padding:   20.0

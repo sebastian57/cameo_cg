@@ -208,6 +208,7 @@ class MLModelConfig(TypedDict, total=False):
     avg_num_neighbors: int
     max_edge_multiplier: float
     max_edges: int
+    neighbor_capacity_multiplier: float
     neighbor_extra_capacity: int
 
 

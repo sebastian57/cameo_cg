@@ -12,6 +12,12 @@
 #   CUDA_HOME, LD_LIBRARY_PATH, XLA_FLAGS, NCCL_*, XLA_PYTHON_CLIENT_*
 # =============================================================================
 
+# Disable core dumps — they can be gigabytes and fill small filesystems.
+# Override with CORE_DUMP_ENABLED=1 if you need to debug a crash.
+if [[ "${CORE_DUMP_ENABLED:-0}" != "1" ]]; then
+    ulimit -c 0
+fi
+
 if [[ -z "${CONFIG_FILE:-}" ]]; then
     echo "ERROR: CONFIG_FILE must be set before sourcing slurm_env.sh" >&2
     return 1 2>/dev/null || exit 1

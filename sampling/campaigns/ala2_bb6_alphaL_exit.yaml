@@ -1,0 +1,58 @@
+# alphaL EXIT KINETICS -- unbiased AA MD seeded INSIDE alphaL.
+#
+# Purpose: characterise the main<->alphaL transition, which the 500 ns reference resolves
+# far too poorly to bias on. Measured there: only 51 beta<->alphaL and 5 alphaR<->alphaL
+# crossings, every one with a median duration of ONE 5 ps frame. C(s) for that channel is
+# therefore built from single-frame observations and cannot support an acquisition bias.
+#
+# Design follows the measured alphaL residence time (median 115 ps, mean 148 ps over 51
+# visits): each replica realistically gets ONE exit, so many short replicas beat a few
+# long ones. 24 x 1 ns -> ~24 exits, each resolved at 0.05 ps instead of 5 ps, i.e. ~300
+# frames per crossing rather than 1.
+#
+# NO BIAS. `biases: []` is legal and yields zero force; the whole socket/server path still
+# runs, so this doubles as an unbiased control for the pipeline. The exits must be the
+# force field's own, not a bias artefact -- biasing here would beg the question.
+name: ala2_bb6_alphaL_exit
+mapping: ala2_backbone_cb_6
+output_dir: /e/project1/cameo/schmidt36/cameo_cg/local_work/sampling_runs/ala2_bb6_alphaL_exit
+n_replicas: 24
+
+structure:
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_alphaL/start_00.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_alphaL/start_01.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_alphaL/start_02.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_alphaL/start_03.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_alphaL/start_04.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_alphaL/start_05.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_alphaL/start_06.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_alphaL/start_07.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_alphaL/start_08.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_alphaL/start_09.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_alphaL/start_10.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_alphaL/start_11.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_alphaL/start_12.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_alphaL/start_13.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_alphaL/start_14.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_alphaL/start_15.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_alphaL/start_16.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_alphaL/start_17.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_alphaL/start_18.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_alphaL/start_19.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_alphaL/start_20.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_alphaL/start_21.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_alphaL/start_22.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_alphaL/start_23.gro
+topology: /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/ala2_constrained/topol.top
+mdp:      /e/project1/cameo/schmidt36/cameo_cg/sampling/campaigns/alphaL_exit_298K.mdp
+
+recompute_stride: 5
+socket_dir: /tmp
+ntomp: 8
+print_stride: 25          # 0.05 ps, matching nstxout: exits resolved in colvar.dat too
+report_every: 5000
+monitor_cvs: [phi, psi, chirality]
+socket_timeout_s: 600.0
+min_discard_ps: 0.0       # do NOT discard: the exit may happen in the first few ps
+
+biases: []                # unbiased by design

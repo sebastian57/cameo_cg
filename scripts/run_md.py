@@ -37,8 +37,10 @@ if "JAX_PLATFORMS" not in os.environ:
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Must happen before any jax_md imports.
-from utils.jax_setup import apply_jax_compat_shims
+from utils.jax_setup import apply_jax_compat_shims, assert_gpu_when_allocated
 apply_jax_compat_shims()
+# Fail fast on the silent CUDA-init CPU fallback (see BUGS/2026-07-31_silent-gpu-fallback).
+assert_gpu_when_allocated("MD")
 
 import yaml
 import jax
@@ -50,6 +52,7 @@ from data.loader import DatasetLoader
 from data.preprocessor import CoordinatePreprocessor
 from models.combined_model import CombinedModel
 from md.runner import MDRunner
+from md.bias import BiasedEnergyModel, build_bias
 from md.units import to_akma
 from md.dump import write_lammps_dump
 from training.path_utils import repo_root_from_file, resolve_from_config_or_repo
@@ -129,11 +132,19 @@ def _save_outputs(
     """Save trajectory NPZ, observables CSV, and optional OVITO dump."""
     np.savez(str(output_path), **{k: np.asarray(v) for k, v in traj.items()})
     md_logger.info(f"Trajectory saved: {output_path}")
-    md_logger.info(
-        f"Frames: {traj['R'].shape[0]}  "
-        f"T_mean={float(np.mean(traj['T'])):.1f} K  "
-        f"PE_mean={float(np.mean(traj['PE'])):.3f} kcal/mol"
-    )
+    energy_available = bool(np.asarray(traj.get("energy_available", True)).item())
+    if energy_available:
+        md_logger.info(
+            f"Frames: {traj['R'].shape[0]}  "
+            f"T_mean={float(np.mean(traj['T'])):.1f} K  "
+            f"PE_mean={float(np.mean(traj['PE'])):.3f} kcal/mol"
+        )
+    else:
+        md_logger.info(
+            f"Frames: {traj['R'].shape[0]}  "
+            f"T_mean={float(np.mean(traj['T'])):.1f} K  "
+            "PE unavailable (direct-force model)"
+        )
 
     # Observables CSV
     obs_keys = [k for k in md_cfg.get("observables", []) if f"obs_{k}" in traj]
@@ -309,6 +320,14 @@ def main(config_file: str, job_id: str = None, replica_idx: int = None) -> None:
             "[Config] cell_list=true: cell list enabled for neighbor search "
             "(overrides training config neighbor_disable_cell_list=True)."
         )
+    if md_cfg.get("disable_cell_list", False):
+        if md_cfg.get("cell_list", False):
+            raise ValueError("md.cell_list and md.disable_cell_list cannot both be true.")
+        training_config.set("model", "neighbor_disable_cell_list", True)
+        md_logger.info(
+            "[Config] disable_cell_list=true: using deterministic all-pairs "
+            "neighbor candidates (recommended for very small direct-force MD)."
+        )
 
     # ------------------------------------------------------------------
     # 2. Load initial conditions from dataset.
@@ -393,6 +412,23 @@ def main(config_file: str, job_id: str = None, replica_idx: int = None) -> None:
         support_gate_bank=support_gate_bank,
     )
     md_logger.info(f"Model: {model}")
+
+    sampling_bias = build_bias(md_cfg.get("bias"))
+    if sampling_bias is not None:
+        if training_config.get_model_output_mode() == "direct_force":
+            raise ValueError(
+                "Sampling energy biases are unavailable for direct-force MD: "
+                "the trained model has no scalar potential to combine with the bias."
+            )
+        if max(sampling_bias.indices) >= loader.N_max:
+            raise ValueError(
+                f"Bias index {max(sampling_bias.indices)} is out of range for N={loader.N_max}."
+            )
+        if sampling_bias.k_kcal_per_mol_rad2 > 0.0:
+            model = BiasedEnergyModel(model, sampling_bias)
+        else:
+            md_logger.info("Zero-strength sampling bias: using exact unmodified model path.")
+        md_logger.info("Sampling bias: %s", sampling_bias.metadata())
 
     # ------------------------------------------------------------------
     # 4. Load trained params.
@@ -491,6 +527,21 @@ def main(config_file: str, job_id: str = None, replica_idx: int = None) -> None:
 
         rng  = jax.random.PRNGKey(replica_seed)
         traj = runner.run(R0_i, mask_i, species_i, rng)
+        if sampling_bias is not None:
+            R_saved = jnp.asarray(traj["R"])
+            cv_deg = jax.vmap(sampling_bias.cv_degrees)(R_saved)
+            e_bias = jax.vmap(sampling_bias.energy)(R_saved)
+            traj["bias_cv_deg"] = np.asarray(cv_deg, dtype=np.float32)
+            traj["bias_energy"] = np.asarray(e_bias, dtype=np.float32)
+            traj["PE_ml"] = np.asarray(traj["PE"] - traj["bias_energy"], dtype=np.float32)
+            meta = sampling_bias.metadata()
+            traj["bias_type"] = np.asarray(meta["bias_type"])
+            traj["bias_indices"] = np.asarray(meta["bias_indices"], dtype=np.int32)
+            traj["bias_center_deg"] = np.asarray(meta["bias_center_deg"], dtype=np.float32)
+            traj["bias_shift_deg"] = np.asarray(meta["bias_shift_deg"], dtype=np.float32)
+            traj["bias_k_kcal_per_mol_rad2"] = np.asarray(
+                meta["bias_k_kcal_per_mol_rad2"], dtype=np.float32
+            )
         traj["initial_frame_idx"] = np.asarray(start_frame_idx, dtype=np.int32)
         if hasattr(loader, "raw_data") and isinstance(getattr(loader, "raw_data"), dict):
             source_indices = loader.raw_data.get("source_indices")

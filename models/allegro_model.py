@@ -107,7 +107,15 @@ class AllegroModel(BaseMLModel):
         )
         self._neighbor_disable_cell_list = bool(config.neighbor_disable_cell_list_enabled())
 
-        self.allegro_config = config.get_allegro_config()
+        self.allegro_config = dict(config.get_allegro_config())
+        self._neighbor_capacity_multiplier = float(
+            self.allegro_config.pop("neighbor_capacity_multiplier", 1.25)
+        )
+        if self._neighbor_capacity_multiplier < 1.0:
+            raise ValueError(
+                "neighbor_capacity_multiplier must be >= 1.0, got "
+                f"{self._neighbor_capacity_multiplier}."
+            )
         self._pad_spacing = jnp.asarray(
             self.cutoff + self.dr_threshold + 1.0, dtype=self.compute_dtype
         )
@@ -135,6 +143,7 @@ class AllegroModel(BaseMLModel):
             box=safe_box,
             r_cutoff=self.cutoff,
             dr_threshold=self.dr_threshold,
+            capacity_multiplier=self._neighbor_capacity_multiplier,
             fractional_coordinates=False,
             disable_cell_list=self._neighbor_disable_cell_list,
             format=self.neighbor_list_format,
@@ -154,7 +163,6 @@ class AllegroModel(BaseMLModel):
         R0_safe = jnp.asarray(R0, dtype=self.compute_dtype)
 
         # Allocate initial neighbor list
-        self.allegro_config = dict(self.allegro_config)
         self._neighbor_extra_capacity = int(
             self.allegro_config.pop("neighbor_extra_capacity", 10)
         )

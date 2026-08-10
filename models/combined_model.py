@@ -82,6 +82,8 @@ class CombinedModel:
             min_repulsive_sep=config.get_min_repulsive_sep(),
         )
         self.ml_model_type = config.get_ml_model_type()
+        self.output_mode = config.get_model_output_mode()
+        self.direct_force_enabled = self.output_mode == "direct_force"
 
         # cuEq variants need lazy import to trigger registration
         if self.ml_model_type in ("allegro_cueq", "allegro_cueq_fast"):
@@ -375,6 +377,8 @@ class CombinedModel:
         Returns:
             Total energy (scalar)
         """
+        if self.direct_force_enabled:
+            raise RuntimeError("Direct-force teacher models do not define an energy.")
         if self.prior_only:
             if not self.use_priors:
                 raise ValueError("prior_only=True requires use_priors=True in config")
@@ -415,6 +419,31 @@ class CombinedModel:
             return alpha * E_ml + self.prior_energy_scale * E_prior
         else:
             return E_ml
+
+    def compute_direct_force(
+        self,
+        params: Dict[str, Any],
+        R: jax.Array,
+        mask: jax.Array,
+        species: jax.Array,
+        neighbor: Optional[Any] = None,
+        segment_id: Optional[jax.Array] = None,
+    ) -> jax.Array:
+        """Return ML-only direct forces for teacher training/inference."""
+        if not self.direct_force_enabled:
+            raise RuntimeError("compute_direct_force requires model.output_mode=direct_force.")
+        if self.use_priors:
+            raise RuntimeError(
+                "Direct-force teachers are ML-only; train against prior-residual labels instead."
+            )
+        return self.ml_model.compute_direct_force(
+            params["ml"],
+            R,
+            mask,
+            species,
+            neighbor,
+            segment_id=segment_id,
+        )
 
     def compute_total_energy(
         self,
@@ -701,6 +730,40 @@ class CombinedModel:
             return E
 
         return energy_fn
+
+    def zero_energy_fn_template(self, params: Dict[str, Any]):
+        """Chemtrain compatibility template for force-only teacher models."""
+        del params
+
+        def energy_fn(R: jax.Array, neighbor: Any, **kwargs) -> jax.Array:
+            del neighbor, kwargs
+            return jnp.zeros((), dtype=R.dtype)
+
+        return energy_fn
+
+    def direct_force_quantity(
+        self,
+        state,
+        neighbor=None,
+        energy_params=None,
+        mask=None,
+        species=None,
+        segment_id=None,
+        **kwargs,
+    ) -> jax.Array:
+        """Chemtrain quantity overriding its default energy-gradient force."""
+        del kwargs
+        if mask is None or species is None:
+            raise ValueError("Direct-force quantity requires mask and species.")
+        species = jnp.where(mask > 0, species, 0).astype(jnp.int32)
+        return self.compute_direct_force(
+            energy_params,
+            state.position,
+            mask,
+            species,
+            neighbor=neighbor,
+            segment_id=segment_id,
+        )
 
     def dsm_energy_fn_template(self, params: Dict[str, Any]):
         """

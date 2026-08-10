@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Union
 import csv
 import pickle
+import sys
 
 import jax
 import jax.numpy as jnp
@@ -14,6 +15,22 @@ import optax
 from jax_md import simulate
 
 from mc.config import HMCConfig, MALAConfig
+from utils.logging import training_logger
+
+
+@dataclass(frozen=True)
+class RelativeEntropyRolloutStage:
+    """Piecewise-constant MD effort for a range of REM iterations."""
+
+    start_iteration: int
+    steps_per_iteration: int
+    burn_in_steps: int
+    sample_stride: int
+
+    @property
+    def retained_samples_per_replica(self) -> int:
+        remaining = int(self.steps_per_iteration) - int(self.burn_in_steps)
+        return max(remaining, 0) // int(self.sample_stride)
 
 
 @dataclass(frozen=True)
@@ -34,7 +51,20 @@ class RelativeEntropyConfig:
     kT: float = 0.636
     gamma: float = 0.000977
     mass: Union[float, tuple] = 12.011
+    barrier_penalty_enabled: bool = False
+    barrier_penalty_weight: float = 0.0
+    barrier_penalty_v0: float = 1.3
+    barrier_penalty_indices: tuple = (0, 1, 2, 3)
     start_frame_mode: str = "reference_random"
+    persistent_chains: bool = False
+    initial_state_data_path: Optional[str] = None
+    initial_state_phi_targets_deg: tuple = ()
+    initial_state_phi_indices: tuple = (0, 1, 2, 3)
+    initial_state_phi_shift_deg: float = 180.0
+    initial_state_cv_targets_deg: tuple = ()
+    initial_state_cv_indices: tuple = ()
+    initial_state_cv_shift_deg: tuple = ()
+    rollout_schedule: tuple = ()
     checkpoint_freq: int = 10
     max_force: float = 1.0e4
     min_pair_distance: float = 1.5
@@ -44,6 +74,10 @@ class RelativeEntropyConfig:
     optimizer_gradient_scale: float = 1.0
     gradient_batch_size: int = 0
     diagnostics_interval: int = 1
+    trainable_param_substring: Optional[str] = None
+    chirality_diagnostics_enabled: bool = False
+    chirality_diagnostics_indices: tuple = (0, 1, 2, 3)
+    chirality_diagnostics_planar_threshold: float = 1.3
     mc_mala: Optional[MALAConfig] = None
 
     @property
@@ -68,6 +102,23 @@ class RelativeEntropyConfig:
         if self.sampler == "mc_mala" and self.mc_mala is not None:
             return int(self.mc_mala.n_chains)
         return int(self.n_replicas)
+
+    def rollout_for_iteration(self, iteration: int) -> RelativeEntropyRolloutStage:
+        """Return the active rollout settings for one zero-based iteration."""
+
+        if not self.rollout_schedule:
+            return RelativeEntropyRolloutStage(
+                start_iteration=0,
+                steps_per_iteration=int(self.steps_per_iteration),
+                burn_in_steps=int(self.burn_in_steps),
+                sample_stride=int(self.sample_stride),
+            )
+        active = self.rollout_schedule[0]
+        for stage in self.rollout_schedule[1:]:
+            if int(stage.start_iteration) > int(iteration):
+                break
+            active = stage
+        return active
 
 
 def _positive_int(name: str, value: Any) -> int:
@@ -128,7 +179,37 @@ def relative_entropy_config(config) -> RelativeEntropyConfig:
         kT=_positive_float("kT", cfg.get("kT", 0.636)),
         gamma=_positive_float("gamma", cfg.get("gamma", 0.000977)),
         mass=cfg.get("mass", 12.011),
+        barrier_penalty_enabled=bool((cfg.get("barrier_penalty") or {}).get("enabled", False)),
+        barrier_penalty_weight=float((cfg.get("barrier_penalty") or {}).get("weight", 0.0)),
+        barrier_penalty_v0=float((cfg.get("barrier_penalty") or {}).get("v0", 1.3)),
+        barrier_penalty_indices=tuple(
+            int(i) for i in ((cfg.get("barrier_penalty") or {}).get("indices", [0, 1, 2, 3]))
+        ),
         start_frame_mode=str(cfg.get("start_frame_mode", "reference_random")).strip().lower(),
+        persistent_chains=bool(cfg.get("persistent_chains", False)),
+        initial_state_data_path=(
+            str(cfg["initial_state_data_path"])
+            if cfg.get("initial_state_data_path") is not None
+            else None
+        ),
+        initial_state_phi_targets_deg=tuple(
+            float(x) for x in (cfg.get("initial_state_phi_targets_deg", []) or [])
+        ),
+        initial_state_phi_indices=tuple(
+            int(x) for x in (cfg.get("initial_state_phi_indices", [0, 1, 2, 3]) or [])
+        ),
+        initial_state_phi_shift_deg=float(cfg.get("initial_state_phi_shift_deg", 180.0)),
+        initial_state_cv_targets_deg=tuple(
+            tuple(float(value) for value in target)
+            for target in (cfg.get("initial_state_cv_targets_deg", []) or [])
+        ),
+        initial_state_cv_indices=tuple(
+            tuple(int(value) for value in indices)
+            for indices in (cfg.get("initial_state_cv_indices", []) or [])
+        ),
+        initial_state_cv_shift_deg=tuple(
+            float(value) for value in (cfg.get("initial_state_cv_shift_deg", []) or [])
+        ),
         checkpoint_freq=_nonnegative_int("checkpoint_freq", cfg.get("checkpoint_freq", 10)),
         max_force=_positive_float("max_force", cfg.get("max_force", 1.0e4)),
         min_pair_distance=_positive_float(
@@ -144,8 +225,73 @@ def relative_entropy_config(config) -> RelativeEntropyConfig:
         diagnostics_interval=_positive_int(
             "diagnostics_interval", cfg.get("diagnostics_interval", 1)
         ),
+        trainable_param_substring=(
+            str(cfg["trainable_param_substring"])
+            if cfg.get("trainable_param_substring")
+            else None
+        ),
+        chirality_diagnostics_enabled=bool(
+            (cfg.get("chirality_diagnostics") or {}).get("enabled", False)
+        ),
+        chirality_diagnostics_indices=tuple(
+            int(i)
+            for i in (cfg.get("chirality_diagnostics") or {}).get(
+                "indices", [0, 1, 2, 3]
+            )
+        ),
+        chirality_diagnostics_planar_threshold=_positive_float(
+            "chirality_diagnostics.planar_threshold",
+            (cfg.get("chirality_diagnostics") or {}).get("planar_threshold", 1.3),
+        ),
         mc_mala=None,
     )
+
+    schedule_raw = cfg.get("rollout_schedule", []) or []
+    if not isinstance(schedule_raw, list):
+        raise ValueError("training.relative_entropy.rollout_schedule must be a list.")
+    rollout_schedule = []
+    for index, item in enumerate(schedule_raw):
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"training.relative_entropy.rollout_schedule[{index}] must be a mapping."
+            )
+        rollout_schedule.append(
+            RelativeEntropyRolloutStage(
+                start_iteration=_nonnegative_int(
+                    f"rollout_schedule[{index}].start_iteration",
+                    item.get("start_iteration", 0),
+                ),
+                steps_per_iteration=_positive_int(
+                    f"rollout_schedule[{index}].steps_per_iteration",
+                    item.get("steps_per_iteration", parsed.steps_per_iteration),
+                ),
+                burn_in_steps=_nonnegative_int(
+                    f"rollout_schedule[{index}].burn_in_steps",
+                    item.get("burn_in_steps", parsed.burn_in_steps),
+                ),
+                sample_stride=_positive_int(
+                    f"rollout_schedule[{index}].sample_stride",
+                    item.get("sample_stride", parsed.sample_stride),
+                ),
+            )
+        )
+    if rollout_schedule:
+        starts = [stage.start_iteration for stage in rollout_schedule]
+        if starts[0] != 0 or starts != sorted(set(starts)):
+            raise ValueError(
+                "training.relative_entropy.rollout_schedule must start at iteration 0 "
+                "and have unique, increasing start_iteration values."
+            )
+        if starts[-1] >= parsed.iterations:
+            raise ValueError(
+                "The final rollout_schedule start_iteration must be smaller than iterations."
+            )
+        for stage in rollout_schedule:
+            if stage.retained_samples_per_replica <= 0:
+                raise ValueError(
+                    "Every rollout_schedule stage must retain at least one sample per replica."
+                )
+        parsed = replace(parsed, rollout_schedule=tuple(rollout_schedule))
 
     if parsed.sampler not in {"md_langevin", "mc_mala", "mc_hmc"}:
         raise ValueError(
@@ -218,10 +364,69 @@ def relative_entropy_config(config) -> RelativeEntropyConfig:
             f"got steps_per_iteration={parsed.steps_per_iteration}, "
             f"burn_in_steps={parsed.burn_in_steps}, sample_stride={parsed.sample_stride}."
         )
-    if parsed.start_frame_mode != "reference_random":
+    if parsed.start_frame_mode not in {
+        "reference_random",
+        "configured_phi_targets",
+        "configured_cv_targets",
+    }:
         raise ValueError(
-            "training.relative_entropy.start_frame_mode currently supports only "
-            f"'reference_random', got {parsed.start_frame_mode!r}."
+            "training.relative_entropy.start_frame_mode must be 'reference_random', "
+            "'configured_phi_targets', or 'configured_cv_targets'; "
+            f"got {parsed.start_frame_mode!r}."
+        )
+    if parsed.start_frame_mode == "configured_phi_targets":
+        if not parsed.initial_state_data_path:
+            raise ValueError(
+                "training.relative_entropy.initial_state_data_path is required for "
+                "start_frame_mode='configured_phi_targets'."
+            )
+        if len(parsed.initial_state_phi_indices) != 4:
+            raise ValueError(
+                "training.relative_entropy.initial_state_phi_indices must contain four indices."
+            )
+        if len(parsed.initial_state_phi_targets_deg) != parsed.model_start_count:
+            raise ValueError(
+                "training.relative_entropy.initial_state_phi_targets_deg must contain exactly "
+                f"model_start_count={parsed.model_start_count} targets, got "
+                f"{len(parsed.initial_state_phi_targets_deg)}."
+            )
+    if parsed.start_frame_mode == "configured_cv_targets":
+        if not parsed.initial_state_data_path:
+            raise ValueError(
+                "training.relative_entropy.initial_state_data_path is required for "
+                "start_frame_mode='configured_cv_targets'."
+            )
+        n_cvs = len(parsed.initial_state_cv_indices)
+        if n_cvs < 1 or any(len(indices) != 4 for indices in parsed.initial_state_cv_indices):
+            raise ValueError(
+                "training.relative_entropy.initial_state_cv_indices must contain one or more "
+                "four-index dihedral definitions."
+            )
+        if len(parsed.initial_state_cv_shift_deg) not in {0, n_cvs}:
+            raise ValueError(
+                "training.relative_entropy.initial_state_cv_shift_deg must be empty or contain "
+                "one shift per configured CV."
+            )
+        if len(parsed.initial_state_cv_targets_deg) != parsed.model_start_count:
+            raise ValueError(
+                "training.relative_entropy.initial_state_cv_targets_deg must contain exactly "
+                f"model_start_count={parsed.model_start_count} targets."
+            )
+        if any(len(target) != n_cvs for target in parsed.initial_state_cv_targets_deg):
+            raise ValueError(
+                "Every initial_state_cv_targets_deg row must contain one value per configured CV."
+            )
+    if parsed.persistent_chains and parsed.sampler != "md_langevin":
+        raise ValueError(
+            "training.relative_entropy.persistent_chains currently requires sampler='md_langevin'."
+        )
+    if parsed.rollout_schedule and parsed.sampler != "md_langevin":
+        raise ValueError(
+            "training.relative_entropy.rollout_schedule currently requires sampler='md_langevin'."
+        )
+    if parsed.chirality_diagnostics_enabled and len(parsed.chirality_diagnostics_indices) != 4:
+        raise ValueError(
+            "training.relative_entropy.chirality_diagnostics.indices must contain four indices."
         )
     return parsed
 
@@ -252,6 +457,45 @@ def extract_params_from_checkpoint_payload(payload_or_path: Any) -> Dict[str, An
             f"Got {type(params)!r}."
         )
     return jax.tree_util.tree_map(jnp.asarray, params)
+
+
+def _parameter_path_tokens(path):
+    return tuple(
+        getattr(entry, "key", getattr(entry, "idx", getattr(entry, "name", str(entry))))
+        for entry in path
+    )
+
+
+def merge_matching_parameter_trees(source: Any, initialized: Any):
+    """Reuse same-path, same-shape checkpoint leaves and keep new initialization."""
+    source_leaves = {
+        _parameter_path_tokens(path): leaf
+        for path, leaf in jax.tree_util.tree_flatten_with_path(source)[0]
+    }
+    counts = {"reused_leaves": 0, "initialized_leaves": 0}
+
+    def choose(path, target):
+        source_leaf = source_leaves.get(_parameter_path_tokens(path))
+        if source_leaf is not None and jnp.shape(source_leaf) == jnp.shape(target):
+            counts["reused_leaves"] += 1
+            return jnp.asarray(source_leaf, dtype=getattr(target, "dtype", None))
+        counts["initialized_leaves"] += 1
+        return target
+
+    return jax.tree_util.tree_map_with_path(choose, initialized), counts
+
+
+def mask_parameter_tree_by_substring(tree: Any, substring: str):
+    """Keep leaves whose parameter path contains substring; zero all others."""
+    token = str(substring)
+    if not token:
+        return tree
+
+    def mask(path, leaf):
+        path_text = "/".join(str(part) for part in _parameter_path_tokens(path))
+        return leaf if token in path_text else jnp.zeros_like(leaf)
+
+    return jax.tree_util.tree_map_with_path(mask, tree)
 
 
 def apply_ml_updates(params: Dict[str, Any], ml_updates: Any) -> Dict[str, Any]:
@@ -358,6 +602,83 @@ def relative_entropy_gradient(
     return grad, metrics
 
 
+def signed_volume(R: jax.Array, indices: Sequence[int]) -> jax.Array:
+    """Parity-ODD scalar: (r1-r0) x (r2-r1) . (r3-r2) for a bead quadruple.
+
+    Flips sign under reflection, so |V| ~ 0 marks the planar transition state that
+    separates a chiral conformation from its mirror image.
+    """
+    i0, i1, i2, i3 = (int(i) for i in indices)
+    a = R[..., i1, :] - R[..., i0, :]
+    b = R[..., i2, :] - R[..., i1, :]
+    c = R[..., i3, :] - R[..., i2, :]
+    return jnp.sum(jnp.cross(a, b) * c, axis=-1)
+
+
+def chirality_population_metrics(
+    R: jax.Array,
+    indices: Sequence[int],
+    planar_threshold: float,
+) -> Dict[str, jax.Array]:
+    """Summarize signed-volume branch populations for a coordinate batch."""
+    volume = signed_volume(R, indices)
+    return {
+        "signed_volume_mean": jnp.mean(volume),
+        "signed_volume_min": jnp.min(volume),
+        "signed_volume_max": jnp.max(volume),
+        "fraction_positive": jnp.mean((volume > 0.0).astype(jnp.float32)),
+        "fraction_negative": jnp.mean((volume < 0.0).astype(jnp.float32)),
+        "fraction_near_planar": jnp.mean(
+            (jnp.abs(volume) < float(planar_threshold)).astype(jnp.float32)
+        ),
+    }
+
+
+def barrier_penalty_weights(R: jax.Array, indices: Sequence[int], v0: float) -> jax.Array:
+    """Per-sample penalty w = relu(v0 - |V|)^2 . Zero unless a sample is near-planar.
+
+    |V| is parity-EVEN, so this is representable by a parity-invariant model: it raises
+    the mirror-interconversion barrier without needing to tell the two basins apart
+    (which an O(3)-invariant energy provably cannot do). The reference ensemble has zero
+    density below v0, so the term does not distort the relative-entropy target.
+    """
+    v = jnp.abs(signed_volume(R, indices))
+    return jnp.square(jax.nn.relu(float(v0) - v))
+
+
+def barrier_penalty_gradient(
+    ml_params,
+    R_model,
+    mask_model,
+    species_model,
+    energy_fn,
+    weights: jax.Array,
+    beta: float,
+    weight_scale: float,
+):
+    """d/dtheta of lambda * <w>_model, via the covariance identity
+
+        d<w>/dtheta = -beta * ( <w dU/dtheta> - <w><dU/dtheta> )
+
+    computed as the gradient of a surrogate scalar with w held constant.
+    """
+    R_model = jax.lax.stop_gradient(jnp.asarray(R_model))
+    mask_model = jax.lax.stop_gradient(jnp.asarray(mask_model))
+    species_model = jax.lax.stop_gradient(jnp.asarray(species_model))
+    w = jax.lax.stop_gradient(jnp.asarray(weights))
+    w_centered = w - jnp.mean(w)
+
+    def surrogate(params):
+        energies = jax.vmap(
+            lambda r, m, sp: energy_fn(params, r, m, sp)
+        )(R_model, mask_model, species_model)
+        # weight_scale / beta are traced under jit: never call float() on them here.
+        scale = jnp.asarray(weight_scale, energies.dtype) * jnp.asarray(beta, energies.dtype)
+        return -scale * jnp.mean(w_centered.astype(energies.dtype) * energies)
+
+    return jax.grad(surrogate)(ml_params)
+
+
 def compute_sample_diagnostics(R: jax.Array, forces: jax.Array, mask: jax.Array) -> Dict[str, float]:
     """Compute numerical and geometric safety diagnostics for sampled states."""
     R = jnp.asarray(R)
@@ -411,6 +732,16 @@ class InProcessLangevinSampler:
         self.shift_fn = shift_fn
         self.config = config
 
+    def configure_rollout(self, stage: RelativeEntropyRolloutStage) -> None:
+        """Update only rollout lengths while retaining the current chain states."""
+
+        self.config = replace(
+            self.config,
+            steps_per_iteration=int(stage.steps_per_iteration),
+            burn_in_steps=int(stage.burn_in_steps),
+            sample_stride=int(stage.sample_stride),
+        )
+
     def _mass_for_species(self, species: jax.Array) -> jax.Array:
         mass = self.config.mass
         if isinstance(mass, (list, tuple)):
@@ -458,12 +789,13 @@ class InProcessLangevinSampler:
             return (state, retained, retained_count), None
 
         steps = jnp.arange(1, int(self.config.steps_per_iteration) + 1)
-        (_, retained, _), _ = jax.lax.scan(
+        (final_state, retained, _), _ = jax.lax.scan(
             scan_step,
             (state, retained0, jnp.asarray(0, dtype=jnp.int32)),
             steps,
         )
-        return retained
+        final_position = jnp.where(mask[:, None] > 0, final_state.position, R0)
+        return retained, final_position
 
     def _forces_for_samples(self, R, mask, species):
         def force_single(R_i, mask_i, species_i):
@@ -486,7 +818,7 @@ class InProcessLangevinSampler:
             raise ValueError("R0, mask, and species must have matching replica axes.")
 
         keys = jax.random.split(jnp.asarray(rng_key), int(self.config.n_replicas))
-        per_replica = jax.vmap(self._run_single)(R0, mask, species, keys)
+        per_replica, final_R = jax.vmap(self._run_single)(R0, mask, species, keys)
         R_samples = per_replica.reshape((-1,) + R0.shape[1:])
         repeats = int(self.config.retained_samples_per_replica)
         mask_samples = jnp.repeat(mask, repeats, axis=0)
@@ -499,6 +831,7 @@ class InProcessLangevinSampler:
             "R": R_samples,
             "mask": mask_samples,
             "species": species_samples,
+            "final_R": final_R,
             "diagnostics": diagnostics,
         }
 
@@ -703,6 +1036,7 @@ class RelativeEntropyTrainer:
         config: RelativeEntropyConfig,
         seed: int,
         checkpoint_dir: Optional[Union[str, Path]] = None,
+        initial_states: Optional[Dict[str, Any]] = None,
     ):
         self.params = params
         self.best_params = params
@@ -721,8 +1055,35 @@ class RelativeEntropyTrainer:
             relative_entropy_gradient,
             static_argnames=("energy_fn", "gradient_batch_size"),
         )
+        self._barrier_penalty_gradient = jax.jit(
+            barrier_penalty_gradient,
+            static_argnames=("energy_fn",),
+        )
         self.history = []
         self.checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir is not None else None
+        self.initial_states = None
+        if initial_states is not None:
+            self.initial_states = {
+                "R": jnp.asarray(initial_states["R"], dtype=jnp.float32),
+                "mask": jnp.asarray(initial_states["mask"], dtype=jnp.float32),
+                "species": jnp.asarray(initial_states["species"], dtype=jnp.int32),
+            }
+            expected = int(config.model_start_count)
+            if int(self.initial_states["R"].shape[0]) != expected:
+                raise ValueError(
+                    f"RE initial_states must contain {expected} replicas, got "
+                    f"{self.initial_states['R'].shape[0]}."
+                )
+        self.chain_state = None
+        self._initial_states_used = False
+        # Live progress artifacts. The canonical history CSV/plots are only written after
+        # train() returns, which gave zero visibility during multi-hour runs; these are
+        # appended every iteration so a run can be monitored (and diagnosed if it dies).
+        self._live_csv = (
+            self.checkpoint_dir.parent / "relative_entropy_history_live.csv"
+            if self.checkpoint_dir is not None else None
+        )
+        self._live_csv_fields = None
 
     def _sample_indices(self, count: int):
         n_ref = int(self.reference_data["R"].shape[0])
@@ -739,11 +1100,18 @@ class RelativeEntropyTrainer:
         }
 
     def _replica_starts(self):
+        if self.config.persistent_chains and self.chain_state is not None:
+            return self.chain_state, "persistent"
+        if self.initial_states is not None and (
+            self.config.persistent_chains or not self._initial_states_used
+        ):
+            self._initial_states_used = True
+            return self.initial_states, "configured_initial"
         idx = self._sample_indices(int(self.config.model_start_count))
         return {
             key: value[idx]
             for key, value in self.reference_data.items()
-        }
+        }, "reference_random"
 
     @staticmethod
     def _host_float_dict(metrics: Dict[str, Any]) -> Dict[str, Any]:
@@ -760,10 +1128,17 @@ class RelativeEntropyTrainer:
         return out
 
     def train_step(self, iteration: int) -> Dict[str, Any]:
+        rollout = self.config.rollout_for_iteration(iteration)
+        if hasattr(self.sampler, "configure_rollout"):
+            self.sampler.configure_rollout(rollout)
+        elif self.config.rollout_schedule:
+            raise TypeError(
+                "Configured REM rollout_schedule requires a sampler with configure_rollout()."
+            )
         if hasattr(self.sampler, "set_params"):
             self.sampler.set_params(self.params)
         ref = self._reference_batch()
-        starts = self._replica_starts()
+        starts, start_source = self._replica_starts()
         self.rng_key, rollout_key = jax.random.split(self.rng_key)
         model_samples = self.sampler.run(
             starts["R"], starts["mask"], starts["species"], rollout_key
@@ -779,6 +1154,22 @@ class RelativeEntropyTrainer:
                     model_samples["R"], model_samples["mask"], model_samples["species"]
                 )
             )
+        if self.config.chirality_diagnostics_enabled:
+            for prefix, coordinates in (
+                ("reference_chirality_", ref["R"]),
+                ("model_chirality_", model_samples["R"]),
+            ):
+                population = chirality_population_metrics(
+                    coordinates,
+                    self.config.chirality_diagnostics_indices,
+                    self.config.chirality_diagnostics_planar_threshold,
+                )
+                diagnostics.update(
+                    {
+                        prefix + key: float(jax.device_get(value))
+                        for key, value in population.items()
+                    }
+                )
         rejected = False
         if self.config.reject_on_instability and is_unstable(
             diagnostics,
@@ -789,10 +1180,26 @@ class RelativeEntropyTrainer:
             metrics = {
                 "iteration": int(iteration),
                 "rejected": True,
+                "chain_start_source": start_source,
+                "persistent_chain_advanced": False,
                 **diagnostics,
+                "rollout_steps": int(rollout.steps_per_iteration),
+                "rollout_burn_in_steps": int(rollout.burn_in_steps),
+                "rollout_sample_stride": int(rollout.sample_stride),
             }
             self.history.append(metrics)
             return metrics
+
+        if self.config.persistent_chains:
+            if "final_R" not in model_samples:
+                raise ValueError(
+                    "Persistent REM chains require sampler.run() to return final_R."
+                )
+            self.chain_state = {
+                "R": jax.lax.stop_gradient(jnp.asarray(model_samples["final_R"])),
+                "mask": starts["mask"],
+                "species": starts["species"],
+            }
 
         grad, grad_metrics = self._relative_entropy_gradient(
             self.params["ml"],
@@ -806,16 +1213,53 @@ class RelativeEntropyTrainer:
             beta=self.config.beta,
             gradient_batch_size=int(self.config.gradient_batch_size),
         )
+        penalty_metrics = {}
+        if self.config.barrier_penalty_enabled and self.config.barrier_penalty_weight > 0.0:
+            w = barrier_penalty_weights(
+                model_samples["R"],
+                self.config.barrier_penalty_indices,
+                self.config.barrier_penalty_v0,
+            )
+            pen_grad = self._barrier_penalty_gradient(
+                self.params["ml"],
+                model_samples["R"],
+                model_samples["mask"],
+                model_samples["species"],
+                self.energy_fn,
+                w,
+                beta=self.config.beta,
+                weight_scale=float(self.config.barrier_penalty_weight),
+            )
+            grad = jax.tree_util.tree_map(lambda a, b: a + b, grad, pen_grad)
+            abs_v = jnp.abs(signed_volume(model_samples["R"], self.config.barrier_penalty_indices))
+            penalty_metrics = {
+                "barrier_penalty_mean": float(jax.device_get(jnp.mean(w))),
+                "barrier_frac_below_v0": float(
+                    jax.device_get(jnp.mean((abs_v < float(self.config.barrier_penalty_v0)).astype(jnp.float32)))
+                ),
+                "min_abs_signed_volume": float(jax.device_get(jnp.min(abs_v))),
+            }
         scaled_grad = jax.tree_util.tree_map(
             lambda x: float(self.config.optimizer_gradient_scale) * x,
             grad,
         )
+        if self.config.trainable_param_substring:
+            scaled_grad = mask_parameter_tree_by_substring(
+                scaled_grad, self.config.trainable_param_substring
+            )
+        trainable_grad_norm = optax.tree.norm(scaled_grad)
         updates, new_opt_state = self.optimizer.update(
             scaled_grad, self.opt_state, self.params["ml"]
         )
         new_params = apply_ml_updates(self.params, updates)
         update_norm = optax.tree.norm(updates)
         param_norm = optax.tree.norm(new_params["ml"])
+        trainable_params = new_params["ml"]
+        if self.config.trainable_param_substring:
+            trainable_params = mask_parameter_tree_by_substring(
+                trainable_params, self.config.trainable_param_substring
+            )
+        trainable_param_norm = optax.tree.norm(trainable_params)
 
         self.params = new_params
         self.best_params = new_params
@@ -829,18 +1273,101 @@ class RelativeEntropyTrainer:
             {
                 "iteration": int(iteration),
                 "rejected": rejected,
+                "chain_start_source": start_source,
+                "persistent_chain_advanced": bool(self.config.persistent_chains),
                 "update_norm": float(jax.device_get(update_norm)),
                 "ml_param_norm": float(jax.device_get(param_norm)),
+                "trainable_grad_norm": float(jax.device_get(trainable_grad_norm)),
+                "trainable_param_norm": float(jax.device_get(trainable_param_norm)),
                 **diagnostics,
+                "rollout_steps": int(rollout.steps_per_iteration),
+                "rollout_burn_in_steps": int(rollout.burn_in_steps),
+                "rollout_sample_stride": int(rollout.sample_stride),
+                **penalty_metrics,
             }
         )
         self.history.append(metrics)
         return metrics
 
+    _LIVE_FIELDS = [
+        "iteration", "rejected", "objective", "abs_re_energy_gap", "re_energy_gap",
+        "ref_energy_mean", "model_energy_mean", "grad_norm", "trainable_grad_norm",
+        "update_norm", "ml_param_norm", "trainable_param_norm", "has_nan_or_inf",
+        "max_force", "min_pair_distance",
+        "n_samples", "chain_start_source", "persistent_chain_advanced",
+        "rollout_steps", "rollout_burn_in_steps", "rollout_sample_stride",
+        "barrier_penalty_mean", "barrier_frac_below_v0", "min_abs_signed_volume",
+        "reference_chirality_signed_volume_mean",
+        "reference_chirality_signed_volume_min",
+        "reference_chirality_signed_volume_max",
+        "reference_chirality_fraction_positive",
+        "reference_chirality_fraction_negative",
+        "reference_chirality_fraction_near_planar",
+        "model_chirality_signed_volume_mean",
+        "model_chirality_signed_volume_min",
+        "model_chirality_signed_volume_max",
+        "model_chirality_fraction_positive",
+        "model_chirality_fraction_negative",
+        "model_chirality_fraction_near_planar",
+    ]
+
+    def _log_iteration(self, metrics: Dict[str, Any], n_rejected: int, n_done: int) -> None:
+        """(A) One flushed stdout line per iteration so `tail -f` shows live progress."""
+        parts = [
+            "it=%4d/%d" % (int(metrics.get("iteration", -1)), int(self.config.iterations)),
+            "rej=%s" % ("T" if metrics.get("rejected") else "F"),
+            "rejrate=%.2f" % (n_rejected / max(n_done, 1)),
+        ]
+        for key, fmt in (("objective", "obj=%.4g"), ("grad_norm", "gnorm=%.3g"),
+                         ("trainable_grad_norm", "tgnorm=%.3g"),
+                         ("update_norm", "dupd=%.3g"), ("max_force", "maxF=%.3g"),
+                         ("trainable_param_norm", "tpnorm=%.3g"),
+                         ("min_pair_distance", "minpair=%.3f"), ("rollout_steps", "roll=%d"),
+                         ("min_abs_signed_volume", "minV=%.2f"),
+                         ("barrier_frac_below_v0", "fbar=%.4f"),
+                         ("model_chirality_fraction_negative", "mirror=%.4f"),
+                         ("model_chirality_fraction_near_planar", "planar=%.4f")):
+            value = metrics.get(key)
+            if value is not None:
+                try:
+                    parts.append(fmt % float(value))
+                except (TypeError, ValueError):
+                    pass
+        training_logger.info("[RE] " + "  ".join(parts))
+        try:
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+    def _append_live_row(self, metrics: Dict[str, Any]) -> None:
+        """(B) Append this iteration to a live CSV instead of waiting for train() to end."""
+        if self._live_csv is None:
+            return
+        try:
+            self._live_csv.parent.mkdir(parents=True, exist_ok=True)
+            write_header = self._live_csv_fields is None
+            if write_header:
+                extra = [k for k in metrics if k not in self._LIVE_FIELDS]
+                self._live_csv_fields = list(self._LIVE_FIELDS) + sorted(extra)
+            with self._live_csv.open("a", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=self._live_csv_fields,
+                                        extrasaction="ignore")
+                if write_header:
+                    writer.writeheader()
+                writer.writerow({k: metrics.get(k, "") for k in self._live_csv_fields})
+        except OSError as exc:  # never let logging kill a training run
+            training_logger.warning("[RE] live CSV append failed: %s", exc)
+
     def train(self) -> Dict[str, Any]:
         last = {}
+        n_rejected = 0
+        if self._live_csv is not None and self._live_csv.exists():
+            self._live_csv.unlink()  # fresh file per run
         for iteration in range(int(self.config.iterations)):
             last = self.train_step(iteration)
+            n_rejected += bool(last.get("rejected"))
+            self._log_iteration(last, n_rejected, iteration + 1)
+            self._append_live_row(last)
             if (
                 self.checkpoint_dir is not None
                 and int(self.config.checkpoint_freq) > 0
@@ -855,6 +1382,9 @@ class RelativeEntropyTrainer:
         payload = {
             "params": self.params,
             "best_params": self.best_params,
+            "optimizer_state": self.opt_state,
+            "rng_key": self.rng_key,
+            "chain_state": self.chain_state,
             "metadata": {
                 "relative_entropy": True,
                 "prior_frozen": True,

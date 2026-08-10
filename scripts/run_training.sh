@@ -497,11 +497,21 @@ if is_truthy "${CHEMTRAIN_PROFILE_GPU_TELEMETRY:-0}"; then
 fi
 
 cleanup_background_jobs() {
-    local rc=$?
+    local rc="${1:-$?}"
     [[ -n "${GPU_TELEMETRY_SRUN_PID}" ]] && kill "${GPU_TELEMETRY_SRUN_PID}" >/dev/null 2>&1 || true
     echo "[run_training.sh] EXIT rc=${rc}" >&2
 }
-trap cleanup_background_jobs EXIT
+source "${PROJECT_ROOT}/runs/registry_hook.sh"
+run_registry_start "${RUN_REGISTRY_TYPE:-training}" "${CONFIG_FILE}" "${RUN_OUTPUT_DIR}"
+
+run_training_exit() {
+    local rc=$?
+    trap - EXIT
+    cleanup_background_jobs "${rc}"
+    run_registry_finish "${rc}"
+    exit "${rc}"
+}
+trap run_training_exit EXIT
 
 # =============================================================================
 # Launch training

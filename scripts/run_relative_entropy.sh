@@ -140,7 +140,11 @@ profiling = training.setdefault('profiling', {})
 profiling['trace_dir'] = str(profile_dir)
 re_cfg = training.setdefault('relative_entropy', {})
 re_cfg['output_dir'] = str(re_dir)
-for section, key in [(data.get('data') or {}, 'path'), (re_cfg, 'reference_data_path')]:
+for section, key in [
+    (data.get('data') or {}, 'path'),
+    (re_cfg, 'reference_data_path'),
+    (re_cfg, 'initial_state_data_path'),
+]:
     raw = section.get(key)
     if raw:
         p = Path(str(raw))
@@ -174,6 +178,11 @@ echo "Relative entropy config: ${RUNTIME_CONFIG}"
 echo "Run dir:                 ${RUN_OUTPUT_DIR}"
 echo "Job tag:                 ${JOB_TAG}"
 echo "============================================================"
+
+source "${PROJECT_ROOT}/runs/registry_hook.sh"
+run_registry_start relative-entropy "${CONFIG_FILE}" "${RUN_OUTPUT_DIR}"
+run_registry_install_exit_trap
+
 srun -l --ntasks-per-node=1 "${PYTHON_BIN}" -u "${SCRIPT_DIR}/train_relative_entropy.py" "${RUNTIME_CONFIG}" 2>&1 | tee "${LOGFILE}"
 echo "============================================================"
 echo "Relative entropy complete. Log: ${LOGFILE}"

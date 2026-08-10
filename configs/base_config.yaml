@@ -9,6 +9,11 @@ seed: 42
 model_context: my_experiment
 model_id: run_01
 
+# Optional human metadata shown in runs/REGISTRY.md.
+run:
+  description: null  # short purpose or expected result
+  tags: []           # searchable labels, e.g. [ala2, force-matching]
+
 # -----------------------------------------------------------------------------
 # Debug — all off by default.  Env vars (CHEMTRAIN_DEBUG_*) override if set.
 # -----------------------------------------------------------------------------
@@ -41,9 +46,23 @@ data:
   tile_bucket_beads: null                     # null = auto; or list e.g. [1024, 2048]
   tile_shuffle_structures: false
   tile_sort_by_size: true
+  tile_spatial_separation: false
+  tile_spatial_layout: line_x                  # line_x (legacy) | grid_3d (cell-list-friendly)
+  tile_structure_gap: 25.0
   tile_rebuild_each_epoch: false
   tile_drop_incomplete: false
   tile_train_only: true
+  # Static neighbor graphs (tiled mode only). Builds each tile's connectivity
+  # once, per molecular segment, and reuses it instead of running a JAX-MD
+  # neighbor update per sample. Rejects DSM / noised-residual / relative-entropy
+  # / PBC configs, which evaluate the model away from the stored coordinates.
+  # See DESIGN/STATIC_TILED_NEIGHBOR_LISTS.md.
+  static_neighbors:
+    enabled: false
+    backend: kdtree                          # kdtree (fast) | chunked (reference oracle)
+    block_size: 1024                         # chunked backend only; bounds temp memory at O(B^2)
+    capacity_multiplier: 1.0                 # edge-capacity reserve over the measured maximum
+    r_list: null                             # null = model.cutoff + model.dr_threshold
 
 # -----------------------------------------------------------------------------
 # Preprocessing
@@ -90,6 +109,7 @@ model:
     mlp_output_activation: tanh # linear | tanh | silu
     avg_num_neighbors: 15       # overridden at runtime from data
     max_edge_multiplier: 1.25
+    neighbor_capacity_multiplier: 1.25  # JAX-MD sparse edge occupancy buffer
     neighbor_extra_capacity: 10  # extra neighbor buffer slots
     # max_edges: null           # explicit cap; null = inferred from test frame
 

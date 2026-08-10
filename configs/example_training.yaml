@@ -1,0 +1,172 @@
+# Portable training example derived from a recent production configuration.
+# Replace the input path and tune the schedule for the size of your dataset.
+
+seed: 42
+model_context: example_training
+model_id: example_wide160_fm1500
+
+debug:
+  neighbor_logging: false
+  neighbor_rank0_only: true
+  shape_trace: false
+  model_logging: false
+
+paths:
+  output_dir: local_work/outputs/example_training
+  export_dir: local_work/outputs/example_training/exports
+  checkpoint_dir: local_work/outputs/example_training/checkpoints
+  profile_dir: local_work/outputs/example_training/profiles
+  slurm_dir: local_work/outputs/example_training
+
+data:
+  path: local_work/input_data/example_training.npz
+  use_bucketed_dir: false
+  max_frames: null
+  batch_mode: tiled
+  tile_target_beads: 1024
+  tile_bucket_beads: null
+  tile_bucket_edges: null
+  tile_edge_estimate_mode: distance_cutoff
+  tile_edge_estimate_cutoff: 10.0
+  tile_edge_estimate_scale: 15.0
+  tile_shuffle_structures: true
+  tile_sort_by_size: true
+  tile_sort_by_estimated_edges: true
+  tile_isolate_large_structures: false
+  tile_spatial_separation: true
+  tile_rebuild_each_epoch: false
+  tile_structure_gap: 10.0
+  tile_drop_incomplete: true
+  tile_train_only: true
+  tile_spatial_layout: grid_3d
+
+preprocessing:
+  buffer_multiplier: 4.0
+  park_multiplier: 0.95
+
+model:
+  ml_model: allegro_cueq_fast
+  use_priors: false
+  train_priors: false
+  prior_only: false
+  cutoff: 5.5
+  dr_threshold: 1.0
+  neighbor_list_format: sparse
+  neighbor_disable_cell_list: false
+  pbc: false
+
+  allegro:
+    num_types: 4
+    max_ell: 2
+    hidden_irreps: 160x0e + 160x0o + 160x1o + 160x1e + 160x2e
+    num_layers: 5
+    n_radial_basis: 20
+    envelope_p: 6
+    embed_n_hidden: [96, 160]
+    species_embed: 16
+    mlp_n_hidden: 192
+    mlp_n_layers: 4
+    mlp_activation: mish
+    mlp_hidden_activation: silu
+    mlp_output_activation: tanh
+    avg_num_neighbors: 4.0
+    avg_num_neighbors_source: dataset_sample
+    max_edge_multiplier: 1.25
+    neighbor_capacity_multiplier: 1.05
+    neighbor_extra_capacity: 0
+    max_edges: null
+
+  allegro_cueq:
+    mlp_dtype: float32
+    tp_backend: baseline_mixed
+    tp_mode: mixed_naive
+    tp_method: naive
+    tp_batch_strategy: nested_vmap
+    tp_left_mode: node_agg
+    tp_left_norm: null
+
+  priors:
+    use_spline_priors: false
+    residue_specific_angles: false
+    weights:
+      bond: 0.0
+      angle: 0.0
+      dihedral: 0.0
+      repulsive: 0.0
+      excluded_volume: 0.0
+      dh: 0.0
+      stickiness: 0.0
+      salt_bridge: 0.0
+
+export:
+  mode: auto
+  also_export_naive: false
+  enabled: true
+
+optimizer:
+  grad_clip: 0.5
+  adabelief:
+    lr: 1.0e-5
+    peak_lr: 2.5e-5
+    end_lr: 1.0e-6
+    warmup_steps: 7603
+    decay_steps: 69225
+    beta1: 0.95
+    beta2: 0.999
+    eps: 1.0e-6
+    grad_clip: 0.5
+    weight_decay: 0.0001
+
+training:
+  stages:
+    - optimizer: adabelief
+      epochs: 1500
+  val_fraction: 0.0
+  batch_per_device: 4
+  batch_cache: 2
+  checkpoint_freq: 10
+  gammas:
+    F: 1.0
+    U: 0.0
+  force_loss_normalization: valid_components
+
+  msam:
+    enabled: false
+
+  swa:
+    enabled: false
+  enable_mixed_precision: false
+  compute_dtype: float32
+  param_dtype: float32
+  reduce_dtype: float32
+  enable_buffer_donation: false
+  donate_mode: state_only
+  remat_level: 0
+  remat_policy: none
+  grad_accum_steps: 1
+  grad_accum_mode: stack_scan
+  pretrain_prior: false
+  export_combined_ml_priors: false
+
+  prior_residual:
+    enabled: false
+    cache_enabled: false
+    cache_path: null
+    force_recompute: false
+    compute_batch_size: 128
+
+  profiling:
+    enabled: false
+    jax_trace_enabled: false
+    trace_rank0_only: true
+    log_compiles: false
+    batch_profiler_enabled: false
+    batch_stats_enabled: false
+    loss_profile_enabled: false
+    epoch_summary_enabled: true
+
+ensemble:
+  enabled: false
+  n_models: 5
+  base_seed: 42
+  save_all_models: false

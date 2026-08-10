@@ -1,0 +1,60 @@
+# Isolation run 3 of 3: LOCAL INVERSION UMBRELLA ONLY.
+#
+# Probes the parity direction TICA cannot see. chi is parity-ODD; the BARRIER it
+# reveals is parity-EVEN and therefore the one part of chirality a parity-invariant
+# Allegro can actually learn (see DESIGN/ALLEGRO_PARITY_INVARIANCE.md).
+#
+# Fixed target per replica = umbrella windows, NOT a moving scan: sampling is
+# stationary after the ramp, so statistics accumulate at each chi.
+name: ala2_bb6_iso_inversion
+mapping: ala2_backbone_cb_6
+output_dir: /e/project1/cameo/schmidt36/cameo_cg/local_work/sampling_runs/ala2_bb6_iso_inversion
+n_replicas: 12
+
+# 12 conformationally diverse starting structures (farthest-point in phi/psi) --
+# independent velocities alone leave every replica in the same basin.
+structure:
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_00.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_01.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_02.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_03.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_04.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_05.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_06.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_07.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_08.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_09.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_10.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_11.gro
+topology: /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/ala2_constrained/topol.top
+mdp:      /e/project1/cameo/schmidt36/cameo_cg/sampling/campaigns/production_298K_dt1fs.mdp
+
+recompute_stride: 1   # NOT 5. The plugin caches the force between recomputes; the
+                      # stride-5 shortcut was validated for SMOOTH teacher/TICA forces. A
+                      # k=2000 angular restraint is stiff, so a 4-step-stale gradient is no
+                      # longer the umbrella declared here. Revisit only once window tracking
+                      # and stability show the lag is harmless.
+socket_dir: /tmp
+ntomp: 8
+print_stride: 100          # 0.1 ps at dt=1fs -- live CV monitoring
+report_every: 500
+monitor_cvs: [phi, psi, chirality]
+
+biases:
+  - type: local_inversion_umbrella
+    mapping: ala2_backbone_cb_6
+    # center/neighbors auto-detected from the CG bond graph: CA is the unique
+    # degree-3 bead, branches N/CB/C. Set explicitly only to override.
+    force_constant: 2000.0
+    # Window width sqrt(kT/k)=0.017 vs 0.065 spacing. Deliberately stiffer than the
+    # textbook overlap criterion (k=500): we want transition-region LABELS at
+    # controlled chi, not a PMF, so reaching the target beats window overlap.
+    equilibrate_steps: 10000     # 10 ps at 1 fs, target held at the initial chi
+    ramp_steps: 20000            # 20 ps to walk the target to the window value
+    enabled: true
+    per_replica:
+      # Ladder from the physical value (reference chi = -0.711 +- 0.053, 100%
+      # single-signed, never within 13.5 sigma of 0) to the planar region.
+      # Stops at 0 -- not pushed through to +chi.
+      chi_target: [-0.71, -0.645, -0.581, -0.516, -0.452, -0.387,
+                   -0.323, -0.258, -0.194, -0.129, -0.065, 0.0]

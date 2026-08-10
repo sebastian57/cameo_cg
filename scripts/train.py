@@ -44,6 +44,8 @@ from training.noised_residual import (
     attach_noised_residual_fields,
     noised_residual_enabled,
 )
+from training.force_labels import apply_force_label_mode
+from training.crossfit import apply_crossfit_split
 from training.support_gate import (
     build_support_gate_bank,
     support_gate_config,
@@ -822,9 +824,11 @@ def _build_tiled_validation_split(
         large_structure_threshold=config.get_tile_large_structure_threshold(),
         large_structure_edge_threshold=config.get_tile_large_structure_edge_threshold(),
         spatial_separation=config.tile_spatial_separation_enabled(),
+        spatial_layout=config.get_tile_spatial_layout(),
         structure_gap=config.get_tile_structure_gap(),
         seed=seed,
         extra_per_atom_fields=_hvp_extra_per_atom_fields(val_hvp_source),
+        static_neighbors=config.get_static_neighbors_config(),
     )
     tiled = _attach_batch_metadata(tiled, np.arange(tiled["R"].shape[0], dtype=np.int32))
     data_logger.info(
@@ -986,9 +990,11 @@ def _build_tiled_split_from_source(
         large_structure_threshold=config.get_tile_large_structure_threshold(),
         large_structure_edge_threshold=config.get_tile_large_structure_edge_threshold(),
         spatial_separation=config.tile_spatial_separation_enabled(),
+        spatial_layout=config.get_tile_spatial_layout(),
         structure_gap=config.get_tile_structure_gap(),
         seed=seed,
         extra_per_atom_fields=_hvp_extra_per_atom_fields(train_source),
+        static_neighbors=config.get_static_neighbors_config(),
     )
     t_tile_build_end = time.perf_counter()
     tiled = _attach_batch_metadata(tiled, np.arange(tiled["R"].shape[0], dtype=np.int32))
@@ -1003,7 +1009,7 @@ def _build_tiled_split_from_source(
         "edge_mode=%s, edge_cutoff=%s, "
         "shuffled=%s, sort_by_size=%s, sort_by_estimated_edges=%s, "
         "isolate_large=%s, large_threshold=%s, large_edge_threshold=%s, "
-        "spatial_separation=%s, structure_gap=%.2f, drop_incomplete=%s).",
+        "spatial_separation=%s, spatial_layout=%s, structure_gap=%.2f, drop_incomplete=%s).",
         int(tiled["R"].shape[0]),
         int(train_source["R"].shape[0]),
         int(config.get_tile_target_beads()),
@@ -1019,6 +1025,7 @@ def _build_tiled_split_from_source(
         config.get_tile_large_structure_threshold(),
         config.get_tile_large_structure_edge_threshold(),
         bool(config.tile_spatial_separation_enabled()),
+        config.get_tile_spatial_layout(),
         float(config.get_tile_structure_gap()),
         bool(config.tile_drop_incomplete_enabled()),
     )
@@ -1040,6 +1047,62 @@ def _build_tiled_split_from_source(
     )
     _log_train_split_profile(tiled, config)
     return tiled
+
+
+def _cell_list_box_for_tiled_split(
+    config: ConfigManager,
+    train_split: dict,
+    current_box,
+):
+    """Size a free-space cell-list box from packed tiles; reject unsafe layouts."""
+    if (
+        config.get_batch_mode() != "tiled"
+        or config.neighbor_disable_cell_list_enabled()
+        or config.use_pbc_enabled()
+    ):
+        return current_box
+
+    if (
+        not config.tile_spatial_separation_enabled()
+        or config.get_tile_spatial_layout() != "grid_3d"
+    ):
+        raise ValueError(
+            "Nonperiodic tiled cell lists require "
+            "data.tile_spatial_separation=true and "
+            "data.tile_spatial_layout=grid_3d."
+        )
+    if config.tile_rebuild_each_epoch_enabled():
+        raise ValueError(
+            "Nonperiodic tiled cell lists currently require "
+            "data.tile_rebuild_each_epoch=false because the fixed model box is "
+            "sized from the initial packing."
+        )
+
+    R = np.asarray(train_split["R"], dtype=np.float32)
+    mask = np.asarray(train_split["mask"] > 0)
+    coords = R[mask]
+    if coords.size == 0 or not np.isfinite(coords).all():
+        raise ValueError("Cannot construct tiled cell-list box from empty/nonfinite coordinates.")
+    mins = np.min(coords, axis=0)
+    maxs = np.max(coords, axis=0)
+    if np.any(mins < -1.0e-5):
+        raise ValueError(
+            "Cell lists require packed tiled coordinates inside the positive box, "
+            f"but minima are {mins.tolist()}. Check grid_3d packing or keep "
+            "model.neighbor_disable_cell_list=true."
+        )
+    margin = max(float(config.get_cutoff() + config.get_dr_threshold()), 1.0)
+    box = np.asarray(maxs + margin, dtype=np.float32)
+    data_logger.info(
+        "[Tiling][CellList] Recomputed box from packed training tiles: "
+        "mins=%s maxs=%s margin=%.3f box=%s layout=%s",
+        mins,
+        maxs,
+        margin,
+        box,
+        config.get_tile_spatial_layout(),
+    )
+    return jnp.asarray(box, dtype=jnp.float32)
 
 
 def _build_train_split(
@@ -1202,6 +1265,7 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         park_mult=park_mult,
         fitted_params=fitted_prior_params,
     )
+    dataset = apply_force_label_mode(config, dataset)
     write_dataset_summary(
         dataset=dataset,
         id_to_aa=loader.id_to_aa,
@@ -1230,10 +1294,16 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     logging.info("=" * 60)
 
     split_seed = int(config.get_seed())
-    dataset = _shuffle_dataset_for_split(dataset, seed=split_seed)
+    dataset, crossfit_n_train = apply_crossfit_split(config, dataset)
+    if crossfit_n_train is None:
+        dataset = _shuffle_dataset_for_split(dataset, seed=split_seed)
 
     val_fraction = config.get_val_fraction()
-    N_train = int(np.round(len(dataset["R"]) * (1 - val_fraction)))
+    N_train = (
+        int(crossfit_n_train)
+        if crossfit_n_train is not None
+        else int(np.round(len(dataset["R"]) * (1 - val_fraction)))
+    )
     N_val = len(dataset["R"]) - N_train
 
     # Check if validation set is too small for batching
@@ -1316,6 +1386,7 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
 
     if dsm_enabled(config):
         train_split = add_dsm_noise_fields(train_split, config, seed=split_seed)
+    box = _cell_list_box_for_tiled_split(config, train_split, box)
     _configure_runtime_avg_num_neighbors(
         config,
         tiled_train_source if tiled_train_source is not None else train_split,
@@ -1503,25 +1574,31 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     logging.info("EXPORTING MODEL")
     logging.info("=" * 60)
 
-    mlir_path = export_dir / f"{model_name}.mlir"
-    export_model = _make_export_model(
-        config=config,
-        model=model,
-        R0=R0,
-        box=box,
-        species0=species0,
-        id_to_aa=loader.id_to_aa,
-        n_max=model.N_max,
-        support_gate_bank=support_gate_bank,
-    )
-    exporter = ModelExporter.from_combined_model(
-        model=export_model,
-        params=best_params,
-        box=box,
-        species=species0
-    )
-    exporter.export_to_file(mlir_path)
-    export_logger.info(f"MLIR: {mlir_path}")
+    export_enabled = bool(config.get("export", "enabled", default=True))
+    if export_enabled:
+        mlir_path = export_dir / f"{model_name}.mlir"
+        export_model = _make_export_model(
+            config=config,
+            model=model,
+            R0=R0,
+            box=box,
+            species0=species0,
+            id_to_aa=loader.id_to_aa,
+            n_max=model.N_max,
+            support_gate_bank=support_gate_bank,
+        )
+        exporter = ModelExporter.from_combined_model(
+            model=export_model,
+            params=best_params,
+            box=box,
+            species=species0
+        )
+        exporter.export_to_file(mlir_path)
+        export_logger.info(f"MLIR: {mlir_path}")
+    else:
+        export_logger.info(
+            "MLIR export disabled by export.enabled=false; saving params and diagnostics only."
+        )
 
     # Save parameters as pickle
     params_path = export_dir / f"{model_name}_params.pkl"
@@ -1585,6 +1662,11 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
     apply_numpy_dataloader_patch()
 
     config = ConfigManager(config_file)
+    if config.get_crossfit_config()["enabled"]:
+        raise ValueError(
+            "data.crossfit is currently supported only for a single NPZ dataset; "
+            "a bucketed multi-protein run needs one manifest per bucket."
+        )
     _validate_tiled_mode_constraints(config)
     _validate_prior_residual_mode_constraints(config)
     _apply_grad_accum_overrides(config)
@@ -1678,6 +1760,7 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
             buffer_mult=buffer_mult,
             park_mult=park_mult,
         )
+        dataset = apply_force_label_mode(config, dataset)
 
         split_seed = int(config.get_seed()) + int(bucket_idx)
         dataset = _shuffle_dataset_for_split(dataset, seed=split_seed)
@@ -1709,6 +1792,7 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
         final_support_gate_bank = support_gate_bank
         if dsm_enabled(config):
             train_split = add_dsm_noise_fields(train_split, config, seed=split_seed)
+        box = _cell_list_box_for_tiled_split(config, train_split, box)
         _configure_runtime_avg_num_neighbors(
             config,
             tiled_train_source if tiled_train_source is not None else train_split,

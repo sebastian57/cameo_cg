@@ -1,0 +1,85 @@
+# CORRIDOR SHOOTING -- entry statistics for the main<->alphaL channel.
+#
+# Why not a naive "entry" campaign: the reference contains only 47 frames in the
+# phi 0..35 corridor and TWO in phi -25..25. There is nothing to seed from, which is
+# exactly what makes it a barrier. Waiting for entries is hopeless: 25 beta->alphaL
+# crossings in 500 ns is ~0.05 per ns, so 48 x 300 ps would yield ~0.7 events.
+#
+# Instead: seed ON the barrier, from the 24 alphaL-exit trajectories that each traverse
+# the corridor at 0.05 ps resolution, then run UNBIASED with fresh velocities. Each
+# replica commits either into alphaL (an entry) or back to beta/alphaR (a failed
+# attempt). That is a committor-style shooting experiment and it samples the corridor
+# per replica rather than per rare event.
+#
+# Note on interpretation: entries and exits BALANCE in the reference (25 vs 26 for
+# beta<->alphaL, 3 vs 2 for alphaR<->alphaL), so the system is at equilibrium and by
+# microscopic reversibility the entry corridor is the exit corridor reversed. The
+# geometry is therefore already known from the exit run; what this adds is the FLUX
+# weighting and the commitment statistics, plus an independent check of that symmetry.
+name: ala2_bb6_corridor_shoot
+mapping: ala2_backbone_cb_6
+output_dir: /e/project1/cameo/schmidt36/cameo_cg/local_work/sampling_runs/ala2_bb6_corridor_shoot
+n_replicas: 48
+
+structure:
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_00.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_01.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_02.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_03.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_04.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_05.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_06.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_07.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_08.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_09.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_10.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_11.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_12.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_13.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_14.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_15.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_16.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_17.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_18.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_19.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_20.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_21.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_22.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_23.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_24.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_25.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_26.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_27.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_28.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_29.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_30.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_31.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_32.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_33.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_34.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_35.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_36.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_37.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_38.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_39.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_40.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_41.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_42.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_43.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_44.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_45.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_46.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_corridor/start_47.gro
+topology: /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/ala2_constrained/topol.top
+mdp:      /e/project1/cameo/schmidt36/cameo_cg/sampling/campaigns/corridor_shoot_298K.mdp
+
+recompute_stride: 5
+socket_dir: /tmp
+ntomp: 8
+print_stride: 25
+report_every: 5000
+monitor_cvs: [phi, psi, chirality]
+socket_timeout_s: 600.0
+min_discard_ps: 0.0     # the commitment happens immediately; discarding would delete it
+
+biases: []              # unbiased: the commitment must be the force field's own

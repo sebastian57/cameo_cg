@@ -3,6 +3,7 @@
 
 import argparse
 import copy
+import json
 import logging
 import os
 import pickle
@@ -17,9 +18,11 @@ if "JAX_PLATFORMS" not in os.environ and not os.environ.get("SLURM_JOB_ID"):
 # Match train.py: make package-local absolute imports work from scripts/.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from utils.jax_setup import apply_jax_compat_shims
+from utils.jax_setup import apply_jax_compat_shims, assert_gpu_when_allocated
 
 apply_jax_compat_shims()
+# Fail fast on the silent CUDA-init CPU fallback (see BUGS/2026-07-31_silent-gpu-fallback).
+assert_gpu_when_allocated("relative-entropy")
 
 import jax
 import jax.numpy as jnp
@@ -36,6 +39,7 @@ from training.relative_entropy import (
     InProcessLangevinSampler,
     RelativeEntropyTrainer,
     extract_params_from_checkpoint_payload,
+    merge_matching_parameter_trees,
     relative_entropy_config,
     write_relative_entropy_history_artifacts,
 )
@@ -81,6 +85,140 @@ def _load_reference_dataset(config, re_cfg):
         dataset["species"] = np.zeros(dataset["mask"].shape, dtype=np.int32)
 
     return loader, dataset, box, data_path
+
+
+def _wrap_degrees(angle):
+    return (np.asarray(angle) + 180.0) % 360.0 - 180.0
+
+
+def _dihedral_degrees(R, indices, shift_deg=180.0):
+    p0, p1, p2, p3 = (R[:, int(i)] for i in indices)
+    b0, b1, b2 = p1 - p0, p2 - p1, p3 - p2
+    b1_norm = np.linalg.norm(b1, axis=1)
+    if np.any(b1_norm <= 0.0):
+        raise ValueError("Degenerate central bond in configured REM initial-state pool.")
+    u = b1 / b1_norm[:, None]
+    v = b0 - np.sum(b0 * u, axis=1)[:, None] * u
+    w = b2 - np.sum(b2 * u, axis=1)[:, None] * u
+    conventional = np.degrees(
+        np.arctan2(
+            np.sum(np.cross(u, v) * w, axis=1),
+            np.sum(v * w, axis=1),
+        )
+    )
+    return _wrap_degrees(conventional + float(shift_deg))
+
+
+def _load_configured_initial_states(config, re_cfg, reference_data):
+    if re_cfg.start_frame_mode not in {"configured_phi_targets", "configured_cv_targets"}:
+        return None, None
+
+    source_path = resolve_from_config_or_repo(
+        re_cfg.initial_state_data_path,
+        config.config_path,
+        repo_root_from_file(__file__),
+    )
+    with np.load(source_path, allow_pickle=False) as source:
+        if "R" not in source:
+            raise ValueError(f"Configured REM initial-state pool has no R array: {source_path}")
+        R = np.asarray(source["R"], dtype=np.float32)
+        source_mask = np.asarray(source["mask"], dtype=np.float32) if "mask" in source else None
+        source_species = np.asarray(source["species"], dtype=np.int32) if "species" in source else None
+
+    if R.ndim != 3 or R.shape[1:] != tuple(reference_data["R"].shape[1:]):
+        raise ValueError(
+            "Configured REM initial-state coordinates must match reference bead shape; "
+            f"got {R.shape}, expected (*, {tuple(reference_data['R'].shape[1:])})."
+        )
+    if re_cfg.start_frame_mode == "configured_phi_targets":
+        cv_indices = (tuple(int(i) for i in re_cfg.initial_state_phi_indices),)
+        cv_shifts = (float(re_cfg.initial_state_phi_shift_deg),)
+        targets = tuple((float(target),) for target in re_cfg.initial_state_phi_targets_deg)
+    else:
+        cv_indices = tuple(
+            tuple(int(i) for i in indices) for indices in re_cfg.initial_state_cv_indices
+        )
+        cv_shifts = tuple(float(value) for value in re_cfg.initial_state_cv_shift_deg)
+        if not cv_shifts:
+            cv_shifts = tuple(180.0 for _ in cv_indices)
+        targets = tuple(
+            tuple(float(value) for value in target)
+            for target in re_cfg.initial_state_cv_targets_deg
+        )
+    for indices in cv_indices:
+        if min(indices) < 0 or max(indices) >= R.shape[1]:
+            raise ValueError(
+                f"Configured REM CV indices {indices} are invalid for {R.shape[1]} beads."
+            )
+
+    cv_values = np.column_stack(
+        [
+            _dihedral_degrees(R, indices, shift)
+            for indices, shift in zip(cv_indices, cv_shifts)
+        ]
+    )
+    selected = []
+    actual_values = []
+    for target in targets:
+        periodic_delta = _wrap_degrees(cv_values - np.asarray(target)[None, :])
+        delta = np.linalg.norm(periodic_delta, axis=1)
+        if selected:
+            delta[np.asarray(selected, dtype=int)] = np.inf
+        frame = int(np.argmin(delta))
+        if not np.isfinite(delta[frame]):
+            raise ValueError("Configured REM initial-state pool has too few unique frames.")
+        selected.append(frame)
+        actual_values.append([float(value) for value in cv_values[frame]])
+
+    count = len(selected)
+    def replica_array(value, fallback, dtype):
+        if value is None:
+            base = np.asarray(fallback[0], dtype=dtype)
+            return np.repeat(base[None, ...], count, axis=0)
+        value = np.asarray(value, dtype=dtype)
+        if value.ndim == 1:
+            value = np.repeat(value[None, :], R.shape[0], axis=0)
+        if value.shape[0] != R.shape[0]:
+            raise ValueError("Configured REM initial-state metadata has an incompatible frame axis.")
+        return value[np.asarray(selected)]
+
+    initial_states = {
+        "R": R[np.asarray(selected)],
+        "mask": replica_array(source_mask, reference_data["mask"], np.float32),
+        "species": replica_array(source_species, reference_data["species"], np.int32),
+    }
+    metadata = {
+        "source_path": str(source_path),
+        "selection_mode": "nearest_unique_periodic_cv",
+        "cv_indices": [list(indices) for indices in cv_indices],
+        "cv_shift_deg": list(cv_shifts),
+        "target_cv_deg": [list(target) for target in targets],
+        "selected_frame_indices": selected,
+        "selected_cv_deg": actual_values,
+        "periodic_euclidean_errors_deg": [
+            float(
+                np.linalg.norm(
+                    _wrap_degrees(np.asarray(actual) - np.asarray(target))
+                )
+            )
+            for actual, target in zip(actual_values, targets)
+        ],
+    }
+    if re_cfg.start_frame_mode == "configured_phi_targets":
+        metadata.update(
+            {
+                "selection_mode": "nearest_unique_periodic_phi",
+                "phi_indices": list(cv_indices[0]),
+                "phi_shift_deg": cv_shifts[0],
+                "target_phi_deg": [target[0] for target in targets],
+                "selected_phi_deg": [actual[0] for actual in actual_values],
+                "circular_errors_deg": [
+                    float(abs(_wrap_degrees(actual[0] - target[0])))
+                    for actual, target in zip(actual_values, targets)
+                ],
+            }
+        )
+    return initial_states, metadata
 
 
 def _checkpoint_path(config):
@@ -193,6 +331,21 @@ def run_relative_entropy(config_file: str):
     support_gate_bank = _build_support_gate_bank_for_re(config, dataset, data_path)
     model = _build_model(config, loader, dataset, box, support_gate_bank=support_gate_bank)
     params = extract_params_from_checkpoint_payload(ckpt_path)
+    init_cfg = config.get("training", "init_from_checkpoint", default={}) or {}
+    if bool(init_cfg.get("merge_matching_params", False)):
+        initialized_ml = model.ml_model.initialize_params(
+            jax.random.PRNGKey(config.get_seed())
+        )
+        merged_ml, merge_report = merge_matching_parameter_trees(
+            params["ml"], initialized_ml
+        )
+        params = dict(params)
+        params["ml"] = merged_ml
+        training_logger.info(
+            "[RE] Warm-start merge: reused_leaves=%d initialized_leaves=%d",
+            merge_report["reused_leaves"],
+            merge_report["initialized_leaves"],
+        )
     if model.use_priors and "prior" not in params:
         params = dict(params)
         params["prior"] = model.prior.params
@@ -204,9 +357,22 @@ def run_relative_entropy(config_file: str):
         "mask": jnp.asarray(dataset["mask"], dtype=jnp.float32),
         "species": jnp.asarray(dataset["species"], dtype=jnp.int32),
     }
+    initial_states, initial_state_metadata = _load_configured_initial_states(
+        config, re_cfg, reference_data
+    )
 
     output_dir = Path(re_cfg.output_dir) if re_cfg.output_dir else Path(config.get_output_dir()) / "relative_entropy"
     output_dir.mkdir(parents=True, exist_ok=True)
+    if initial_state_metadata is not None:
+        selection_path = output_dir / "initial_state_selection.json"
+        selection_path.write_text(json.dumps(initial_state_metadata, indent=2) + "\n", encoding="utf-8")
+        np.savez_compressed(
+            output_dir / "initial_states.npz",
+            R=np.asarray(initial_states["R"]),
+            mask=np.asarray(initial_states["mask"]),
+            species=np.asarray(initial_states["species"]),
+        )
+        training_logger.info("[RE] Configured initial states: %s", selection_path)
     trainer = RelativeEntropyTrainer(
         params=params,
         reference_data=reference_data,
@@ -216,6 +382,7 @@ def run_relative_entropy(config_file: str):
         config=re_cfg,
         seed=config.get_seed(),
         checkpoint_dir=output_dir / "checkpoints",
+        initial_states=initial_states,
     )
 
     training_logger.info("[RE] Reference data: %s (%d frames)", data_path, dataset["R"].shape[0])
@@ -236,6 +403,8 @@ def run_relative_entropy(config_file: str):
             "source_checkpoint": str(ckpt_path),
             "results": results,
             "history_artifacts": artifact_paths,
+            "initial_state_selection": initial_state_metadata,
+            "persistent_chains": bool(re_cfg.persistent_chains),
         },
     )
     training_logger.info("[RE] Final checkpoint: %s", final_path)

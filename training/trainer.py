@@ -50,6 +50,7 @@ from .teacher_distillation import (
 )
 from utils.logging import training_logger
 from data.loader import build_tiled_dataset, attach_batch_metadata
+from data.static_neighbors import assert_static_graph_compatible
 
 
 HVP_FIELD_KEYS = ("hvp_probe", "HVP", "hvp_loss_mask")
@@ -134,6 +135,14 @@ class Trainer:
         self.batch_per_device = config.get_batch_per_device()
         self.batch_cache = config.get_batch_cache()
         self.gammas = config.get_gammas()
+        self._direct_force_mode = config.get_model_output_mode() == "direct_force"
+        if self._direct_force_mode:
+            if float(self.gammas.get("U", 0.0)) != 0.0:
+                raise ValueError("Direct-force teacher training requires gamma U = 0.")
+            training_logger.info(
+                "[DirectForce] Replacing Chemtrain's energy-gradient F observable "
+                "with the Allegro central direct-force head."
+            )
         self._dsm_cfg = dsm_config(config)
         if self._dsm_cfg["enabled"]:
             self.gammas = dict(self.gammas)
@@ -182,6 +191,24 @@ class Trainer:
         self._rank = jax.process_index()
         self._world_size = jax.process_count()
         self._batch_mode = config.get_batch_mode()
+        self._static_neighbors_cfg = config.get_static_neighbors_config()
+        self._static_neighbors_enabled = bool(self._static_neighbors_cfg["enabled"])
+        if self._static_neighbors_enabled:
+            # Fail before any graph is built or consumed: a graph that is stale
+            # with respect to the evaluated coordinates still yields finite
+            # forces and a converging run, so the error must be raised here
+            # rather than surfacing as a silent accuracy loss.
+            assert_static_graph_compatible(config)
+            training_logger.info(
+                "[StaticNeighbors] Enabled: backend=%s r_list=%.3f "
+                "(cutoff=%.3f + dr_threshold=%.3f) capacity_multiplier=%.2f. "
+                "Per-sample JAX-MD neighbor updates are disabled.",
+                self._static_neighbors_cfg["backend"],
+                self._static_neighbors_cfg["r_list"],
+                config.get_cutoff(),
+                config.get_dr_threshold(),
+                self._static_neighbors_cfg["capacity_multiplier"],
+            )
         self._global_device_count = jax.device_count()
         self._global_batch_size = self.batch_per_device * self._global_device_count
         self._grad_accum_steps = max(1, int(os.environ.get("CHEMTRAIN_GRAD_ACCUM_STEPS", "1")))
@@ -238,6 +265,9 @@ class Trainer:
         )
         self._tile_spatial_separation = (
             self._batch_mode == "tiled" and config.tile_spatial_separation_enabled()
+        )
+        self._tile_spatial_layout = (
+            config.get_tile_spatial_layout() if self._batch_mode == "tiled" else "line_x"
         )
         self._tile_structure_gap = (
             config.get_tile_structure_gap() if self._batch_mode == "tiled" else 25.0
@@ -1449,6 +1479,10 @@ class Trainer:
                 "dsm_eps",
                 "dsm_sigma",
                 "dsm_loss_mask",
+                # Static graph consumed by chemtrain's quantity_map; the
+                # companion neighbor_n_edges/neighbor_capacity arrays stay out of
+                # the loader since they are construction diagnostics only.
+                "neighbor_idx",
                 *HVP_FIELD_KEYS,
                 *SAFETY_FIELD_KEYS,
             ):
@@ -1495,6 +1529,7 @@ class Trainer:
             large_structure_threshold=self._tile_large_structure_threshold,
             large_structure_edge_threshold=self._tile_large_structure_edge_threshold,
             spatial_separation=self._tile_spatial_separation,
+            spatial_layout=self._tile_spatial_layout,
             structure_gap=self._tile_structure_gap,
             seed=epoch_seed,
             extra_per_atom_fields={
@@ -1502,6 +1537,7 @@ class Trainer:
                 for key in HVP_FIELD_KEYS
                 if key in train_source
             },
+            static_neighbors=self._static_neighbors_cfg,
         )
         t_build_end = time.perf_counter()
         tiled = attach_batch_metadata(
@@ -1695,6 +1731,11 @@ class Trainer:
             targets.update(make_safety_quantities(self.model, self.config))
         if teacher_distillation_enabled(self.config):
             targets.update(teacher_distillation_quantities(self.model, self.config))
+        if self._direct_force_mode:
+            # ForceMatching builds its standard F observable from -grad(E).
+            # Updating the same key is the supported Chemtrain mechanism for a
+            # force-only model and avoids all coordinate derivatives.
+            targets["F"] = self.model.direct_force_quantity
         return targets or None
 
     def _loader_reference_data(self, loader: Any) -> Dict[str, Any]:
@@ -2003,7 +2044,11 @@ class Trainer:
         )
 
         # Create energy function template
-        energy_fn_template = self.model.energy_fn_template
+        energy_fn_template = (
+            self.model.zero_energy_fn_template
+            if self._direct_force_mode
+            else self.model.energy_fn_template
+        )
 
         # Create ForceMatching trainer
         t_trainer_init_start = time.perf_counter()
@@ -2011,7 +2056,11 @@ class Trainer:
             init_params=self.params,
             optimizer=optimizer,
             energy_fn_template=energy_fn_template,
-            nbrs_init=self.model.initial_neighbors,
+            # nbrs_init=None makes chemtrain's quantity_map skip neighbor_update
+            # and fall through to the dataset-supplied `neighbor_idx` instead.
+            nbrs_init=(
+                None if self._static_neighbors_enabled else self.model.initial_neighbors
+            ),
             gammas=self.gammas,
             error_fns=self._force_matching_error_fns(),
             weights_keys=self._force_matching_weights_keys(),
@@ -2119,6 +2168,18 @@ class Trainer:
                 self._report_batch_profiler()
             if self._batch_stats_enabled:
                 self._report_epoch_profiles()
+
+        # Chemtrain currently catches update/compilation failures inside
+        # ``train`` and writes an ``epoch-*_error_state.pkl`` file instead of
+        # propagating the exception. Do not let such a failed stage continue
+        # into checkpoint/export code and appear as a successful zero-loss run.
+        if remaining_epochs > 0 and not getattr(trainer, "train_losses", []):
+            error_states = sorted(self.checkpoint_path.glob("epoch-*_error_state.pkl"))
+            detail = f"; error state: {error_states[-1]}" if error_states else ""
+            raise RuntimeError(
+                "Training stage produced no epoch losses. Chemtrain likely caught "
+                f"an update failure{detail}. See the training log for the original error."
+            )
         stage_wall_seconds = time.perf_counter() - stage_start_time
 
         # Update parameters

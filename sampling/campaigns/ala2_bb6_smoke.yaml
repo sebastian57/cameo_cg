@@ -1,0 +1,32 @@
+# ala2 6-bead backbone+CB enhanced sampling: teacher bias + TICA regional bias, together.
+# Both terms active; set enabled:false on either to run it alone.
+name: ala2_bb6_smoke
+mapping: ala2_backbone_cb_6
+output_dir: /e/project1/cameo/schmidt36/cameo_cg/local_work/sampling_runs/ala2_bb6_smoke
+n_replicas: 1
+
+# AA system: 298 K, must match the reference the CG data came from
+structure: /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/ala2_constrained/md_ala2.gro
+topology:  /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/ala2_constrained/topol.top
+mdp:       /e/project1/cameo/schmidt36/cameo_cg/sampling/campaigns/smoke_298K.mdp
+
+recompute_stride: 5   # socket round-trip every 5 steps; bias APPLIED every step
+socket_dir: /tmp
+ntomp: 8
+print_stride: 50
+report_every: 50
+monitor_cvs: [phi, psi, chirality]
+
+biases:
+  - type: mlcg_teacher
+    training_config_path: /e/project1/cameo/schmidt36/cameo_cg/local_work/outputs/ala2_bb6_teacher_mid96_fm300/exports/ala2_bb6_teacher_mid96_fm300_mid96_fm300_t1024_bpd4_ga4_config.yaml
+    params_path: /e/project1/cameo/schmidt36/cameo_cg/local_work/outputs/ala2_bb6_teacher_mid96_fm300/exports/ala2_bb6_teacher_mid96_fm300_mid96_fm300_t1024_bpd4_ga4_params.pkl
+    dataset_path: /e/project1/cameo/schmidt36/cameo_cg/local_work/input_data/ala2_cg_backbone_cb_6bead_200k.npz
+    alpha: 1.0
+    equilibrate_steps: 500      # 10 ps at 2 fs, alpha = 0
+    ramp_steps: 500             # 10 ps cosine ramp
+    enabled: true
+  - type: tica_regional
+    bias_npz: /e/project1/cameo/schmidt36/SAMPLING/tica_regional_weighting/results/ala2_bb6_reference/smooth_reference_bias_lambda0p25.npz
+    scale: 1.0
+    enabled: true

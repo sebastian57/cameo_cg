@@ -42,3 +42,40 @@ def apply_numpy_dataloader_patch():
 
     _NDL._get_indices = _patched_get_indices
     logging.info("[Patch] Applied NumpyDataLoader cache_size fix")
+
+
+def assert_gpu_when_allocated(context: str = "job") -> None:
+    """Fail fast if a SLURM job with an allocated GPU is silently running on CPU.
+
+    On this cluster a faulty node can return ``cuInit(0) failed: CUDA_ERROR_UNKNOWN``.
+    JAX then falls back to CPU and the job runs ~20x slower to the wall limit, producing
+    nothing, with only a traceback buried in stdout to show for it. Observed twice on
+    2026-07-31 (jobs 1137428_0 and 1139036, both on jpbo-001-48) at a cost of ~10 GPU-hours.
+
+    Raises RuntimeError when running under SLURM with a GPU in the allocation but no GPU
+    device visible to JAX. Outside SLURM, or when the user explicitly asked for CPU via
+    JAX_PLATFORMS, this is a no-op.
+    """
+    if not os.environ.get("SLURM_JOB_ID"):
+        return
+    if "cpu" in os.environ.get("JAX_PLATFORMS", "").lower():
+        return  # explicit opt-in to CPU
+    gres = (os.environ.get("SLURM_JOB_GRES", "")
+            or os.environ.get("SLURM_STEP_GRES", "")
+            or os.environ.get("SLURM_GPUS_PER_TASK", "")
+            or os.environ.get("SLURM_GPUS", ""))
+    if "gpu" not in gres.lower() and not gres.strip().isdigit():
+        return  # no GPU was requested; CPU is legitimate
+
+    platforms = {d.platform for d in jax.devices()}
+    if not platforms & {"gpu", "cuda", "rocm"}:
+        raise RuntimeError(
+            f"[{context}] SLURM allocated a GPU (SLURM_JOB_GRES={gres!r}) but JAX sees only "
+            f"{sorted(platforms)} on node {os.environ.get('SLURMD_NODENAME', '?')}.\n"
+            "This is the silent CUDA-init fallback: the run would proceed on CPU at roughly "
+            "1/20th speed and hit the wall limit having produced nothing.\n"
+            "Check the log above for 'cuInit(0) failed'. Resubmit excluding this node:\n"
+            f"    sbatch --exclude={os.environ.get('SLURMD_NODENAME', '<node>')} ...\n"
+            "Set JAX_PLATFORMS=cpu to run on CPU deliberately."
+        )
+    logging.info("[jax_setup] GPU confirmed: %s", sorted(platforms))

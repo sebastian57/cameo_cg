@@ -40,6 +40,45 @@ class ConfigManager:
         missing = [s for s in required_sections if s not in self._config]
         if missing:
             raise ValueError(f"Missing required config sections: {missing}")
+        output_mode = self.get_model_output_mode()
+        if output_mode == "direct_force":
+            if self.get_ml_model_type() != "allegro_cueq_fast":
+                raise ValueError(
+                    "model.output_mode=direct_force is currently supported only for "
+                    "model.ml_model=allegro_cueq_fast."
+                )
+            gammas = self.get_gammas()
+            if float(gammas.get("U", 0.0)) != 0.0:
+                raise ValueError("Direct-force teacher mode requires training.gammas.U=0.")
+            if bool(self.get("model", "use_priors", default=False)):
+                raise ValueError(
+                    "Direct-force teachers must be ML-only. Use training.prior_residual "
+                    "to train on F_mapped - F_prior."
+                )
+            if bool(self.get("export", "enabled", default=True)):
+                raise ValueError(
+                    "Direct-force teacher mode has no energy/MD export; set export.enabled=false."
+                )
+            incompatible = {
+                "training.relative_entropy.enabled": bool(
+                    self.get("training", "relative_entropy", "enabled", default=False)
+                ),
+                "training.dsm.enabled": bool(
+                    self.get("training", "dsm", "enabled", default=False)
+                ),
+                "training.hvp.enabled": bool(
+                    self.get("training", "hvp", "enabled", default=False)
+                ),
+                "training.safety.enabled": bool(
+                    self.get("training", "safety", "enabled", default=False)
+                ),
+            }
+            active = [name for name, enabled in incompatible.items() if enabled]
+            if active:
+                raise ValueError(
+                    "Direct-force teacher mode is incompatible with energy-derived "
+                    f"training features: {', '.join(active)}."
+                )
 
     def set(self, *keys_and_value) -> None:
         """Set a nested config value.  Last argument is the value.
@@ -121,6 +160,59 @@ class ConfigManager:
                 "Expected one of: standard, tiled."
             )
         return raw
+
+    def get_static_neighbors_config(self) -> Dict[str, Any]:
+        """
+        Static tiled neighbor-graph settings.
+
+        Returns:
+            Dict with `enabled`, `backend`, `block_size`, `capacity_multiplier`
+            and `r_list`. `r_list` defaults to `model.cutoff + model.dr_threshold`,
+            reproducing the candidate radius JAX-MD would have used.
+        """
+        cfg = self.get("data", "static_neighbors", default={}) or {}
+        if not isinstance(cfg, dict):
+            raise ValueError("data.static_neighbors must be a mapping.")
+
+        backend = str(cfg.get("backend", "kdtree")).strip().lower()
+        if backend not in ("kdtree", "chunked"):
+            raise ValueError(
+                f"Unsupported data.static_neighbors.backend='{backend}'. "
+                "Expected one of: kdtree, chunked."
+            )
+
+        block_size = int(cfg.get("block_size", 1024))
+        if block_size < 1:
+            raise ValueError(
+                f"data.static_neighbors.block_size must be >= 1, got {block_size}."
+            )
+
+        capacity_multiplier = float(cfg.get("capacity_multiplier", 1.0))
+        if capacity_multiplier < 1.0:
+            raise ValueError(
+                "data.static_neighbors.capacity_multiplier must be >= 1.0, got "
+                f"{capacity_multiplier}."
+            )
+
+        r_list = cfg.get("r_list", None)
+        if r_list is None:
+            r_list = float(self.get_cutoff()) + float(self.get_dr_threshold())
+        else:
+            r_list = float(r_list)
+            if r_list < float(self.get_cutoff()):
+                raise ValueError(
+                    f"data.static_neighbors.r_list={r_list} is below "
+                    f"model.cutoff={self.get_cutoff()}; edges inside the model "
+                    "cutoff would be missing from the graph."
+                )
+
+        return {
+            "enabled": bool(cfg.get("enabled", False)),
+            "backend": backend,
+            "block_size": block_size,
+            "capacity_multiplier": capacity_multiplier,
+            "r_list": r_list,
+        }
 
     def get_tile_target_beads(self) -> int:
         value = int(self.get("data", "tile_target_beads", default=1000))
@@ -235,6 +327,18 @@ class ConfigManager:
     def tile_spatial_separation_enabled(self) -> bool:
         return bool(self.get("data", "tile_spatial_separation", default=False))
 
+    def get_tile_spatial_layout(self) -> str:
+        raw = str(self.get("data", "tile_spatial_layout", default="line_x"))
+        normalized = raw.strip().lower()
+        aliases = {"line": "line_x", "1d": "line_x", "grid": "grid_3d", "3d": "grid_3d"}
+        normalized = aliases.get(normalized, normalized)
+        if normalized not in ("line_x", "grid_3d"):
+            raise ValueError(
+                f"Unsupported data.tile_spatial_layout='{raw}'. "
+                "Expected one of: line_x, grid_3d."
+            )
+        return normalized
+
     def get_tile_structure_gap(self) -> float:
         value = float(self.get("data", "tile_structure_gap", default=25.0))
         if value <= 0.0:
@@ -268,6 +372,75 @@ class ConfigManager:
 
     def get_cutoff(self) -> float:
         return self.get("model", "cutoff", default=10.0)
+
+    def get_model_output_mode(self) -> str:
+        raw = str(self.get("model", "output_mode", default="energy")).strip().lower()
+        aliases = {
+            "force": "direct_force",
+            "forces": "direct_force",
+            "direct_forces": "direct_force",
+        }
+        mode = aliases.get(raw, raw)
+        if mode not in ("energy", "direct_force"):
+            raise ValueError(
+                f"Unsupported model.output_mode={raw!r}. Expected 'energy' or 'direct_force'."
+            )
+        return mode
+
+    def get_direct_force_config(self) -> Dict[str, Any]:
+        raw = self.get("model", "direct_force", default={}) or {}
+        if not isinstance(raw, dict):
+            raise ValueError("model.direct_force must be a mapping.")
+        cfg = {
+            "hidden": int(raw.get("head_hidden", 128)),
+            "layers": int(raw.get("head_layers", 2)),
+            "envelope_p": int(raw.get("envelope_p", 6)),
+            "zero_init": bool(raw.get("zero_init", True)),
+            "require_bidirectional_edges": bool(raw.get("require_bidirectional_edges", True)),
+        }
+        if cfg["hidden"] <= 0:
+            raise ValueError("model.direct_force.head_hidden must be > 0.")
+        if cfg["layers"] < 0:
+            raise ValueError("model.direct_force.head_layers must be >= 0.")
+        if cfg["envelope_p"] <= 0:
+            raise ValueError("model.direct_force.envelope_p must be > 0.")
+        return cfg
+
+    def get_force_label_config(self) -> Dict[str, Any]:
+        raw = self.get("training", "force_labels", default={}) or {}
+        if not isinstance(raw, dict):
+            raise ValueError("training.force_labels must be a mapping.")
+        mode = str(raw.get("mode", "raw")).strip().lower()
+        if mode not in ("raw", "teacher", "raw_teacher_blend"):
+            raise ValueError(
+                "training.force_labels.mode must be raw, teacher, or raw_teacher_blend."
+            )
+        cfg = {
+            "mode": mode,
+            "teacher_key": str(raw.get("teacher_key", "TeacherForce")),
+            "raw_weight": float(raw.get("raw_weight", 2.0)),
+            "teacher_weight": float(raw.get("teacher_weight", 1.0)),
+        }
+        if cfg["raw_weight"] < 0.0 or cfg["teacher_weight"] < 0.0:
+            raise ValueError("Force-label weights must be non-negative.")
+        if mode == "raw_teacher_blend" and cfg["raw_weight"] + cfg["teacher_weight"] <= 0.0:
+            raise ValueError("At least one force-label blend weight must be positive.")
+        return cfg
+
+    def get_crossfit_config(self) -> Dict[str, Any]:
+        raw = self.get("data", "crossfit", default={}) or {}
+        if not isinstance(raw, dict):
+            raise ValueError("data.crossfit must be a mapping.")
+        cfg = {
+            "enabled": bool(raw.get("enabled", False)),
+            "manifest_path": raw.get("manifest_path"),
+            "held_out_fold": int(raw.get("held_out_fold", 0)),
+        }
+        if cfg["enabled"] and not cfg["manifest_path"]:
+            raise ValueError("data.crossfit.enabled=true requires manifest_path.")
+        if cfg["held_out_fold"] < 0:
+            raise ValueError("data.crossfit.held_out_fold must be >= 0.")
+        return cfg
 
     def get_dr_threshold(self) -> float:
         return self.get("model", "dr_threshold", default=0.5)
@@ -313,6 +486,19 @@ class ConfigManager:
         with cuEq-specific overrides layered on top when applicable."""
         use_cueq_cfg = self.get_ml_model_type() in ("allegro_cueq", "allegro_cueq_fast")
         cfg: Dict[str, Any] = dict(self.get("model", "allegro", default={}))
+
+        nested_cueq_keys = [
+            key for key in ("allegro_cuEq", "allegro_cueq")
+            if isinstance(cfg.get(key), dict)
+        ]
+        if nested_cueq_keys:
+            nested_paths = ", ".join(f"model.allegro.{key}" for key in nested_cueq_keys)
+            warnings.warn(
+                f"cuEq override block(s) {nested_paths} are nested too deeply and will "
+                "not override Allegro settings. Move them to model.allegro_cueq "
+                "(or model.allegro_cuEq).",
+                UserWarning,
+            )
 
         if use_cueq_cfg:
             for key in ("allegro_cuEq", "allegro_cueq"):

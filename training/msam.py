@@ -12,8 +12,28 @@ import optax
 from jax import lax, value_and_grad
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh, PartitionSpec
+try:
+    from jax.sharding import get_abstract_mesh
+except ImportError:
+    class _EmptyAbstractMesh:
+        empty = True
+
+    def get_abstract_mesh():
+        return _EmptyAbstractMesh()
 
 from chemtrain.learn import max_likelihood
+
+
+def _replicate_tree_when_mesh_active(tree: Any) -> Any:
+    """Convert Auto-mesh leaves to replicated Manual-mesh leaves in shard_map."""
+    if get_abstract_mesh().empty:
+        return tree
+    return jax.tree_util.tree_map(
+        lambda x: lax.with_sharding_constraint(x, PartitionSpec())
+        if isinstance(x, jax.Array)
+        else x,
+        tree,
+    )
 
 
 def tree_l2_norm(tree: Any) -> jax.Array:
@@ -230,15 +250,18 @@ def shmap_msam_update_fn(
                     check_rep=False,
                 )
                 def _inner(batch):
+                    local_params = _replicate_tree_when_mesh_active(params)
+                    local_opt_state = _replicate_tree_when_mesh_active(opt_state)
                     (loss, per_target_loss), grad = _msam_accumulated_local_grad(
                         param_loss_fn,
-                        params,
+                        local_params,
                         batch,
                         microbatch_count,
                         accum_mode,
                         rho,
                         epsilon,
                     )
+                    grad = _replicate_tree_when_mesh_active(grad)
                     grad = max_likelihood._cast_tree_floating(grad, reduce_dtype)
                     loss = jnp.asarray(loss, dtype=reduce_dtype)
                     per_target_loss = max_likelihood._cast_tree_floating(
@@ -247,9 +270,9 @@ def shmap_msam_update_fn(
                     grad = lax.pmean(grad, axis_name="batch")
                     loss = lax.pmean(loss, axis_name="batch")
                     per_target_loss = lax.pmean(per_target_loss, axis_name="batch")
-                    grad = max_likelihood._cast_grad_like_params(grad, params)
+                    grad = max_likelihood._cast_grad_like_params(grad, local_params)
                     new_params, new_opt_state = max_likelihood.step_optimizer(
-                        params, opt_state, grad, optimizer
+                        local_params, local_opt_state, grad, optimizer
                     )
                     return new_params, new_opt_state, loss, grad, per_target_loss
 
@@ -308,4 +331,3 @@ def shmap_msam_update_fn(
         return new_params, new_opt_state, loss, grad
 
     return batch_update
-

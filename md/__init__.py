@@ -1,5 +1,9 @@
 """JAX-MD simulation runners and analysis tools for trained CG protein force fields."""
 
+from utils.jax_setup import apply_jax_compat_shims
+
+apply_jax_compat_shims()
+
 from .runner import MDRunner
 from .units import to_akma, register_converter, describe_akma
 from .dump import write_lammps_dump

@@ -1,6 +1,9 @@
 """JAX-MD simulation runner for trained CG protein force fields.
 
 Runs NVT-Langevin or NVE dynamics using a CombinedModel loaded from PKL params.
+Energy-output models use conservative forces from autodiff. Direct-force models
+pass their vector force function to JAX-MD and report potential-energy fields as
+unavailable (NaN), because no scalar potential exists for those models.
 All quantities in AKMA units (Å, kcal/mol, amu); 1 AKMA time unit ≈ 48.88 fs.
 """
 
@@ -52,6 +55,8 @@ class MDRunner:
     ):
         self.model = model
         self.params = params
+        self.direct_force_mode = bool(getattr(model, "direct_force_enabled", False))
+        self.energy_available = not self.direct_force_mode
 
         self.integrator        = str(md_config.get("integrator", "nvt_langevin"))
         self.n_steps           = int(md_config.get("n_steps", 1000))
@@ -73,6 +78,10 @@ class MDRunner:
         self.partial_output_path = (
             Path(partial_output_path) if partial_output_path else None
         )
+        safety = md_config.get("stability_abort", {}) or {}
+        self.abort_min_pair_distance = float(safety.get("min_pair_distance_A", 0.0))
+        self.abort_max_force = float(safety.get("max_force_kcal_per_mol_A", float("inf")))
+        self.abort_max_temperature = float(safety.get("max_temperature_K", float("inf")))
 
         # Equilibration
         self.equilibrate       = bool(md_config.get("equilibrate", False))
@@ -133,14 +142,39 @@ class MDRunner:
                     f"scan_chunk_size ({self.scan_chunk_size})."
                 )
 
-        energy_fn = model.energy_fn_template(params)
-        # Cache energy_fn so _potential_energy doesn't rebuild it each call.
-        self._energy_fn = energy_fn
+        if self.direct_force_mode and self.force_decomp:
+            raise ValueError(
+                "force_decomp is unavailable for model.output_mode=direct_force "
+                "because the model has no scalar energy components."
+            )
 
-        def force_fn(R, neighbor, **kwargs):
-            def energy_of_R(R_):
-                return energy_fn(R_, neighbor, **kwargs)
-            return -jax.grad(energy_of_R)(R)
+        if self.direct_force_mode:
+            self._energy_fn = None
+
+            def force_fn(R, neighbor, **kwargs):
+                mask = kwargs["mask"]
+                species = jnp.where(mask > 0, kwargs["species"], 0).astype(jnp.int32)
+                return model.compute_direct_force(
+                    params,
+                    R,
+                    mask,
+                    species,
+                    neighbor=neighbor,
+                    segment_id=kwargs.get("segment_id"),
+                )
+
+            dynamics_fn = force_fn
+        else:
+            energy_fn = model.energy_fn_template(params)
+            # Cache energy_fn so observables do not rebuild it each call.
+            self._energy_fn = energy_fn
+
+            def force_fn(R, neighbor, **kwargs):
+                def energy_of_R(R_):
+                    return energy_fn(R_, neighbor, **kwargs)
+                return -jax.grad(energy_of_R)(R)
+
+            dynamics_fn = energy_fn
 
         self._force_fn = jax.jit(force_fn)
 
@@ -148,18 +182,18 @@ class MDRunner:
 
         if self.integrator == "nvt_langevin":
             self._init_fn, _step_fn = simulate.nvt_langevin(
-                energy_fn, shift_fn, self.dt, self.kT, self.gamma
+                dynamics_fn, shift_fn, self.dt, self.kT, self.gamma
             )
         elif self.integrator == "nvt_nose_hoover":
             _tau = float(md_config.get("tau", 100.0 * self.dt))
             _raw_init, _step_fn = simulate.nvt_nose_hoover(
-                energy_fn, shift_fn, self.dt, self.kT, tau=_tau
+                dynamics_fn, shift_fn, self.dt, self.kT, tau=_tau
             )
             self._init_fn = _raw_init
         else:  # nve
             # nve init_fn requires kT as a positional arg (Maxwell-Boltzmann init).
             # Wrap it so call sites in run() are uniform across integrators.
-            _raw_init, _step_fn = simulate.nve(energy_fn, shift_fn, self.dt)
+            _raw_init, _step_fn = simulate.nve(dynamics_fn, shift_fn, self.dt)
             _kT = self.kT
             self._init_fn = lambda key, R, **kw: _raw_init(key, R, _kT, **kw)
 
@@ -173,6 +207,10 @@ class MDRunner:
             f"MDRunner: integrator={self.integrator} n_steps={self.n_steps} "
             f"dt={self.dt:.5f} AKMA kT={self.kT:.4f} kcal/mol mass={mass_str}"
         )
+        if self.direct_force_mode:
+            md_logger.info(
+                "  model output: direct force (PE/E_total unavailable; stored as NaN)"
+            )
         if self.integrator == "nvt_langevin":
             md_logger.info(f"  gamma={self.gamma:.6f} AKMA^-1 (τ ≈ {1/self.gamma:.1f} AKMA)")
         elif self.integrator == "nvt_nose_hoover":
@@ -453,7 +491,7 @@ class MDRunner:
         out_R    = np.zeros((n_traj_frames, R0.shape[0], 3), dtype=np.float32)
         out_F    = np.zeros_like(out_R)
         out_KE   = np.zeros(n_traj_frames, dtype=np.float32)
-        out_PE   = np.zeros(n_traj_frames, dtype=np.float32)
+        out_PE   = np.full(n_traj_frames, np.nan, dtype=np.float32)
         out_T    = np.zeros(n_traj_frames, dtype=np.float32)
         out_step = np.zeros(n_traj_frames, dtype=np.int32)
 
@@ -476,6 +514,8 @@ class MDRunner:
         obs_buf: Dict[str, np.ndarray] = {
             k: np.zeros(n_obs_frames, dtype=np.float32) for k in _ALL_OBSERVABLES
         }
+        obs_buf["PE"].fill(np.nan)
+        obs_buf["E_total"].fill(np.nan)
         # step is integer
         obs_buf["step"] = np.zeros(n_obs_frames, dtype=np.int32)
 
@@ -486,6 +526,8 @@ class MDRunner:
             return float(np.asarray(jnp.sum(jnp.where(valid_mask, per_atom_ke, 0.0))))
 
         def _pe(s, nb):
+            if not self.energy_available:
+                return float("nan")
             return float(np.asarray(
                 self._energy_fn(s.position, nb, mask=valid_mask, species=species)
             ))
@@ -506,7 +548,7 @@ class MDRunner:
             obs_buf["step"][idx]       = step
             obs_buf["KE"][idx]         = ke
             obs_buf["PE"][idx]         = pe
-            obs_buf["E_total"][idx]    = ke + pe
+            obs_buf["E_total"][idx]    = ke + pe if self.energy_available else np.nan
             obs_buf["T"][idx]          = 2.0 * ke / (n_dof * _kB_KCAL)
             if "pressure" in self.observables or "box_volume" in self.observables:
                 R_v = np.asarray(s.position)[np.asarray(valid_mask)]
@@ -590,6 +632,10 @@ class MDRunner:
                 "species": np.asarray(species, dtype=np.int32),
                 "mask":    np.asarray(mask, dtype=np.float32),
                 "complete": np.asarray(not interrupted, dtype=np.bool_),
+                "energy_available": np.asarray(self.energy_available, dtype=np.bool_),
+                "model_output_mode": np.asarray(
+                    "direct_force" if self.direct_force_mode else "energy"
+                ),
             }
             if traj_count > 0:
                 traj["last_step"] = np.asarray(out_step[traj_count - 1], dtype=np.int32)
@@ -628,6 +674,22 @@ class MDRunner:
                 **_build_traj(traj_count, obs_count, decomp_count, interrupted=interrupted),
             )
             os.replace(tmp_path, self.partial_output_path)
+
+        valid_np = np.asarray(valid_mask, dtype=bool)
+
+        def _check_stability(R_np, F_np, temperature, step):
+            if not (np.isfinite(R_np).all() and np.isfinite(F_np).all() and np.isfinite(temperature)):
+                raise RuntimeError(f"MD stability abort at step {step}: NaN/Inf detected")
+            max_force = float(np.max(np.linalg.norm(F_np[valid_np], axis=-1)))
+            R_valid = R_np[valid_np]
+            distances = np.linalg.norm(R_valid[:, None, :] - R_valid[None, :, :], axis=-1)
+            distances[np.diag_indices_from(distances)] = np.inf
+            min_pair = float(np.min(distances))
+            if min_pair < self.abort_min_pair_distance or max_force > self.abort_max_force or temperature > self.abort_max_temperature:
+                raise RuntimeError(
+                    f"MD stability abort at step {step}: min_pair={min_pair:.6g} A, "
+                    f"max_force={max_force:.6g} kcal/mol/A, T={temperature:.6g} K"
+                )
 
         # ── Production loop ─────────────────────────────────────────────
         # Record step 0.
@@ -684,8 +746,6 @@ class MDRunner:
             # Pre-compute mass array for KE: shape (N,) for sum(p^2 / m)
             mass_1d = np.asarray(mass_arr)[..., 0]       # (N,)
             nbrs_base = ml.nbrs_init                      # base for PE neighbor refresh
-            valid_np = np.asarray(valid_mask)
-
             n_chunks = self.n_steps // _K
             try:
                 for chunk_i in range(n_chunks):
@@ -714,9 +774,12 @@ class MDRunner:
                         # nbrs_base (= nbrs_init, ref_pos = R0) ensures the
                         # displacement from R0 >> dr_threshold, so the full
                         # neighbor list is always rebuilt from scratch.
-                        R_jax = jnp.asarray(pos_np[local_i])
-                        nb_pe = _nnu(R_jax, nbrs_base, mask=valid_mask)
-                        pe = float(np.asarray(_efn(R_jax, nb_pe, mask=valid_mask, species=species)))
+                        if self.energy_available:
+                            R_jax = jnp.asarray(pos_np[local_i])
+                            nb_pe = _nnu(R_jax, nbrs_base, mask=valid_mask)
+                            pe = float(np.asarray(_efn(R_jax, nb_pe, mask=valid_mask, species=species)))
+                        else:
+                            pe = float("nan")
                         pe_cache = pe
 
                         if need_traj:
@@ -727,6 +790,11 @@ class MDRunner:
                             out_T[traj_idx]    = 2.0 * ke / (n_dof * _kB_KCAL)
                             out_step[traj_idx] = g_step
                             traj_idx += 1
+                            try:
+                                _check_stability(pos_np[local_i], F_np[local_i], out_T[traj_idx - 1], g_step)
+                            except RuntimeError:
+                                _write_partial(traj_idx, obs_idx, 0, interrupted=True)
+                                raise
                             if (traj_idx - 1) % self.continuous_output_every == 0:
                                 _write_partial(traj_idx, obs_idx, 0)
 
@@ -734,7 +802,9 @@ class MDRunner:
                             obs_buf["step"][obs_idx]     = g_step
                             obs_buf["KE"][obs_idx]       = ke
                             obs_buf["PE"][obs_idx]       = pe
-                            obs_buf["E_total"][obs_idx]  = ke + pe
+                            obs_buf["E_total"][obs_idx]  = (
+                                ke + pe if self.energy_available else np.nan
+                            )
                             obs_buf["T"][obs_idx]        = 2.0 * ke / (n_dof * _kB_KCAL)
                             if "pressure" in self.observables or "box_volume" in self.observables:
                                 R_v = pos_np[local_i][valid_np]
@@ -748,7 +818,7 @@ class MDRunner:
                                     )
                             obs_idx += 1
 
-            except KeyboardInterrupt:
+            except (KeyboardInterrupt, RuntimeError):
                 jax.block_until_ready(state.position)
                 _write_partial(traj_idx, obs_idx, 0, interrupted=True)
                 if self.partial_output_path is not None:
@@ -776,6 +846,11 @@ class MDRunner:
                     if step % self.output_every == 0:
                         _record_traj(traj_idx, step, state, nbrs)
                         traj_idx += 1
+                        try:
+                            _check_stability(out_R[traj_idx - 1], out_F[traj_idx - 1], out_T[traj_idx - 1], step)
+                        except RuntimeError:
+                            _write_partial(traj_idx, obs_idx, decomp_idx, interrupted=True)
+                            raise
                         wrote_traj = True
 
                     if step % self.observables_every == 0:
@@ -791,7 +866,7 @@ class MDRunner:
                         and (traj_idx - 1) % self.continuous_output_every == 0
                     ):
                         _write_partial(traj_idx, obs_idx, decomp_idx)
-            except KeyboardInterrupt:
+            except (KeyboardInterrupt, RuntimeError):
                 jax.block_until_ready(state.position)
                 _write_partial(traj_idx, obs_idx, decomp_idx, interrupted=True)
                 if self.partial_output_path is not None:
@@ -802,11 +877,15 @@ class MDRunner:
                 raise
 
         elapsed = time.perf_counter() - t_loop
+        final_energy = (
+            f"PE_final={obs_buf['PE'][obs_idx-1]:.3f} kcal/mol"
+            if self.energy_available
+            else "PE_final=unavailable"
+        )
         md_logger.info(
             f"MD complete: {self.n_steps} steps in {elapsed:.1f} s "
             f"({elapsed / self.n_steps * 1000:.2f} ms/step)  "
-            f"T_final={obs_buf['T'][obs_idx-1]:.1f} K  "
-            f"PE_final={obs_buf['PE'][obs_idx-1]:.3f} kcal/mol"
+            f"T_final={obs_buf['T'][obs_idx-1]:.1f} K  {final_energy}"
         )
         if self.force_decomp and decomp_idx > 0:
             md_logger.info(

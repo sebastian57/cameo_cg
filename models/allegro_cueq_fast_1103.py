@@ -16,6 +16,7 @@ import jax.numpy as jnp
 from jax_md import space, partition, util as md_util
 from utils.logging import model_logger
 from training.edge_distance_gate import compute_edge_distance_gate
+from models.direct_force import scatter_central_pair_forces
 
 # Resolve helper module paths used by the fast backend implementation.
 # The helper files live in the sibling repository directory:
@@ -156,6 +157,26 @@ def _rep_scalar_features_and_group_ids(rep: cuex.RepArray) -> tuple[jnp.ndarray,
         width = int(mul) * int(ir.dim)
         chunk = rep.array[:, offset : offset + width]
         if int(ir.l) == 0 and int(ir.p) == 1:
+            parts.append(chunk)
+            groups.extend([group_id] * width)
+            group_id += 1
+        offset += width
+    if parts:
+        return jnp.concatenate(parts, axis=-1), jnp.asarray(groups, dtype=jnp.int32)
+    return jnp.zeros((rep.array.shape[0], 0), dtype=rep.array.dtype), jnp.zeros((0,), dtype=jnp.int32)
+
+
+def _rep_odd_scalar_features_and_group_ids(rep: cuex.RepArray) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Extract 0o scalar TP features and group IDs per scalar irrep block."""
+    irreps = rep.irreps if isinstance(rep.irreps, cue.Irreps) else rep.irreps.irreps
+    offset = 0
+    parts = []
+    groups = []
+    group_id = 0
+    for mul, ir in irreps:
+        width = int(mul) * int(ir.dim)
+        chunk = rep.array[:, offset : offset + width]
+        if int(ir.l) == 0 and int(ir.p) == -1:
             parts.append(chunk)
             groups.extend([group_id] * width)
             group_id += 1
@@ -1216,6 +1237,7 @@ class AllegroLayer(hk.Module):
 
         if return_intermediates:
             tp_scalar_only, tp_scalar_groups = _rep_scalar_features_and_group_ids(V_new)
+            tp_odd_scalar_only, tp_odd_scalar_groups = _rep_odd_scalar_features_and_group_ids(V_new)
             return y, V_out, {
                 "env_norm_features": _axis_irrep_norm_features(wY_axis, Y_irreps),
                 "env_norm_feature_groups": _axis_irrep_group_ids(wY_axis, Y_irreps),
@@ -1224,6 +1246,8 @@ class AllegroLayer(hk.Module):
                 "tp_scalar_features": x_new,
                 "tp_scalar_only_features": tp_scalar_only,
                 "tp_scalar_only_feature_groups": tp_scalar_groups,
+                "tp_odd_scalar_features": tp_odd_scalar_only,
+                "tp_odd_scalar_feature_groups": tp_odd_scalar_groups,
                 "scalar_update_features": y,
             }
 
@@ -1286,6 +1310,87 @@ class AllegroFastForceHead(hk.Module):
         return node_vec
 
 
+class AllegroCentralForceHead(hk.Module):
+    """Direct-force readout with pairwise momentum and torque conservation.
+
+    The scalar coefficient is allowed to be directional and many-body.  Each
+    directed edge contribution is scattered with opposite signs to its two
+    endpoints.  For the bidirectional graphs produced by JAX-MD, the two
+    directed contributions therefore implement the explicit
+    ``0.5 * (a_ij + a_ji)`` symmetrization without a reverse-edge lookup.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int = 128,
+        n_hidden_layers: int = 2,
+        envelope_p: int = 6,
+        activation=jax.nn.silu,
+        zero_init: bool = True,
+        name: Optional[str] = None,
+    ):
+        super().__init__(name=name)
+        self.hidden_size = int(hidden_size)
+        self.n_hidden_layers = int(n_hidden_layers)
+        self.envelope_p = int(envelope_p)
+        self.activation = activation
+        self.zero_init = bool(zero_init)
+        if self.hidden_size <= 0:
+            raise ValueError("direct-force hidden_size must be > 0")
+        if self.n_hidden_layers < 0:
+            raise ValueError("direct-force n_hidden_layers must be >= 0")
+
+    def __call__(
+        self,
+        vectors: cuex.RepArray,
+        x: jnp.ndarray,
+        V: cuex.RepArray,
+        senders: jnp.ndarray,
+        receivers: jnp.ndarray,
+        valid_edges: jnp.ndarray,
+        num_nodes: int,
+    ) -> jnp.ndarray:
+        """Return direct per-node forces with shape ``[N, 3]``."""
+        scalar_V = AllegroReadout._extract_scalar_channels(V)
+        features = jnp.concatenate((x, scalar_V), axis=-1)
+        hidden = features
+        for layer_idx in range(self.n_hidden_layers):
+            hidden = hk.Linear(
+                self.hidden_size,
+                name=f"hidden_{layer_idx}",
+            )(hidden)
+            hidden = self.activation(hidden)
+
+        output_init = (
+            hk.initializers.Constant(0.0)
+            if self.zero_init
+            else hk.initializers.VarianceScaling(1.0, "fan_in", "truncated_normal")
+        )
+        coefficient = hk.Linear(
+            1,
+            w_init=output_init,
+            b_init=hk.initializers.Constant(0.0),
+            name="coefficient",
+        )(hidden).squeeze(-1)
+
+        vector_array = vectors.array
+        distance_scaled = jnp.linalg.norm(vector_array, axis=-1)
+        envelope = polynomial_envelope(
+            distance_scaled,
+            p=self.envelope_p,
+            cutoff=1.0,
+        )
+        return scatter_central_pair_forces(
+            coefficient,
+            vector_array,
+            senders,
+            receivers,
+            valid_edges,
+            num_nodes,
+            edge_scale=envelope,
+        )
+
+
 class AllegroReadout(hk.Module):
     """Readout layer to produce per-edge energies.
 
@@ -1299,6 +1404,7 @@ class AllegroReadout(hk.Module):
         output_n_layers: int,
         envelope_p: int = 6,
         output_activation = jax.nn.silu,
+        parity_odd_readout: bool = False,
         name: Optional[str] = None
     ):
         """Initialize AllegroReadout.
@@ -1315,6 +1421,12 @@ class AllegroReadout(hk.Module):
         self.output_n_layers = output_n_layers
         self.envelope_p = envelope_p
         self.output_activation = output_activation
+        # Standard Allegro reads out a pure even scalar (0e), which makes the energy
+        # O(3)-invariant: U(R) == U(mirror R) exactly, so the model cannot distinguish
+        # enantiomers. Enabling this admits pseudoscalar (0o) channels into the readout,
+        # making the energy SO(3)-invariant but parity-odd-capable, which is what a
+        # chiral molecule's PMF actually requires.
+        self.parity_odd_readout = bool(parity_odd_readout)
 
     @staticmethod
     def _e3nn_style_linear_no_bias(
@@ -1333,8 +1445,8 @@ class AllegroReadout(hk.Module):
         return jnp.sqrt(alpha) * jnp.matmul(x, w)
 
     @staticmethod
-    def _extract_scalar_channels(rep: cuex.RepArray) -> jnp.ndarray:
-        """Extract 0e channels from a RepArray in ir_mul layout."""
+    def _extract_scalar_channels(rep: cuex.RepArray, include_odd: bool = False) -> jnp.ndarray:
+        """Extract 0e (and optionally 0o) channels from a RepArray in ir_mul layout."""
         irreps = rep.irreps if isinstance(rep.irreps, cue.Irreps) else rep.irreps.irreps
         offset = 0
         scalar_parts = []
@@ -1342,7 +1454,7 @@ class AllegroReadout(hk.Module):
         for mul, ir in irreps:
             width = mul * ir.dim
             chunk = rep.array[:, offset:offset + width]
-            if ir.l == 0 and ir.p == 1:
+            if ir.l == 0 and (ir.p == 1 or (include_odd and ir.p == -1)):
                 scalar_parts.append(chunk)
             offset += width
 
@@ -1386,7 +1498,9 @@ class AllegroReadout(hk.Module):
             xV = cuex.concatenate([x_rep, V])
             h_in_array = xV.array
 
-            scalar_features = self._extract_scalar_channels(xV)
+            scalar_features = self._extract_scalar_channels(
+                xV, include_odd=self.parity_odd_readout
+            )
             fan_in = scalar_features.shape[-1]
 
             if fan_in == 0:
@@ -1550,6 +1664,15 @@ class Allegro(hk.Module):
         fast_force_source: str = "layer0",
         fast_force_aggregate: Literal["receiver", "sender"] = "receiver",
         fast_force_degree_norm: Optional[Literal["deg_sqrt", "deg"]] = None,
+        enable_direct_force_head: bool = False,
+        direct_force_hidden: int = 128,
+        direct_force_layers: int = 2,
+        direct_force_envelope_p: int = 6,
+        direct_force_zero_init: bool = True,
+        parity_odd_readout: bool = False,
+        chirality_head_enabled: bool = False,
+        chirality_sign: float = 0.0,
+        chirality_known: bool = False,
         name: str = 'Allegro'
     ):
         """Initialize Allegro model.
@@ -1602,8 +1725,12 @@ class Allegro(hk.Module):
         self.output_irreps = output_irreps
         self.mlp_n_hidden = mlp_n_hidden
         self.enable_fast_force_head = bool(enable_fast_force_head)
+        self.enable_direct_force_head = bool(enable_direct_force_head)
         self.fast_force_source = fast_force_source
         self.remat_layers = bool(remat_layers)
+        self.chirality_head_enabled = bool(chirality_head_enabled)
+        self.chirality_sign = float(chirality_sign)
+        self.chirality_known = bool(chirality_known)
         self.tp_fused_option_b1_layer0 = bool(tp_fused_option_b1_layer0)
         self.tp_fused_option_b1_modes = _parse_mode_csv(tp_fused_option_b1_modes)
         if self.tp_fused_option_b1_layer0 and self.tp_fused_option_b1_modes is None:
@@ -1681,7 +1808,8 @@ class Allegro(hk.Module):
             output_activation=(
                 mlp_activation if mlp_output_activation is None else mlp_output_activation
             ),
-            envelope_p=envelope_p
+            envelope_p=envelope_p,
+            parity_odd_readout=parity_odd_readout,
         )
 
         self.fast_force_head = (
@@ -1693,6 +1821,18 @@ class Allegro(hk.Module):
             if self.enable_fast_force_head
             else None
         )
+        self.direct_force_head = (
+            AllegroCentralForceHead(
+                hidden_size=direct_force_hidden,
+                n_hidden_layers=direct_force_layers,
+                envelope_p=direct_force_envelope_p,
+                activation=mlp_activation,
+                zero_init=direct_force_zero_init,
+                name="central_force_head",
+            )
+            if self.enable_direct_force_head
+            else None
+        )
 
     def __call__(
         self,
@@ -1702,8 +1842,12 @@ class Allegro(hk.Module):
         species: jnp.ndarray,
         num_nodes: int,
         return_fast_forces: bool = False,
+        return_direct_forces: bool = False,
         compute_energy: bool = True,
         return_al_features: bool = False,
+        valid_edges: Optional[jnp.ndarray] = None,
+        chirality_sign: Optional[jax.Array] = None,
+        chirality_known: Optional[jax.Array] = None,
     ) -> Union[cuex.RepArray, jnp.ndarray, Tuple[cuex.RepArray, jnp.ndarray]]:
         """Predict per-edge energies and optionally fast per-node forces.
 
@@ -1725,6 +1869,12 @@ class Allegro(hk.Module):
             raise ValueError(
                 "return_fast_forces=True requires enable_fast_force_head=True in Allegro init."
             )
+        if return_direct_forces and self.direct_force_head is None:
+            raise ValueError(
+                "return_direct_forces=True requires enable_direct_force_head=True."
+            )
+        if return_direct_forces and return_fast_forces:
+            raise ValueError("Legacy fast forces and central direct forces are mutually exclusive.")
 
         x, V = self.embedding_layer(vectors, senders, receivers, species)
         source_V = V if self.fast_force_source == "embedding" else None
@@ -1736,8 +1886,11 @@ class Allegro(hk.Module):
         tp_scalar_parts = []
         tp_scalar_only_parts = []
         tp_scalar_only_group_parts = []
+        tp_odd_scalar_parts = []
+        tp_odd_scalar_group_parts = []
         scalar_update_parts = []
         x_state_parts = []
+        needs_layer_aux = return_al_features or self.chirality_head_enabled
         if return_al_features:
             latent_norm = _rep_irrep_norm_features(V)
             if latent_norm.shape[-1] > 0:
@@ -1749,7 +1902,7 @@ class Allegro(hk.Module):
                 layer_out = hk.remat(
                     lambda vectors_, x_, V_, senders_, species_, layer=layer: layer(
                         vectors_, x_, V_, senders_, species_, num_nodes,
-                        return_intermediates=return_al_features,
+                        return_intermediates=needs_layer_aux,
                     )
                 )(vectors, x, V, senders, species)
             else:
@@ -1760,11 +1913,13 @@ class Allegro(hk.Module):
                     senders,
                     species,
                     num_nodes,
-                    return_intermediates=return_al_features,
+                    return_intermediates=needs_layer_aux,
                 )
 
-            if return_al_features:
+            if needs_layer_aux:
                 y, V_new, layer_aux = layer_out
+                tp_odd_scalar_parts.append(layer_aux["tp_odd_scalar_features"])
+            if return_al_features:
                 layer_group_offset = i * 10000
                 env_norm_parts.append(layer_aux["env_norm_features"])
                 env_norm_group_parts.append(layer_aux["env_norm_feature_groups"] + layer_group_offset)
@@ -1773,8 +1928,9 @@ class Allegro(hk.Module):
                 tp_scalar_parts.append(layer_aux["tp_scalar_features"])
                 tp_scalar_only_parts.append(layer_aux["tp_scalar_only_features"])
                 tp_scalar_only_group_parts.append(layer_aux["tp_scalar_only_feature_groups"] + layer_group_offset)
+                tp_odd_scalar_group_parts.append(layer_aux["tp_odd_scalar_feature_groups"] + layer_group_offset)
                 scalar_update_parts.append(layer_aux["scalar_update_features"])
-            else:
+            elif not needs_layer_aux:
                 y, V_new = layer_out
 
             alpha = _mesh_safe_softplus(self.alpha)
@@ -1794,6 +1950,20 @@ class Allegro(hk.Module):
                 source_V = V
             fast_forces = self.fast_force_head(source_V, senders, receivers, num_nodes)
 
+        direct_forces = None
+        if return_direct_forces:
+            if valid_edges is None:
+                valid_edges = jnp.ones(senders.shape, dtype=jnp.bool_)
+            direct_forces = self.direct_force_head(
+                vectors,
+                x,
+                V,
+                senders,
+                receivers,
+                valid_edges,
+                num_nodes,
+            )
+
         if return_al_features and not compute_energy:
             raise ValueError("return_al_features=True requires compute_energy=True.")
 
@@ -1808,6 +1978,34 @@ class Allegro(hk.Module):
                 energies, al_aux = readout
             else:
                 energies = readout
+            if self.chirality_head_enabled:
+                odd_features = jnp.concatenate(tp_odd_scalar_parts, axis=-1)
+                if int(odd_features.shape[-1]) == 0:
+                    raise ValueError(
+                        "chirality_head_enabled=True requires at least one intermediate 0o channel."
+                    )
+                head_weights = hk.get_parameter(
+                    "chirality_head_weights",
+                    shape=(int(odd_features.shape[-1]), 1),
+                    init=hk.initializers.Constant(0.0),
+                )
+                sign = self.chirality_sign if chirality_sign is None else chirality_sign
+                known = self.chirality_known if chirality_known is None else chirality_known
+                envelope = polynomial_envelope(
+                    jnp.linalg.norm(vectors.array, axis=-1),
+                    p=self.readout_layer.envelope_p,
+                    cutoff=1.0,
+                )
+                correction = (
+                    jnp.asarray(known, dtype=energies.array.dtype)
+                    * jnp.asarray(sign, dtype=energies.array.dtype)
+                    * (odd_features @ head_weights)
+                    * envelope[:, None]
+                )
+                energies = cuex.RepArray(
+                    cue.IrrepsAndLayout(energies.irreps, cue.ir_mul),
+                    energies.array + correction,
+                )
             if return_fast_forces:
                 if return_al_features:
                     return energies, fast_forces, al_aux
@@ -1845,6 +2043,11 @@ class Allegro(hk.Module):
                     al_aux["tp_scalar_only_features"] = tp_scalar_only_features
                     al_aux["tp_scalar_only_features_enveloped"] = tp_scalar_only_features * tensor_envelope[:, None]
                     al_aux["tp_scalar_only_feature_groups"] = jnp.concatenate(tp_scalar_only_group_parts, axis=0)
+                if tp_odd_scalar_parts:
+                    tp_odd_scalar_features = jnp.concatenate(tp_odd_scalar_parts, axis=-1)
+                    al_aux["tp_odd_scalar_features"] = tp_odd_scalar_features
+                    al_aux["tp_odd_scalar_features_enveloped"] = tp_odd_scalar_features * tensor_envelope[:, None]
+                    al_aux["tp_odd_scalar_feature_groups"] = jnp.concatenate(tp_odd_scalar_group_parts, axis=0)
                 if scalar_update_parts:
                     scalar_update_features = jnp.concatenate(scalar_update_parts, axis=-1)
                     al_aux["scalar_update_features"] = scalar_update_features
@@ -1859,7 +2062,13 @@ class Allegro(hk.Module):
         if return_fast_forces:
             return fast_forces
 
-        raise ValueError("At least one of compute_energy or return_fast_forces must be True.")
+        if return_direct_forces:
+            return direct_forces
+
+        raise ValueError(
+            "At least one of compute_energy, return_fast_forces, or "
+            "return_direct_forces must be True."
+        )
 
 
 def allegro_neighborlist_pp(
@@ -1906,7 +2115,9 @@ def allegro_neighborlist_pp(
     r_cutoff = jnp.array(r_cutoff, dtype=jnp.float32)
 
     assert avg_num_neighbors is not None, "avg_num_neighbors is required"
-    if mode not in ("energy", "energy_and_fast_forces", "fast_forces", "al_features"):
+    if mode not in (
+        "energy", "energy_and_fast_forces", "fast_forces", "direct_forces", "al_features"
+    ):
         raise NotImplementedError(f"Mode {mode} not implemented")
 
     # Keep wrapper API compatible with allegro_cueq_v2 and ignore wrapper-only args.
@@ -1924,6 +2135,8 @@ def allegro_neighborlist_pp(
     allegro_kwargs.pop("mlp_hidden_activation", None)
     if mode in ("energy_and_fast_forces", "fast_forces"):
         allegro_kwargs.setdefault("enable_fast_force_head", True)
+    if mode == "direct_forces":
+        allegro_kwargs.setdefault("enable_direct_force_head", True)
     # Honor config-provided activations while keeping historical defaults.
     allegro_kwargs.setdefault("mlp_activation", jax.nn.mish)
     allegro_kwargs.setdefault("mlp_output_activation", None)
@@ -2091,6 +2304,9 @@ def allegro_neighborlist_pp(
                 "tp_scalar_only_features",
                 "tp_scalar_only_features_enveloped",
                 "tp_scalar_only_feature_groups",
+                "tp_odd_scalar_features",
+                "tp_odd_scalar_features_enveloped",
+                "tp_odd_scalar_feature_groups",
                 "scalar_update_features",
                 "scalar_update_features_enveloped",
                 "x_state_features",
@@ -2132,6 +2348,19 @@ def allegro_neighborlist_pp(
             per_atom_energies = per_atom_energies * mask
             total_energy = md_util.high_precision_sum(per_atom_energies)
             return total_energy, fast_forces
+
+        if mode == "direct_forces":
+            direct_forces = net(
+                vectors_rep,
+                senders_safe,
+                receivers_safe,
+                species,
+                n_nodes,
+                return_direct_forces=True,
+                compute_energy=False,
+                valid_edges=valid_edges,
+            )
+            return direct_forces * jnp.asarray(mask, dtype=direct_forces.dtype)[:, None]
 
         fast_forces = net(
             vectors_rep,

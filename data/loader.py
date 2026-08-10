@@ -24,7 +24,8 @@ _OPTIONAL_FRAME_ALIGNED_KEYS = (
     "hvp_probe", "HVP", "hvp_loss_mask",
     "teacher_features", "teacher_feature_mask",
     "teacher_cg_forces", "teacher_force_mask",
-    "TeacherFeature", "TeacherForce",
+    "TeacherFeature", "TeacherForce", "teacher_force_std", "teacher_force_count",
+    "RawForce",
 )
 
 
@@ -512,9 +513,11 @@ def build_tiled_dataset(
     large_structure_threshold: Optional[int] = None,
     large_structure_edge_threshold: Optional[float] = None,
     spatial_separation: bool = False,
+    spatial_layout: str = "line_x",
     structure_gap: float = 25.0,
     seed: int = 0,
     extra_per_atom_fields: Optional[Dict[str, np.ndarray]] = None,
+    static_neighbors: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, np.ndarray]:
     """
     Pack many small structures into disconnected tiled pseudo-structures.
@@ -525,6 +528,13 @@ def build_tiled_dataset(
 
     Profiling metadata is included with a `meta_` prefix so later training
     diagnostics can attribute optimizer updates back to tile composition.
+
+    When `static_neighbors` is given (the parsed `data.static_neighbors` config),
+    the fixed per-segment neighbor graph of every tile is constructed here and
+    returned under `neighbor_idx` / `neighbor_n_edges` / `neighbor_capacity`.
+    Building it at this point rather than at the call sites keeps connectivity in
+    sync with the packing for every path that repacks tiles (initial build,
+    epoch-wise rebuild, DSM refresh).
     """
     if target_beads <= 0:
         raise ValueError(f"target_beads must be > 0, got {target_beads}.")
@@ -539,6 +549,12 @@ def build_tiled_dataset(
         )
     if structure_gap <= 0.0:
         raise ValueError(f"structure_gap must be > 0, got {structure_gap}.")
+    spatial_layout = str(spatial_layout).strip().lower()
+    if spatial_layout not in ("line_x", "grid_3d"):
+        raise ValueError(
+            f"Unsupported spatial_layout='{spatial_layout}'. "
+            "Expected one of: line_x, grid_3d."
+        )
 
     if R.ndim != 3 or F.ndim != 3:
         raise ValueError("R and F must have shape (n_structures, n_atoms, 3).")
@@ -687,6 +703,26 @@ def build_tiled_dataset(
             for key, spec in extra_specs.items()
         }
 
+        grid_centers = None
+        if spatial_separation and spatial_layout == "grid_3d":
+            half_extents = []
+            for struct_idx in tile_indices:
+                valid_idx = np.flatnonzero(mask[struct_idx] > 0)
+                coords = np.asarray(R[struct_idx, valid_idx], dtype=np.float32)
+                centered = coords - np.mean(coords, axis=0, keepdims=True)
+                half_extents.append(np.max(np.abs(centered), axis=0))
+            max_half_extent = np.max(np.asarray(half_extents, dtype=np.float32), axis=0)
+            cell_size = 2.0 * max_half_extent + float(structure_gap)
+            cells_per_axis = max(1, int(np.ceil(len(tile_indices) ** (1.0 / 3.0))))
+            grid_centers = []
+            for grid_idx in range(len(tile_indices)):
+                ix = grid_idx % cells_per_axis
+                iy = (grid_idx // cells_per_axis) % cells_per_axis
+                iz = grid_idx // (cells_per_axis * cells_per_axis)
+                grid_centers.append(
+                    (np.asarray([ix, iy, iz], dtype=np.float32) + 0.5) * cell_size
+                )
+
         cursor = 0
         current_x = 0.0
         for seg_id, struct_idx in enumerate(tile_indices):
@@ -700,7 +736,7 @@ def build_tiled_dataset(
                 )
             sl = slice(cursor, cursor + n_valid)
             coords = np.asarray(R[struct_idx, valid_idx], dtype=np.float32)
-            if spatial_separation:
+            if spatial_separation and spatial_layout == "line_x":
                 centered = coords - np.mean(coords, axis=0, keepdims=True)
                 radii = np.linalg.norm(centered, axis=1)
                 radius = float(np.max(radii)) if radii.size > 0 else 0.0
@@ -708,6 +744,9 @@ def build_tiled_dataset(
                 centered[:, 0] += center_x
                 current_x = center_x + radius + float(structure_gap)
                 coords = centered
+            elif spatial_separation and spatial_layout == "grid_3d":
+                centered = coords - np.mean(coords, axis=0, keepdims=True)
+                coords = centered + grid_centers[seg_id]
             R_out[sl] = coords
             F_out[sl] = F[struct_idx, valid_idx]
             mask_out[sl] = 1.0
@@ -814,6 +853,24 @@ def build_tiled_dataset(
         "meta_structure_size_std": np.asarray(meta_structure_size_std, dtype=np.float32),
     }
     result.update(extra_result)
+
+    if static_neighbors is not None and static_neighbors.get("enabled", False):
+        # Imported lazily so the tiled loader keeps working without SciPy when
+        # static graphs are not requested.
+        from data.static_neighbors import build_static_graphs
+
+        result.update(
+            build_static_graphs(
+                R=result["R"],
+                mask=result["mask"],
+                segment_id=result["segment_id"],
+                r_list=float(static_neighbors["r_list"]),
+                backend=str(static_neighbors["backend"]),
+                block_size=int(static_neighbors["block_size"]),
+                capacity_multiplier=float(static_neighbors["capacity_multiplier"]),
+            )
+        )
+
     return result
 
 

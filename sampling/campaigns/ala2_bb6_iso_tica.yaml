@@ -1,0 +1,40 @@
+# Isolation run 2 of 3: TICA REGIONAL BIAS ONLY.
+#
+# The pair-distance TICA representation is reflection-invariant, so this bias can reach
+# ordinary FES boundaries but has NO direction in which to push to induce inversion.
+# That blind spot is what the local_inversion campaign exists to cover.
+name: ala2_bb6_iso_tica
+mapping: ala2_backbone_cb_6
+output_dir: /e/project1/cameo/schmidt36/cameo_cg/local_work/sampling_runs/ala2_bb6_iso_tica
+n_replicas: 12
+
+# 12 conformationally diverse starting structures (farthest-point in phi/psi) --
+# independent velocities alone leave every replica in the same basin.
+structure:
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_00.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_01.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_02.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_03.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_04.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_05.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_06.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_07.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_08.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_09.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_10.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_11.gro
+topology: /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/ala2_constrained/topol.top
+mdp:      /e/project1/cameo/schmidt36/cameo_cg/sampling/campaigns/production_298K_dt1fs.mdp
+
+recompute_stride: 5
+socket_dir: /tmp
+ntomp: 8
+print_stride: 100          # 0.1 ps at dt=1fs -- live CV monitoring
+report_every: 500
+monitor_cvs: [phi, psi, chirality]
+
+biases:
+  - type: tica_regional
+    bias_npz: /e/project1/cameo/schmidt36/SAMPLING/tica_regional_weighting/results/ala2_bb6_reference/smooth_reference_bias_lambda0p25.npz
+    scale: 1.0
+    enabled: true

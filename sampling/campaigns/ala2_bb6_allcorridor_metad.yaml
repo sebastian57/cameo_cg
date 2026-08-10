@@ -1,0 +1,109 @@
+# ALL-CORRIDOR MetaD acquisition: both transition channels, corridor frames WITH FORCES.
+#
+# WHY: the alphaL corridor has never had a usable bias. Per-channel R_TP normalisation did
+# not open it (1.856 vs 1.790, no better) because it is a SUPPORT problem, not a weighting
+# one -- the KDE centres were reference-occupied cells and the reference has ~2 frames in
+# that corridor, so there were no centres there to carry weight.
+#
+# THE FIX: the alphaL exit (1247528) and corridor-shooting (1247758) campaigns visited that
+# corridor thoroughly. They were written with nstfout=0 so they can never be training data,
+# but a bias FIELD needs geometry, not forces. Their cells now join the KDE centre set:
+#   centres 470 (reference) -> 585 extended, +115 cells the reference never occupied.
+#
+# The attractor target is max(R_TP_scaled, dividing_surface_density_scaled), elementwise,
+# each scaled to 1. Two deliberate refinements, each after measuring the previous attempt:
+#   * raw exit-campaign density made the alphaL BASIN more attractive than the beta<->alphaR
+#     corridor (0.821 vs 0.892) -- that campaign was seeded IN alphaL, so its density is
+#     basin occupancy, exactly the density error this project keeps re-learning;
+#   * filtering to outside-basin-cores was still basin-periphery dominated (only 0.17% of
+#     those frames sit at the dividing surface), so the target is built from the phi in
+#     [-30,30] band that the shooting campaign's committor profile identified.
+#
+# MEASURED BEFORE SUBMISSION (mean V, lower = more attractive, depth A = 2.0):
+#   region                     R_TP only   this field
+#   beta-alphaR corridor          0.696       1.120
+#   alphaL dividing surface       1.759       1.130
+#   alphaL approach (phi +/-30)   1.918       0.888
+#   alphaL basin                  1.985       1.650
+#   beta basin                    1.829       1.893   <- pushed UP
+#   alphaR basin                  1.739       1.837   <- pushed UP
+# Both corridors are now comparable wells and both basins are repulsive. The cost is that
+# the beta<->alphaR corridor is shallower than in the single-channel field: attractor mass
+# is shared between two channels, and MetaD's history term is what covers the difference.
+#
+# THE ENSEMBLE FROM THIS RUN IS NOT A TRAINING SET -- well-tempered MetaD flattens the
+# biased-CV distribution, so basin weights must be restored at assembly. Training directly
+# on it reproduces the 2026-08-05 failure (alphaL 5.6x in data -> ~27x in CG MD, JS 0.70).
+#
+# Biases act ONLY on bead positions, as every term in this registry does. local_inversion
+# stays out so the parity signal remains separable.
+
+name: ala2_bb6_allcorridor_metad
+mapping: ala2_backbone_cb_6
+output_dir: /e/project1/cameo/schmidt36/cameo_cg/local_work/sampling_runs/ala2_bb6_allcorridor_metad
+n_replicas: 12
+
+# 12 conformationally diverse starts (farthest-point in phi/psi over the reference);
+# independent velocities alone leave every replica in the same basin.
+structure:
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_00.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_01.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_02.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_03.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_04.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_05.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_06.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_07.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_08.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_09.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_10.gro
+  - /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/start_frames_bb6/start_11.gro
+topology: /e/project1/cameo/schmidt36/cameo_cg/local_work/aa_reference/ala2_constrained/topol.top
+mdp:      /e/project1/cameo/schmidt36/cameo_cg/sampling/campaigns/production_298K_dt1fs.mdp
+
+recompute_stride: 5     # both terms are smooth in z; stride 5 was validated for these
+socket_dir: /tmp
+ntomp: 8
+print_stride: 100
+report_every: 500
+monitor_cvs: [phi, psi, chirality]   # chirality MONITORED, never biased, in this campaign
+socket_timeout_s: 600.0
+
+biases:
+  # Static component: TRANSITION ATTRACTOR on the OBSERVED R_TP field (not the committor
+  # model). R_TP = rho_TP/rho_eq divides out equilibrium population, so it keeps only
+  # regions DISPROPORTIONATELY used by transitions -- built from ~5,400 observed
+  # beta<->alphaR crossings rather than a model. Targets the corridor at 0.427 vs the
+  # committor model's 0.526. Raw C(s) must NOT be used: with conservative cores a reactive
+  # path crosses the basin periphery, so C(s) peaks INSIDE the basins.
+  #
+  # KNOWN GAP: this field does nothing for alphaL (V ~ 2.0 = max repulsion there). That is
+  # a SUPPORT problem, not weighting -- the KDE centres are reference-occupied cells and
+  # the reference has ~2 frames in the alphaL corridor. Per-channel normalisation does not
+  # fix it. This campaign therefore tests the beta<->alphaR channel; whether alphaL needs
+  # explicit treatment is to be decided from the frames this produces.
+  # Static component: TRANSITION ATTRACTOR, V = A*(1 - rho_t/rho_max), depth A=2 kcal/mol.
+  # NOT the -kT log(target/p_ref) form: that is anti-density by construction and cannot be
+  # redirected by reweighting `exploration` (measured 2026-08-05: an 85%-transition rebuild
+  # correlated +0.9907 with the original map and still pulled hardest into alphaL, a real
+  # but sparse basin). This form has no p_ref term, so basins are left alone:
+  #   corr(V, transition) -0.159 -> -0.909;  mean V in alphaL 0.761 -> 1.350 (repulsive),
+  #   corridor stays the global minimum at 0.526.
+  - type: tica_regional
+    bias_npz: /e/project1/cameo/schmidt36/SAMPLING/tica_regional_weighting/results/ala2_bb6_reference/smooth_allcorridor_attractor_A2.npz
+    scale: 1.0
+    enabled: true
+
+  # History-dependent component: fills whatever it has already visited.
+  # sigma from the reference TICA spread (TIC1 std 0.763, TIC2 std 0.473 -> ~std/5).
+  # height 0.15 kcal/mol ~ kT/4 at 298 K; bias_factor 8 caps the flattening at
+  # V -> -(1 - 1/8) F, i.e. 87.5% of the barrier.
+  - type: tica_metad
+    bias_npz: /e/project1/cameo/schmidt36/SAMPLING/tica_regional_weighting/results/ala2_bb6_reference/smooth_allcorridor_attractor_A2.npz
+    height: 0.15
+    sigma: [0.15, 0.09]
+    pace: 500              # 0.5 ps at dt=1fs -> ~2000 hills per 1 ns replica
+    bias_factor: 8.0
+    temperature: 298.0
+    equilibrate_steps: 10000   # 10 ps before the first hill
+    enabled: true

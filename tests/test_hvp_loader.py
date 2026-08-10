@@ -147,11 +147,23 @@ class _TiledConfigStub:
     def get_tile_structure_gap(self):
         return 25.0
 
+    def get_tile_spatial_layout(self):
+        return "line_x"
+
     def get_batch_mode(self):
         return "tiled"
 
     def tile_rebuild_each_epoch_enabled(self):
         return False
+
+    def get_static_neighbors_config(self):
+        return {
+            "enabled": False,
+            "backend": "kdtree",
+            "block_size": 1024,
+            "capacity_multiplier": 1.0,
+            "r_list": 6.0,
+        }
 
 
 class HVPTiledTrainScriptTests(unittest.TestCase):
