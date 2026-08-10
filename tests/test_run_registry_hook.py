@@ -78,3 +78,31 @@ def test_registry_failure_does_not_change_workload_exit_code(tmp_path: Path):
 
     assert result.returncode == 7
     assert "WARNING: run registry start failed" in result.stderr
+
+
+def test_installed_exit_trap_records_failure_and_preserves_exit_code(tmp_path: Path):
+    script = tmp_path / "job.sh"
+    script.write_text(
+        "#!/bin/bash\n"
+        "source runs/registry_hook.sh\n"
+        "run_registry_start analysis '' /tmp/analysis\n"
+        "run_registry_install_exit_trap\n"
+        "exit 3\n"
+    )
+
+    result = subprocess.run(
+        ["bash", str(script)],
+        cwd=PROJECT_ROOT,
+        env=registry_env(tmp_path),
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 3
+    registry = Registry(
+        tmp_path / "registry.sqlite3",
+        tmp_path / "REGISTRY.md",
+        tmp_path / "registry.lock",
+    )
+    assert registry.get("777")["state"] == "FAILED"
+    assert registry.get("777")["exit_code"] == 3

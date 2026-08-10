@@ -47,3 +47,15 @@ run_registry_finish() {
     fi
     return 0
 }
+
+
+_run_registry_exit_trap() {
+    local exit_code=$?
+    trap - EXIT
+    run_registry_finish "${exit_code}"
+    exit "${exit_code}"
+}
+
+run_registry_install_exit_trap() {
+    trap _run_registry_exit_trap EXIT
+}

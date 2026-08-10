@@ -52,4 +52,8 @@ export TF_CPP_MIN_LOG_LEVEL=2
 export CUDA_HOME=/p/software/juwelsbooster/stages/2025/software/CUDA/12
 export XLA_FLAGS="--xla_gpu_autotune_level=0 --xla_gpu_cuda_data_dir=${CUDA_HOME}"
 
+source "${PROJECT_ROOT}/runs/registry_hook.sh"
+run_registry_start lammps "" "${OUTPUT_DIR}"
+run_registry_install_exit_trap
+
 srun "${LMP_BIN}" -in "${INPUT_FILE}"

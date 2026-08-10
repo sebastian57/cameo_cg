@@ -192,12 +192,17 @@ if is_truthy "${CHEMTRAIN_PROFILE_GPU_TELEMETRY}"; then
     GPU_TELEMETRY_SRUN_PID=$!
 fi
 
+source "${PROJECT_ROOT}/runs/registry_hook.sh"
+run_registry_start profiling "${CONFIG_FILE}" "${RUN_OUTPUT_DIR}"
+
 cleanup() {
     local rc=$?
+    trap - EXIT INT TERM
     if [[ -n "${GPU_TELEMETRY_SRUN_PID}" ]]; then
         kill "${GPU_TELEMETRY_SRUN_PID}" >/dev/null 2>&1 || true
     fi
-    exit ${rc}
+    run_registry_finish "${rc}"
+    exit "${rc}"
 }
 trap cleanup EXIT INT TERM
 

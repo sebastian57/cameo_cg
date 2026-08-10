@@ -116,6 +116,10 @@ if [[ "${VERBOSE}" == "1" ]]; then
   CMD+=(--verbose)
 fi
 
+source "${PROJECT_ROOT}/runs/registry_hook.sh"
+run_registry_start data-preparation "" "${OUT_DIR}"
+run_registry_install_exit_trap
+
 echo "============================================================"
 echo "Pipeline job configuration"
 echo "============================================================"

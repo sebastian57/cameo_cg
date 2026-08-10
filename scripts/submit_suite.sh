@@ -118,5 +118,5 @@ sbatch \
     --time "${TIME_LIMIT}" \
     --array "${ARRAY_SPEC}" \
     --output "${GROUP_OUTPUT_DIR}/slurm-bootstrap-%A_%a.out" \
-    --export=ALL,PARENT_OUTPUT_DIR="${GROUP_OUTPUT_DIR}",CONFIG_LIST_FILE="${MANIFEST_PATH}",CAMEO_CG_PROJECT_ROOT="${PROJECT_ROOT}" \
+    --export=ALL,PARENT_OUTPUT_DIR="${GROUP_OUTPUT_DIR}",CONFIG_LIST_FILE="${MANIFEST_PATH}",CAMEO_CG_PROJECT_ROOT="${PROJECT_ROOT}",RUN_REGISTRY_TYPE=training-suite \
     "${SCRIPT_DIR}/run_training.sh"

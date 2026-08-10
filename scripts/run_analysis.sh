@@ -121,6 +121,10 @@ source "${SCRIPT_DIR}/slurm_env.sh"
 export CUDA_VISIBLE_DEVICES=0
 
 echo "============================================================"
+source "${PROJECT_ROOT}/runs/registry_hook.sh"
+run_registry_start analysis "${CONFIG_FILE}" "${ANALYSIS_DIR}"
+run_registry_install_exit_trap
+
 echo "Suite Analysis"
 echo "============================================================"
 echo "Project root: ${PROJECT_ROOT}"
