@@ -8,9 +8,11 @@ import fcntl
 import getpass
 import json
 import os
+import re
 import sqlite3
+import subprocess
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -94,6 +96,69 @@ def read_run_metadata(config_path: Path | None) -> tuple[str | None, list[str]]:
     if not isinstance(tags, list) or any(not isinstance(tag, str) for tag in tags):
         raise ValueError("run.tags must be a list of strings")
     return description.strip() if description else None, [tag.strip() for tag in tags]
+
+
+def normalized_state(scheduler_state: str, exit_code: int | None = None) -> str:
+    state = scheduler_state.upper().split()[0].rstrip("+")
+    if state.startswith("CANCELLED"):
+        return "CANCELLED"
+    if state in {"PENDING", "CONFIGURING", "SUSPENDED"}:
+        return "PENDING"
+    if state in {"RUNNING", "COMPLETING"}:
+        return "RUNNING"
+    if state == "COMPLETED" and (exit_code in (None, 0)):
+        return "COMPLETED"
+    if state in {
+        "BOOT_FAIL", "DEADLINE", "FAILED", "NODE_FAIL", "OUT_OF_MEMORY",
+        "PREEMPTED", "REVOKED", "TIMEOUT",
+    } or state == "COMPLETED":
+        return "FAILED"
+    return "UNKNOWN"
+
+
+def parse_squeue(text: str) -> list[dict[str, object]]:
+    fields = (
+        "identity", "user", "job_name", "scheduler_state", "partition",
+        "node", "submitted_at", "started_at",
+    )
+    jobs = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        values = line.split("|", len(fields) - 1)
+        if len(values) != len(fields):
+            raise ValueError(f"malformed squeue row: {line}")
+        job = dict(zip(fields, values))
+        identity = str(job["identity"])
+        parent, separator, task = identity.partition("_")
+        job["job_id"] = identity
+        job["parent_job_id"] = parent if separator else None
+        job["array_task_id"] = task if separator else None
+        job["state"] = normalized_state(str(job["scheduler_state"]))
+        jobs.append(job)
+    return jobs
+
+
+def parse_sacct(text: str) -> dict[str, dict[str, object]]:
+    records = {}
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        values = line.split("|", 4)
+        if len(values) != 5:
+            raise ValueError(f"malformed sacct row: {line}")
+        identity, scheduler_state, raw_exit, started_at, finished_at = values
+        status, _, signal = raw_exit.partition(":")
+        exit_code = int(status or 0) or int(signal or 0)
+        records[identity] = {
+            "identity": identity,
+            "scheduler_state": scheduler_state,
+            "state": normalized_state(scheduler_state, exit_code),
+            "exit_code": exit_code,
+            "started_at": started_at or None,
+            "finished_at": finished_at or None,
+        }
+    return records
 
 
 class Registry:
@@ -207,6 +272,96 @@ class Registry:
             )
             if cursor.rowcount == 0:
                 raise KeyError(f"unknown run identity: {identity}")
+
+    @staticmethod
+    def _run_slurm(
+        command: list[str],
+        run_command: Callable[..., subprocess.CompletedProcess[str]],
+    ) -> str:
+        result = run_command(command, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"{' '.join(command)} failed: {result.stderr.strip()}"
+            )
+        return result.stdout
+
+    def sync(
+        self,
+        project_root: Path,
+        run_command: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    ) -> None:
+        project_root = project_root.resolve()
+        active_states = {"PENDING", "RUNNING", "UNKNOWN"}
+        known_active = {
+            record["identity"]: record
+            for record in self.all()
+            if record["state"] in active_states
+        }
+        queue_text = self._run_slurm(
+            [
+                "squeue", "-h", "-a", "-o",
+                "%i|%u|%j|%T|%P|%N|%V|%S",
+            ],
+            run_command,
+        )
+        current = parse_squeue(queue_text)
+        discovered: list[dict[str, object]] = []
+        visible_known: set[str] = set()
+        root_text = str(project_root)
+        for job in current:
+            identity = str(job["identity"])
+            detail = self._run_slurm(
+                ["scontrol", "show", "job", "-o", identity], run_command
+            )
+            work_match = re.search(r"(?:^| )WorkDir=(\S+)", detail)
+            command_match = re.search(r"(?:^| )Command=(.*?)(?= \w+=|$)", detail)
+            work_dir = work_match.group(1) if work_match else None
+            command = command_match.group(1) if command_match else None
+            associated = False
+            if work_dir:
+                try:
+                    Path(work_dir).resolve().relative_to(project_root)
+                    associated = True
+                except ValueError:
+                    pass
+            if command and root_text in command:
+                associated = True
+            if identity in known_active:
+                visible_known.add(identity)
+            if not associated and identity not in known_active:
+                continue
+            job.update(
+                {
+                    "work_dir": work_dir,
+                    "command": command,
+                    "run_type": "ad-hoc",
+                    "description": job.get("job_name"),
+                    "source": "discovered",
+                    "last_seen_at": utc_now(),
+                }
+            )
+            discovered.append(job)
+
+        missing = sorted(set(known_active) - visible_known)
+        accounting: dict[str, dict[str, object]] = {}
+        if missing:
+            accounting_text = self._run_slurm(
+                [
+                    "sacct", "-n", "-X", "-P", "-j", ",".join(missing),
+                    "-o", "JobIDRaw,State,ExitCode,Start,End",
+                ],
+                run_command,
+            )
+            accounting = parse_sacct(accounting_text)
+
+        for job in discovered:
+            self.start(job)
+        for identity, update in accounting.items():
+            if identity in known_active:
+                update["source"] = "discovered"
+                update["last_seen_at"] = utc_now()
+                self.start(update)
+        self.render()
 
     def show(self, identity: str) -> dict[str, Any] | None:
         return self.get(identity)
@@ -340,6 +495,7 @@ def build_parser() -> argparse.ArgumentParser:
     finish = subparsers.add_parser("finish")
     finish.add_argument("--identity", required=True)
     finish.add_argument("--exit-code", required=True, type=int)
+    subparsers.add_parser("sync")
     subparsers.add_parser("render")
     subparsers.add_parser("status")
     show = subparsers.add_parser("show")
@@ -357,6 +513,8 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "finish":
         registry.finish(args.identity, args.exit_code)
         registry.render()
+    elif args.command == "sync":
+        registry.sync(ROOT)
     elif args.command == "render":
         registry.render()
     elif args.command == "status":

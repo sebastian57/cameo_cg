@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -162,3 +163,96 @@ def test_status_summarizes_states_and_show_returns_decoded_record(
     )
 
     assert registry.status() == "1 active, 0 completed, 0 failed/cancelled"
+    assert registry.show("21")["tags"] == ["queued"]
+    assert registry.show("missing") is None
+
+
+def fake_slurm(responses: dict[str, str]):
+    def run(command, **_kwargs):
+        if command[0] == "squeue":
+            key = "squeue"
+        elif command[0] == "scontrol":
+            key = f"scontrol {command[-1]}"
+        elif command[0] == "sacct":
+            key = "sacct"
+        else:
+            raise AssertionError(f"unexpected command: {command}")
+        if key not in responses:
+            raise AssertionError(f"unexpected Slurm call: {key}")
+        return subprocess.CompletedProcess(command, 0, responses[key], "")
+
+    return run
+
+
+def test_sync_discovers_only_current_jobs_associated_with_checkout(
+    registry: Registry, tmp_path: Path
+):
+    root = tmp_path / "cameo_cg"
+    root.mkdir()
+    responses = {
+        "squeue": (
+            "101|alice|train|RUNNING|booster|jwb001|"
+            "2026-08-10T10:00:00|2026-08-10T10:01:00\n"
+            "102|bob|other|RUNNING|booster|jwb002|"
+            "2026-08-10T10:00:00|2026-08-10T10:01:00\n"
+        ),
+        "scontrol 101": (
+            f"JobId=101 WorkDir={root} "
+            f"Command={root}/scripts/run_training.sh\n"
+        ),
+        "scontrol 102": (
+            "JobId=102 WorkDir=/elsewhere Command=/elsewhere/job.sh\n"
+        ),
+    }
+
+    registry.sync(root, run_command=fake_slurm(responses))
+
+    assert registry.get("101")["source"] == "discovered"
+    assert registry.get("101")["state"] == "RUNNING"
+    assert registry.get("102") is None
+
+
+def test_sync_uses_sacct_only_for_known_job_that_disappeared(
+    registry: Registry, tmp_path: Path
+):
+    registry.start(
+        {
+            "identity": "201",
+            "job_id": "201",
+            "state": "RUNNING",
+            "description": "keep me",
+            "source": "hook",
+        }
+    )
+    responses = {
+        "squeue": "",
+        "sacct": (
+            "201|OUT_OF_MEMORY|0:125|2026-08-10T10:00:00|"
+            "2026-08-10T10:05:00\n"
+        ),
+    }
+
+    registry.sync(tmp_path, run_command=fake_slurm(responses))
+
+    record = registry.get("201")
+    assert record["state"] == "FAILED"
+    assert record["scheduler_state"] == "OUT_OF_MEMORY"
+    assert record["exit_code"] == 125
+    assert record["description"] == "keep me"
+
+
+def test_sync_maps_cancelled_known_job(registry: Registry, tmp_path: Path):
+    registry.start(
+        {"identity": "301", "job_id": "301", "state": "PENDING", "source": "hook"}
+    )
+    responses = {
+        "squeue": "",
+        "sacct": (
+            "301|CANCELLED by 42|0:15|2026-08-10T10:00:00|"
+            "2026-08-10T10:02:00\n"
+        ),
+    }
+
+    registry.sync(tmp_path, run_command=fake_slurm(responses))
+
+    assert registry.get("301")["state"] == "CANCELLED"
