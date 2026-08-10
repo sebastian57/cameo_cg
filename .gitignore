@@ -18,6 +18,14 @@ CLEANUP_PLAN.md
 !env_setup/LAMMPS_build.md
 !env_setup/interactive_job.md
 !env_setup/SETUP_ENV.md
+!runs/README.md
+
+# --- shared run registry runtime state ---
+runs/REGISTRY.md
+runs/registry.sqlite3
+runs/registry.sqlite3-*
+runs/registry.lock
+
 !debug_status.md
 # --- logs / outputs ---
 outputs/
