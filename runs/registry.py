@@ -86,6 +86,8 @@ def read_run_metadata(config_path: Path | None) -> tuple[str | None, list[str]]:
     if config_path is None or not config_path.is_file():
         return None, []
     data = yaml.safe_load(config_path.read_text()) or {}
+    if not isinstance(data, dict):
+        raise ValueError("config root must be a mapping")
     run = data.get("run") or {}
     if not isinstance(run, dict):
         raise ValueError("run must be a mapping")
@@ -96,6 +98,24 @@ def read_run_metadata(config_path: Path | None) -> tuple[str | None, list[str]]:
     if not isinstance(tags, list) or any(not isinstance(tag, str) for tag in tags):
         raise ValueError("run.tags must be a list of strings")
     return description.strip() if description else None, [tag.strip() for tag in tags]
+
+
+def infer_output_paths(config_path: Path | None, project_root: Path) -> list[str]:
+    """Infer the primary output directory from supported YAML configs."""
+    if config_path is None or not config_path.is_file():
+        return []
+    data = yaml.safe_load(config_path.read_text()) or {}
+    if not isinstance(data, dict):
+        raise ValueError("config root must be a mapping")
+    raw = (data.get("paths") or {}).get("output_dir")
+    if not raw:
+        raw = (data.get("md") or {}).get("output_dir")
+    if not raw:
+        return []
+    path = Path(str(raw))
+    if not path.is_absolute():
+        path = project_root / path
+    return [str(path.resolve())]
 
 
 def normalized_state(scheduler_state: str, exit_code: int | None = None) -> str:
@@ -167,13 +187,28 @@ class Registry:
         self.markdown_path = Path(markdown_path)
         self.lock_path = Path(lock_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.lock_path.exists():
+            self.lock_path.touch()
         self._initialize()
+        self._ensure_group_writable(self.db_path)
+        self._ensure_group_writable(self.lock_path)
+
+    @staticmethod
+    def _ensure_group_writable(path: Path) -> None:
+        try:
+            path.chmod(0o664)
+        except (FileNotFoundError, PermissionError):
+            pass
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout = 30000")
         connection.execute("PRAGMA journal_mode = WAL")
+        self._ensure_group_writable(self.db_path)
+        for sidecar in self.db_path.parent.glob(f"{self.db_path.name}-*"):
+            self._ensure_group_writable(sidecar)
         return connection
 
     def _initialize(self) -> None:
@@ -431,6 +466,7 @@ class Registry:
                 tmp.write(rendered)
                 temporary_path = Path(tmp.name)
             temporary_path.replace(self.markdown_path)
+            self._ensure_group_writable(self.markdown_path)
         return rendered
 
 
@@ -452,9 +488,12 @@ def _start_record(args: argparse.Namespace) -> tuple[Registry, str]:
     config_path = Path(args.config).resolve() if args.config else None
     try:
         description, tags = read_run_metadata(config_path)
+        project_root = Path(os.environ.get("CAMEO_CG_PROJECT_ROOT", ROOT))
+        inferred_outputs = infer_output_paths(config_path, project_root)
     except (OSError, ValueError, yaml.YAMLError) as error:
         print(f"WARNING: could not read run metadata: {error}", file=os.sys.stderr)
         description, tags = None, []
+        inferred_outputs = []
     description = args.description or description
     if not description and config_path:
         description = config_path.stem
@@ -471,7 +510,10 @@ def _start_record(args: argparse.Namespace) -> tuple[Registry, str]:
             "node": os.environ.get("SLURMD_NODENAME"),
             "partition": os.environ.get("SLURM_JOB_PARTITION"),
             "config_path": str(config_path) if config_path else None,
-            "outputs": [str(Path(path).resolve()) for path in args.output],
+            "outputs": (
+                [str(Path(path).resolve()) for path in args.output]
+                or inferred_outputs
+            ),
             "command": " ".join(os.sys.argv),
             "work_dir": os.environ.get("SLURM_SUBMIT_DIR") or str(Path.cwd()),
             "description": description,

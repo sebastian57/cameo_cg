@@ -118,19 +118,8 @@ if [[ -n "${SLURM_ARRAY_TASK_ID+x}" ]]; then
     export XLA_PYTHON_CLIENT_PREALLOCATE=true
     export XLA_PYTHON_CLIENT_MEM_FRACTION=0.80
 
-    REGISTRY_PYTHON="${RUN_REGISTRY_PYTHON:-$(command -v python3 || command -v python)}"
-    MD_OUTPUT_DIR="$("${REGISTRY_PYTHON}" -c '
-from pathlib import Path
-import sys, yaml
-config = Path(sys.argv[1])
-root = Path(sys.argv[2])
-data = yaml.safe_load(config.read_text()) or {}
-raw = (data.get("md") or {}).get("output_dir", "local_work/md_runs")
-path = Path(str(raw))
-print((path if path.is_absolute() else root / path).resolve())
-' "${MD_CONFIG}" "${PROJECT_ROOT}")"
     source "${PROJECT_ROOT}/runs/registry_hook.sh"
-    run_registry_start md "${MD_CONFIG}" "${MD_OUTPUT_DIR}"
+    run_registry_start md "${MD_CONFIG}"
     run_registry_install_exit_trap
 
     python scripts/run_md.py "${MD_CONFIG}" "${SLURM_JOB_ID}" --replica "${SLURM_ARRAY_TASK_ID}"

@@ -1,9 +1,15 @@
 from pathlib import Path
+import stat
 import subprocess
 
 import pytest
 
-from runs.registry import Registry, read_run_metadata, slurm_identity
+from runs.registry import (
+    Registry,
+    infer_output_paths,
+    read_run_metadata,
+    slurm_identity,
+)
 
 
 @pytest.fixture
@@ -44,6 +50,20 @@ def test_metadata_is_optional_and_normalized(tmp_path: Path):
         ["ala2", "baseline"],
     )
     assert read_run_metadata(None) == (None, [])
+
+
+def test_infer_output_paths_supports_md_and_training_configs(tmp_path: Path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    md_config = tmp_path / "md.yaml"
+    md_config.write_text("md:\n  output_dir: local_work/md_runs/demo\n")
+    training_config = tmp_path / "train.yaml"
+    training_config.write_text("paths:\n  output_dir: /shared/training/demo\n")
+
+    assert infer_output_paths(md_config, root) == [
+        str(root / "local_work" / "md_runs" / "demo")
+    ]
+    assert infer_output_paths(training_config, root) == ["/shared/training/demo"]
 
 
 def test_metadata_rejects_non_list_tags(tmp_path: Path):
@@ -147,6 +167,10 @@ def test_render_orders_active_before_recent_and_escapes_tables(
     assert "/work/md<br>/work/log" in rendered
     assert "| 10 | COMPLETED |" in rendered
     assert registry.markdown_path.read_text() == rendered
+
+    assert stat.S_IMODE(registry.db_path.stat().st_mode) == 0o664
+    assert stat.S_IMODE(registry.markdown_path.stat().st_mode) == 0o664
+    assert stat.S_IMODE(registry.lock_path.stat().st_mode) == 0o664
 
 
 def test_status_summarizes_states_and_show_returns_decoded_record(

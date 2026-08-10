@@ -39,27 +39,8 @@ cd "$PROJECT_ROOT"
 export XLA_PYTHON_CLIENT_PREALLOCATE=true
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.80
 
-REGISTRY_PYTHON="${RUN_REGISTRY_PYTHON:-$(command -v python3 || command -v python)}"
-MD_OUTPUT_DIR="$("${REGISTRY_PYTHON}" -c '
-from pathlib import Path
-import sys, yaml
-config = Path(sys.argv[1])
-root = Path(sys.argv[2])
-data = yaml.safe_load(config.read_text()) or {}
-raw = (data.get("md") or {}).get("output_dir", "local_work/md_runs")
-path = Path(str(raw))
-print((path if path.is_absolute() else root / path).resolve())
-' "${CONFIG}" "${PROJECT_ROOT}")"
-
 source "${PROJECT_ROOT}/runs/registry_hook.sh"
-run_registry_start md "${CONFIG}" "${MD_OUTPUT_DIR}"
-
-submit_md_registry_exit() {
-    local rc=$?
-    trap - EXIT
-    run_registry_finish "${rc}"
-    exit "${rc}"
-}
-trap submit_md_registry_exit EXIT
+run_registry_start md "${CONFIG}"
+run_registry_install_exit_trap
 
 python scripts/run_md.py "$CONFIG" "$SLURM_JOB_ID"

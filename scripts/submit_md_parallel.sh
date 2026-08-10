@@ -53,19 +53,8 @@ echo "Launching MD replicas with $N_GPUS GPU(s), $PROCS_PER_GPU process(es)/GPU,
 echo "XLA_PYTHON_CLIENT_PREALLOCATE=$XLA_PYTHON_CLIENT_PREALLOCATE"
 echo "XLA_PYTHON_CLIENT_MEM_FRACTION=$XLA_PYTHON_CLIENT_MEM_FRACTION"
 
-REGISTRY_PYTHON="${RUN_REGISTRY_PYTHON:-$(command -v python3 || command -v python)}"
-MD_OUTPUT_DIR="$("${REGISTRY_PYTHON}" -c '
-from pathlib import Path
-import sys, yaml
-config = Path(sys.argv[1])
-root = Path(sys.argv[2])
-data = yaml.safe_load(config.read_text()) or {}
-raw = (data.get("md") or {}).get("output_dir", "local_work/md_runs")
-path = Path(str(raw))
-print((path if path.is_absolute() else root / path).resolve())
-' "${CONFIG}" "${PROJECT_ROOT}")"
 source "${PROJECT_ROOT}/runs/registry_hook.sh"
-run_registry_start md "${CONFIG}" "${MD_OUTPUT_DIR}"
+run_registry_start md "${CONFIG}"
 run_registry_install_exit_trap
 
 python scripts/run_md_parallel.py "$CONFIG" \
