@@ -318,7 +318,7 @@ def _make_param_bound_sampler(model, params, re_cfg):
     return sampler, ml_energy
 
 
-def run_relative_entropy(config_file: str):
+def run_relative_entropy(config_file: str, resume: str | None = None):
     config = ConfigManager(config_file)
     re_cfg = relative_entropy_config(config)
     if not re_cfg.enabled:
@@ -385,6 +385,24 @@ def run_relative_entropy(config_file: str):
         initial_states=initial_states,
     )
 
+    if resume:
+        # `auto` picks the newest checkpoint of THIS run; an explicit path is also accepted.
+        # A missing auto-checkpoint is not an error: it means nothing has run yet, so the
+        # same submission works for both the first launch and every restart after it.
+        if str(resume) == "auto":
+            resume_path = RelativeEntropyTrainer.latest_checkpoint(output_dir / "checkpoints")
+            if resume_path is None:
+                training_logger.info(
+                    "[RE] --resume auto: no checkpoint in %s yet, starting from the warm start.",
+                    output_dir / "checkpoints",
+                )
+        else:
+            resume_path = Path(resume)
+            if not resume_path.is_file():
+                raise FileNotFoundError(f"--resume checkpoint not found: {resume_path}")
+        if resume_path is not None:
+            trainer.resume_from(resume_path)
+
     training_logger.info("[RE] Reference data: %s (%d frames)", data_path, dataset["R"].shape[0])
     training_logger.info("[RE] Warm-start checkpoint: %s", ckpt_path)
     training_logger.info("[RE] Sampler: %s", re_cfg.sampler)
@@ -416,12 +434,19 @@ def main(argv=None):
         description="Run standalone relative-entropy fine-tuning for a CAMEO CG model."
     )
     parser.add_argument("config_file", nargs="?", help="Training YAML with training.relative_entropy enabled.")
+    parser.add_argument(
+        "--resume", metavar="auto|PATH", default=None,
+        help="Resume from a REM checkpoint: 'auto' takes the newest one in this run's "
+             "checkpoints/ dir (and is a no-op on a fresh run, so the same command works "
+             "for launch and restart), or give an explicit .pkl path. Restores params, "
+             "optimizer moments, RNG key, persistent chains and history.",
+    )
     args = parser.parse_args(argv)
     if args.config_file is None:
         parser.print_help()
         return 0
     try:
-        run_relative_entropy(args.config_file)
+        run_relative_entropy(args.config_file, resume=args.resume)
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1

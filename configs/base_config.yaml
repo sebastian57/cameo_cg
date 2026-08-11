@@ -1,9 +1,6 @@
-# =============================================================================
-# cameo_cg — Base Configuration Reference
-# =============================================================================
-# All available options with defaults.  Copy this file into local_work/<run>/ and modify it there.
-# Options showing alternatives use the format:  key: value  # alt1 | alt2
-# =============================================================================
+# Canonical lookup registry for stable user-facing cameo_cg training settings.
+# This file is intentionally annotated and not runnable until paths/model choices are edited.
+# For a short first force-matching run, copy configs/example_training.yaml instead.
 
 seed: 42
 model_context: my_experiment
@@ -24,14 +21,15 @@ debug:
   model_logging: false           # jax.debug.print inside compiled model blocks
 
 # -----------------------------------------------------------------------------
-# Output paths — set output_dir once.
-# Other directories default to {output_dir}/{subdir}:
-# checkpoints, exports, profiles, slurm.
-# Optional manual overrides are supported by adding:
-# paths.checkpoint_dir / paths.export_dir / paths.profile_dir / paths.slurm_dir
+# Output paths. Launchers derive the four subdirectories from output_dir when
+# only output_dir is supplied; set an explicit override only when needed.
 # -----------------------------------------------------------------------------
 paths:
   output_dir: ./local_work/outputs/my_run   # optional override; default launcher path is local_work/outputs/<date>_<config_name>
+  export_dir: null                          # null = {output_dir}/exports
+  checkpoint_dir: null                      # null = {output_dir}/checkpoints
+  profile_dir: null                         # null = {output_dir}/profiles
+  slurm_dir: null                           # null = {output_dir}/slurm
 
 # -----------------------------------------------------------------------------
 # Data
@@ -40,12 +38,25 @@ data:
   path: data_prep/datasets/example.npz       # REQUIRED — path to .npz dataset
   use_bucketed_dir: false                    # true = treat data.path as bucket directory (bucket_N*.npz)
   max_frames: null                            # null = use all frames
-  batch_mode: standard                        # standard | tiled
+  crossfit:                                   # inactive unless a generated fold manifest is supplied
+    enabled: false
+    manifest_path: null
+    held_out_fold: 0
+  batch_mode: standard                        # standard = padded structures; tiled = packed structures
   # Tiled-mode options (only used when batch_mode: tiled)
   tile_target_beads: 1000
   tile_bucket_beads: null                     # null = auto; or list e.g. [1024, 2048]
+  tile_target_edges: null                     # optional edge budget per tile
+  tile_bucket_edges: null                     # optional positive edge-count buckets
+  tile_edge_estimate_mode: valid_scaled       # valid_scaled | distance_cutoff
+  tile_edge_estimate_cutoff: null             # required only for distance_cutoff estimates
+  tile_edge_estimate_scale: 15.0
   tile_shuffle_structures: false
   tile_sort_by_size: true
+  tile_sort_by_estimated_edges: false
+  tile_isolate_large_structures: false
+  tile_large_structure_threshold: null        # optional bead-count isolation threshold
+  tile_large_structure_edge_threshold: null   # optional estimated-edge isolation threshold
   tile_spatial_separation: false
   tile_spatial_layout: line_x                  # line_x (legacy) | grid_3d (cell-list-friendly)
   tile_structure_gap: 25.0
@@ -76,13 +87,28 @@ preprocessing:
 # -----------------------------------------------------------------------------
 model:
   ml_model: allegro             # allegro | allegro_cueq | allegro_cueq_fast | mace | painn
+  output_mode: energy           # energy | direct_force
+  direct_force:                 # only supported by ML-only allegro_cueq_fast training
+    head_hidden: 128
+    head_layers: 2
+    envelope_p: 6
+    zero_init: true
+    require_bidirectional_edges: true
   use_priors: true
   train_priors: false
   prior_only: false             # true = priors only (no ML backbone)
   cutoff: 10.0                  # neighbor list cutoff (Angstrom)
   dr_threshold: 0.5             # neighbor list rebuild threshold
   neighbor_list_format: dense   # dense | sparse
+  neighbor_disable_cell_list: false
   pbc: false                    # true = periodic boundary conditions (requires 'box' key in NPZ)
+
+  # Optional inference gates remain off unless their training artifacts and a
+  # supported workflow have been prepared.
+  robustness_gate:
+    enabled: false
+  local_extrapolation_gate:
+    enabled: false
 
   # --- Edge-distance gate for allegro_cueq_fast ------------------------------
   edge_distance_gate:
@@ -113,28 +139,24 @@ model:
     neighbor_extra_capacity: 10  # extra neighbor buffer slots
     # max_edges: null           # explicit cap; null = inferred from test frame
 
-  # --- cuEq-specific overrides (layered on top of allegro: when ml_model is cueq) ---
-  # allegro_cueq:
-  #   mlp_dtype: float32        # float32 | bfloat16
-  #   tp_backend: fused_sp      # fused_sp | blockwise | per_irrep
-  #   tp_mode: mixed_naive
-  #   tp_method: uniform_1d
-  #   tp_batch_strategy: nested_vmap
-  #   tp_left_mode: node_agg
+  # --- cuEq-specific overrides (layered on top of allegro for cuEq models) ---
+  allegro_cueq:
+    mlp_dtype: float32          # float32 | bfloat16
+    tp_backend: fused_sp        # fused_sp | blockwise | per_irrep
+    tp_mode: mixed_naive
+    tp_method: uniform_1d
+    tp_batch_strategy: nested_vmap
+    tp_left_mode: node_agg
 
-  # --- MACE hyperparameters (used when ml_model: mace) -----------------------
-  # mace:
-  #   num_types: 22
-  #   max_edge_multiplier: 1.25
-  #   neighbor_extra_capacity: 64
-  #   ...
+  # --- MACE wrapper controls (inactive unless ml_model: mace) ----------------
+  mace:
+    max_edge_multiplier: 1.25
+    neighbor_extra_capacity: 64
 
-  # --- PaiNN hyperparameters (used when ml_model: painn) ---------------------
-  # painn:
-  #   num_types: 22
-  #   max_edge_multiplier: 1.25
-  #   neighbor_extra_capacity: 64
-  #   ...
+  # --- PaiNN wrapper controls (inactive unless ml_model: painn) --------------
+  painn:
+    max_edge_multiplier: 1.25
+    neighbor_extra_capacity: 64
 
   # --- Prior energy parameters -----------------------------------------------
   priors:
@@ -228,6 +250,7 @@ model:
 # Export
 # -----------------------------------------------------------------------------
 export:
+  enabled: true                 # disable for direct-force teacher models
   mode: auto                    # auto | symbolic | fixed_size
   species_input_convention: model # model: connector passes zero-based species | lammps: MLIR subtracts one-based LAMMPS types
   also_export_naive: false      # for uniform_1d cueq: also emit <model>_symbolic.mlir via tp_method=naive
@@ -338,6 +361,14 @@ training:
 
   force_loss_normalization: legacy_mean  # legacy_mean | valid_components | per_structure_components
 
+  # Dataset fields below are required when teacher labels, HVP, DSM, or safety
+  # regularization are enabled; the default raw force-matching path needs none.
+  force_labels:
+    mode: raw                   # raw | teacher | raw_teacher_blend
+    teacher_key: TeacherForce
+    raw_weight: 2.0
+    teacher_weight: 1.0
+
   # --- Multi-checkpoint stochastic weight averaging ---
   swa:
     enabled: false
@@ -366,6 +397,39 @@ training:
     kT: 0.636                  # kcal/mol at ~320 K
     seed_offset: 1729
     refresh_interval_steps: 0  # 0 = fixed DSM noise; >0 regenerates training DSM noise every N optimizer steps
+
+  # --- Hessian-vector-product matching auxiliary loss ---
+  hvp:
+    enabled: false
+    lambda: 0.01
+    mode: projected_aa_term1
+    target_key: HVP
+    probe_key: hvp_probe
+    loss_mask_key: hvp_loss_mask
+    energy_template: auto
+    require_targets: true
+    stop_gradient_target: true
+
+  # --- Optional safety-frame regularization for residual-prior training ---
+  safety_regularization:
+    enabled: false
+    dataset_paths: []
+    max_safety_fraction: 0.10
+    normal_force_loss_on_safety: false
+    seed_offset: 3119
+    contact_attraction:
+      enabled: true
+      lambda: 0.05
+      r_cut: 3.2
+      pull_tolerance: 2.0
+      max_pairs: 64
+    force_cap:
+      enabled: true
+      lambda: 0.01
+      mode: prior_relative
+      alpha: 1.0
+      offset: 10.0
+      min_cap: 20.0
 
   # --- Precision ---
   enable_mixed_precision: false
@@ -397,30 +461,61 @@ training:
     force_recompute: false
     compute_batch_size: 128
 
-  # --- Relative-entropy fine-tuning (standalone script) ---
-  # Run with: python scripts/train_relative_entropy.py <config.yaml>
-  # Requires training.init_from_checkpoint.enabled=true and a warm-start checkpoint.
+  # --- Relative-entropy fine-tuning (standalone, disabled by default) ---
+  # Launch with scripts/run_relative_entropy.sh. Distances are Angstrom,
+  # energies are kcal/mol, masses are amu, and time/friction use AKMA units.
+  # Requires a compatible warm-start checkpoint configured by the launcher.
   relative_entropy:
     enabled: false
-    reference_data_path: null   # null = use data.path; or point to a mapped-AA reference NPZ
+    reference_data_path: null   # null = use data.path; mapped-AA reference NPZ otherwise
     optimizer: adam
+    sampler: md_langevin        # md_langevin | mc_mala
     iterations: 100
     reference_batch_size: 16
     n_replicas: 8
     steps_per_iteration: 200
     burn_in_steps: 50
     sample_stride: 10
-    dt: 0.02045
-    kT: 0.636
-    gamma: 0.000977
-    mass: 12.011
-    start_frame_mode: reference_random
+    dt: 0.02045                 # AKMA time (~1 fs)
+    kT: 0.636                   # kcal/mol
+    gamma: 0.000977             # inverse AKMA time
+    mass: 12.011                # amu; scalar or per-bead values
+    start_frame_mode: reference_random  # configured alternatives require reviewed index maps
+    persistent_chains: false
+    initial_state_data_path: null
+    initial_state_phi_targets_deg: []
+    initial_state_phi_indices: []       # mapping-specific; four indices when enabled
+    initial_state_phi_shift_deg: 180.0
+    initial_state_cv_targets_deg: []
+    initial_state_cv_indices: []        # mapping-specific four-index CV definitions
+    initial_state_cv_shift_deg: []
+    rollout_schedule: []         # MD only; stages start at iteration 0
     checkpoint_freq: 10
-    max_force: 1.0e4
-    min_pair_distance: 1.5
+    max_force: 1.0e4             # kcal/mol/Angstrom
+    min_pair_distance: 1.5       # Angstrom
     reject_on_instability: true
     seed_offset: 9117
     output_dir: null
+    optimizer_gradient_scale: 1.0
+    gradient_batch_size: 0       # 0 = unbatched parameter-gradient evaluation
+    diagnostics_interval: 1
+    trainable_param_substring: null
+    chirality_diagnostics:
+      enabled: false
+      indices: []                # mapping-specific; review before enabling
+      planar_threshold: 1.3
+    barrier_penalty:
+      enabled: false
+      weight: 0.0
+      v0: 1.3
+      indices: []                # mapping-specific; review before enabling
+    mc:
+      mala:
+        n_chains: 8
+        steps_per_iteration: 200
+        burn_in_steps: 50
+        sample_stride: 10
+        step_size: 1.0e-3
 
   # --- Noised-residual training (requires prior_residual.enabled=true) ---
   noised_residual_training:

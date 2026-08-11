@@ -18,6 +18,7 @@ CLEANUP_PLAN.md
 !env_setup/LAMMPS_build.md
 !env_setup/interactive_job.md
 !env_setup/SETUP_ENV.md
+!md_setup/README.md
 !runs/README.md
 
 # --- shared run registry runtime state ---

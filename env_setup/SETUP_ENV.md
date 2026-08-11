@@ -1,166 +1,161 @@
-# Environment Setup
+# Jupiter environment setup
 
-Use this workflow when you need to recreate the `cameo_cg` Python environment on a new HPC system where:
+This is the source of truth for the Python and shell environment used by
+`cameo_cg`. The instructions target Jupiter's 2026 software stack. Other
+clusters need equivalent Python, CUDA, compiler, and scheduler setup.
 
-- the non-Python system stack is already available
-- internet access is not available from the compute hardware
-- package installation must therefore happen from local clones
+`env_setup/interactive_job.md` is retained as a legacy scheduler reference;
+it is not the environment installation guide.
 
-## Overview
+## Expected directory layout
 
-The clean local setup is:
-
-1. Clone `cameo_cg`
-2. Clone `chemtrain-deploy`
-3. Clone `chemtrain` inside `chemtrain-deploy/external/chemtrain`
-4. Start an interactive job on a compute node
-5. Create and activate the Python environment
-6. Install local editable `chemtrain` and `chemutils`
-7. Install the remaining pinned packages from the portable requirements file in this repo
-
-## Repository Layout
-
-Create a layout like this:
+Keep the editable repositories beside one another:
 
 ```text
-work/
+<workspace>/
 ├── cameo_cg/
-└── chemtrain-deploy/
-    └── external/
-        ├── chemtrain/
-        └── chemutils/
+├── aggforce/
+├── chemtrain-deploy/
+│   └── external/
+│       ├── chemutils/
+│       └── chemtrain/
+│           └── chemtrain_cameo/
+└── venv_cameocg_jupiter2026/
 ```
 
-Notes:
+The active installation imports ChemTrain from the `chemtrain_cameo`
+checkout, Chemutils from `chemtrain-deploy/external/chemutils`, and AggForce
+from the sibling `aggforce` checkout. Do not install a second PyPI ChemTrain
+over the editable checkout.
 
-- `chemutils/` is already part of the `chemtrain-deploy` repository under `external/chemutils`
-- `chemtrain/` should be a separate clone placed inside `chemtrain-deploy/external/chemtrain`
+## 1. Load Jupiter modules
 
-## 1. Clone The Repositories
-
-Run these on a machine where you can access the repositories:
+Run environment creation on a GPU compute node when possible, then load the
+same module family in jobs:
 
 ```bash
-git clone <cameo_cg_repo_url>
-git clone https://github.com/tummfm/chemtrain-deploy.git
-git clone https://github.com/tummfm/chemtrain.git chemtrain-deploy/external/chemtrain
+cd "$CAMEO_CG_PROJECT_ROOT"
+source env_setup/load_modules_2026.sh
 ```
 
-If you want to match the currently used commits exactly, do this only if the latest versions do not work for you:
+The helper loads Python 3.13.5, CUDA 13, GCC 14.3, and the build/runtime
+modules used by the current environment. It deliberately does not load the
+system JAX module.
+
+## 2. Create the venv
 
 ```bash
-cd chemtrain-deploy
-git checkout d88382e081683bdd0d4f5282e63fca4ce58793c2
-
-cd external/chemtrain
-git checkout 9cad115c715b3f9df7813410153c2fc192a8240c
-```
-
-## 2. Start An Interactive Compute Job
-
-Create the environment on the hardware that will actually run the jobs.
-
-Load the required system modules first, then start an interactive job on a compute node using your site-specific scheduler commands. You can use the examples from interactive_job.md to help for this step.
-
-After the job starts, continue the setup there.
-
-## 3. Load Modules And Create The Virtual Environment
-
-From the `env_setup` directory of `cameo_cg`:
-
-```bash
-source load_modules.sh
-```
-
-Then create the Python environment where you want it to live:
-
-```bash
-python3.12 -m venv env_cueq
-source env_cueq/bin/activate
-
+python -m venv --system-site-packages /path/to/venv_cameocg_jupiter2026
+source /path/to/venv_cameocg_jupiter2026/bin/activate
 python -m pip install --upgrade pip setuptools wheel
 ```
 
-Python 3.12 is recommended to match the current environment.
+The validated Jupiter venv uses `include-system-site-packages = true`.
 
-## 4. Install chemtrain And chemutils Locally
+## 3. Install the main packages
 
-From the `chemtrain-deploy` directory:
-
-```bash
-cd /path/to/chemtrain-deploy
-
-pip install -e "external/chemtrain_cameo[all]"
-pip install -e "external/chemutils"
-```
-
-This avoids any network access during installation.
-
-## 5. Install The Remaining Packages
-
-After `chemtrain` and `chemutils` are installed locally, install the remaining pinned packages from the portable requirements file shipped with `cameo_cg`:
+Install the project's editable repositories first:
 
 ```bash
-cd /path/to/cameo_cg
-
-pip install -r env_setup/requirements_cueq_env.txt
+python -m pip install -e /path/to/aggforce
+python -m pip install -e /path/to/chemtrain-deploy/external/chemutils
+python -m pip install -e '/path/to/chemtrain-deploy/external/chemtrain/chemtrain_cameo[all]'
 ```
 
-This requirements file is already cleaned for local/offline use:
+The currently validated key versions are:
 
-- it does not contain the Git-based editable installs for `chemtrain` and `chemutils`
-- it replaces the machine-local `z3-solver @ file://...` entry with `z3-solver==4.13.0.0`
+- JAX, JAXlib, and CUDA 12 plugin/PJRT: 0.10.1
+- JAX-MD: 0.2.28
+- Flax: 0.12.7
+- Optax: 0.2.8
+- e3nn-jax: 0.21.0
+- cuequivariance, cuequivariance-jax, and cu12 ops: 0.10.0
+- ChemTrain: editable `chemtrain_cameo` checkout
+- Chemutils and AggForce: editable local checkouts
 
-Important pinned packages in this environment include:
+Also install the normal scientific/IO tools used by the repo (`numpy`,
+`scipy`, `h5py`, `pyyaml`, `matplotlib`, `mdtraj`, `ase`, `pytest`). CUDA
+wheels may require a package mirror or prepared wheel cache.
 
-- `jax==0.9.1`
-- `jaxlib==0.9.1`
-- `jax-cuda12-pjrt==0.9.1`
-- `jax-cuda12-plugin==0.9.1`
-- `cuequivariance==0.9.0`
-- `cuequivariance-jax==0.9.0`
-- `cuequivariance-ops-cu12==0.9.0`
-- `cuequivariance-ops-jax-cu12==0.9.0`
+`env_setup/requirements_git.txt` is a complete `pip freeze` snapshot of the
+working Jupiter venv. It contains machine paths and VCS revisions and exists
+for comparison and recovery, not as a portable one-command installer.
 
-## 6. Sanity Check
+## 4. Configure persistent paths
 
-Run:
+Add one managed block to `~/.bashrc` (change the prefix for another checkout):
 
 ```bash
-python -c "import jax, chemtrain, chemutils, flax, e3nn_jax, cuequivariance; print('ok')"
+# >>> cameo_cg env >>>
+export CAMEO_LAMMPS_BUILD_DIR=/e/project1/cameo/schmidt36/lammps/build
+export CAMEO_CG_PROJECT_ROOT=/e/project1/cameo/schmidt36/cameo_cg
+export CAMEO_CUEQ_VENV=/e/project1/cameo/schmidt36/venv_cameocg_jupiter2026
+export CAMEO_STANDARD_VENV=/e/project1/cameo/schmidt36/venv_cameocg_jupiter2026
+export CAMEO_MD_PROJECT_ROOT=/e/project1/cameo/schmidt36/cameo_md
+export PATH="$HOME/.local/bin:$PATH"
+# <<< cameo_cg env <<<
 ```
 
-If you want to verify the JAX version explicitly:
+Reload with `source ~/.bashrc`. To update or migrate the managed block, run:
 
 ```bash
-python -c "import jax; print(jax.__version__)"
+bash scripts/configure_user_env.sh
 ```
 
-## 7. Repo Runtime Setup
+`CAMEO_ACTIVE_VENV` is an optional per-command override. Otherwise,
+`scripts/slurm_env.sh` selects `CAMEO_CUEQ_VENV` for `allegro_cueq*` configs
+and `CAMEO_STANDARD_VENV` for other models. JAX-MD configs point to a training
+config; the helper resolves it before selecting the venv.
 
-For normal repo usage, set:
+## 5. Verify imports and accelerator discovery
 
 ```bash
-export CONFIG_FILE=/path/to/cameo_cg/configs/base_config.yaml
+source env_setup/load_modules_2026.sh
+source "$CAMEO_STANDARD_VENV/bin/activate"
+python - <<'PY'
+import jax, jax_md, chemtrain, chemutils, aggforce
+import flax, optax, e3nn_jax, cuequivariance
+print('JAX:', jax.__version__, jax.__file__)
+print('devices:', jax.devices())
+PY
 ```
 
-Then run commands from inside the `cameo_cg` repository.
+The August 2026 Jupiter jobs report JAX 0.10.1 from the venv's Python 3.13
+`site-packages`, not the system JAX module.
 
-## Summary
-
-The minimal local install order is:
+For a quick repository check:
 
 ```bash
-source /path/to/cameo_cg/env_setup/load_modules.sh
-
-python3.12 -m venv env_cueq
-source env_cueq/bin/activate
-python -m pip install --upgrade pip setuptools wheel
-
-cd /path/to/chemtrain-deploy
-pip install -e "external/chemtrain[all]"
-pip install -e "external/chemutils"
-
-cd /path/to/cameo_cg
-pip install -r env_setup/requirements_cueq_env.txt
+cd "$CAMEO_CG_PROJECT_ROOT"
+python -m pytest -q tests/test_run_registry_launchers.py
+python scripts/train.py --help
+python scripts/run_md.py --help
 ```
+
+## LAMMPS connector
+
+LAMMPS has a separate compiled dependency chain. See `md_setup/README.md` for
+normal use. `env_setup/LAMMPS_build.md` and `env_setup/CONNECTOR_REBUILD.md`
+are rebuild/legacy records and should not override this runtime environment.
+
+## Common failures
+
+- **Wrong JAX:** load `load_modules_2026.sh`, reactivate the venv, and print
+  both `jax.__version__` and `jax.__file__`.
+- **Venv variable unset:** export `CAMEO_STANDARD_VENV` and
+  `CAMEO_CUEQ_VENV`, or set `CAMEO_ACTIVE_VENV` for that command.
+- **Wrong ChemTrain:** inspect
+  `python -c 'import chemtrain; print(chemtrain.__file__)'` and reinstall the
+  intended checkout editable.
+- **cuEquivariance failure:** ensure the core, JAX adapter, and CUDA ops use
+  the same version and that the Jupiter modules were loaded.
+- **Direct ChemTrain trainer import fails on `jax.tree_map`:** supported repo
+  entry points call `utils.jax_setup.apply_jax_compat_shims()` before importing
+  ChemTrain/JAX-MD. Do the same in new standalone entry points; do not infer
+  that the working JAX version comes from the system module.
+- **Root-level `pytest` collection fails on `active_learning`:** that analysis
+  test belongs to an optional sibling package. The maintained repository tests
+  can be run with `python -m pytest -q tests`; install the optional package only
+  when working on that separate analysis path.
+- **Login/compute mismatch:** submit through the repository launchers; they
+  source the shared module/environment resolver.

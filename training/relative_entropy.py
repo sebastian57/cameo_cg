@@ -6,11 +6,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Union
 import csv
+import os
 import pickle
 import sys
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 from jax_md import simulate
 
@@ -731,6 +733,14 @@ class InProcessLangevinSampler:
         self.energy_fn = energy_fn
         self.shift_fn = shift_fn
         self.config = config
+        # Compiled rollout cache. MUST be invalidated whenever the rollout lengths change:
+        # they are Python ints baked into the scan lengths, and jax.jit keys its cache on the
+        # function object plus argument shapes -- NOT on values captured in the closure. A
+        # stale entry would silently keep running the previous stage's step count.
+        self._compiled_rollout = None
+        self._compiled_rollout_key = None
+        self._rollout_sharding = None
+        self._logged_sharding = False
 
     def configure_rollout(self, stage: RelativeEntropyRolloutStage) -> None:
         """Update only rollout lengths while retaining the current chain states."""
@@ -741,6 +751,8 @@ class InProcessLangevinSampler:
             burn_in_steps=int(stage.burn_in_steps),
             sample_stride=int(stage.sample_stride),
         )
+        self._compiled_rollout = None
+        self._compiled_rollout_key = None
 
     def _mass_for_species(self, species: jax.Array) -> jax.Array:
         mass = self.config.mass
@@ -766,35 +778,47 @@ class InProcessLangevinSampler:
             float(self.config.gamma),
         )
         state = init_fn(key, R0, mass=self._mass_for_species(species))
+
+        # NESTED SCAN (2026-08-11). The previous form carried the whole retained buffer
+        # through every MD step: a dynamic_update_index_in_dim plus a full-buffer
+        # `jnp.where` select on all `steps_per_iteration` steps in order to keep
+        # `n_retained` frames. Retention points are known statically (burn_in + k*stride),
+        # so an outer scan over retained samples with an inner scan over `stride` steps
+        # emits them as scan outputs and touches no buffer at all.
+        #
+        # Step count and ordering are UNCHANGED, so `step_fn` consumes the RNG stream
+        # identically and trajectories are bit-for-bit identical to the old form. That
+        # invariant is asserted in tests/test_relative_entropy.py.
+        burn_in = int(self.config.burn_in_steps)
+        stride = int(self.config.sample_stride)
         n_retained = int(self.config.retained_samples_per_replica)
-        retained0 = jnp.zeros((n_retained,) + R0.shape, dtype=R0.dtype)
+        total_steps = int(self.config.steps_per_iteration)
 
-        def scan_step(carry, step_idx):
-            state, retained, retained_count = carry
-            state = step_fn(state)
-            position = jnp.where(mask[:, None] > 0, state.position, R0)
-            state = state.set(position=position)
-            after_burn = step_idx > int(self.config.burn_in_steps)
-            on_stride = (step_idx - int(self.config.burn_in_steps)) % int(self.config.sample_stride) == 0
-            should_retain = jnp.logical_and(after_burn, on_stride)
-            safe_index = jnp.minimum(retained_count, n_retained - 1)
-            updated_retained = jax.lax.dynamic_update_index_in_dim(
-                retained,
-                jax.lax.stop_gradient(position[None, ...]),
-                safe_index,
-                axis=0,
-            )
-            retained = jnp.where(should_retain, updated_retained, retained)
-            retained_count = retained_count + should_retain.astype(jnp.int32)
-            return (state, retained, retained_count), None
+        def advance(carry_state, n_steps: int):
+            """`n_steps` Langevin steps, re-parking masked-out beads after each one."""
+            if n_steps <= 0:
+                return carry_state
 
-        steps = jnp.arange(1, int(self.config.steps_per_iteration) + 1)
-        (final_state, retained, _), _ = jax.lax.scan(
-            scan_step,
-            (state, retained0, jnp.asarray(0, dtype=jnp.int32)),
-            steps,
-        )
-        final_position = jnp.where(mask[:, None] > 0, final_state.position, R0)
+            def body(s, _):
+                s = step_fn(s)
+                return s.set(position=jnp.where(mask[:, None] > 0, s.position, R0)), None
+
+            s, _ = jax.lax.scan(body, carry_state, None, length=int(n_steps))
+            return s
+
+        state = advance(state, burn_in)
+
+        def retain_block(carry_state, _):
+            carry_state = advance(carry_state, stride)
+            return carry_state, jax.lax.stop_gradient(carry_state.position)
+
+        state, retained = jax.lax.scan(retain_block, state, None, length=n_retained)
+        # Steps left over when (total - burn_in) is not a whole multiple of stride, so the
+        # chain still advances exactly `steps_per_iteration` steps and persistent chains
+        # hand on the same final state as before.
+        state = advance(state, total_steps - burn_in - n_retained * stride)
+
+        final_position = jnp.where(mask[:, None] > 0, state.position, R0)
         return retained, final_position
 
     def _forces_for_samples(self, R, mask, species):
@@ -805,6 +829,47 @@ class InProcessLangevinSampler:
             return -jax.grad(energy_of_R)(R_i)
 
         return jax.vmap(force_single)(R, mask, species)
+
+    def _rollout_fn(self, n_replicas: int):
+        """jit(vmap(rollout)), rebuilt whenever the rollout lengths or replica count change.
+
+        Compiling this is worth ~3.6x: measured 2026-08-11 on ala2 bb6 wide160, 24 replicas
+        x 2000 steps, one GH200 -- 28.72 s unjitted vs 8.05 s jitted. The rollout is ~97% of
+        a REM iteration, so this dominates everything else in the training step.
+        """
+        key = (int(self.config.steps_per_iteration), int(self.config.burn_in_steps),
+               int(self.config.sample_stride), int(n_replicas))
+        if self._compiled_rollout is not None and self._compiled_rollout_key == key:
+            return self._compiled_rollout
+        self._compiled_rollout = jax.jit(jax.vmap(self._run_single))
+        self._compiled_rollout_key = key
+        return self._compiled_rollout
+
+    def _replica_sharding(self, n_replicas: int):
+        """Shard the replica axis over every local device, or None to stay single-device.
+
+        Replicas are fully independent -- no cross-replica term exists in the REM estimator
+        -- so this is embarrassingly parallel and GSPMD partitions the vmap automatically
+        once the inputs are laid out. Set CAMEO_REM_SHARD=0 to force single-device.
+        """
+        if os.environ.get("CAMEO_REM_SHARD", "1") == "0":
+            return None
+        devices = jax.local_devices()
+        if len(devices) < 2 or int(n_replicas) % len(devices) != 0:
+            if not self._logged_sharding and len(devices) > 1:
+                training_logger.info(
+                    "[RE] rollout NOT sharded: n_replicas=%d is not divisible by %d local "
+                    "devices; set n_replicas to a multiple to use them all.",
+                    int(n_replicas), len(devices),
+                )
+                self._logged_sharding = True
+            return None
+        if self._rollout_sharding is None:
+            mesh = jax.sharding.Mesh(np.asarray(devices), ("replica",))
+            self._rollout_sharding = jax.sharding.NamedSharding(
+                mesh, jax.sharding.PartitionSpec("replica")
+            )
+        return self._rollout_sharding
 
     def run(self, R0, mask, species, rng_key) -> Dict[str, Any]:
         R0 = jnp.asarray(R0, dtype=jnp.float32)
@@ -817,8 +882,20 @@ class InProcessLangevinSampler:
         if mask.shape[0] != R0.shape[0] or species.shape[0] != R0.shape[0]:
             raise ValueError("R0, mask, and species must have matching replica axes.")
 
-        keys = jax.random.split(jnp.asarray(rng_key), int(self.config.n_replicas))
-        per_replica, final_R = jax.vmap(self._run_single)(R0, mask, species, keys)
+        n_replicas = int(self.config.n_replicas)
+        keys = jax.random.split(jnp.asarray(rng_key), n_replicas)
+        sharding = self._replica_sharding(n_replicas)
+        if sharding is not None:
+            R0, mask, species, keys = (
+                jax.device_put(x, sharding) for x in (R0, mask, species, keys)
+            )
+            if not self._logged_sharding:
+                training_logger.info(
+                    "[RE] rollout sharded: %d replicas over %d local devices (%d each).",
+                    n_replicas, len(sharding.mesh.devices), n_replicas // len(sharding.mesh.devices),
+                )
+                self._logged_sharding = True
+        per_replica, final_R = self._rollout_fn(n_replicas)(R0, mask, species, keys)
         R_samples = per_replica.reshape((-1,) + R0.shape[1:])
         repeats = int(self.config.retained_samples_per_replica)
         mask_samples = jnp.repeat(mask, repeats, axis=0)
@@ -1358,12 +1435,85 @@ class RelativeEntropyTrainer:
         except OSError as exc:  # never let logging kill a training run
             training_logger.warning("[RE] live CSV append failed: %s", exc)
 
+    def resume_from(self, checkpoint_path: Union[str, Path]) -> int:
+        """Restore params/optimizer/RNG/chains from a REM checkpoint; return next iteration.
+
+        REM had no resume at all, so a run that hit the 10 h QOS wall lost everything past
+        its last checkpoint (`run_relative_entropy.sh` still has no `--resume` equivalent to
+        `run_training.sh`'s). Everything needed was already being written by
+        save_checkpoint(); this just reads it back and restarts the loop at the right index.
+
+        Resuming is EXACT for params, optimizer moments, RNG key and persistent chain state.
+        It is NOT exact for the rollout schedule if the schedule itself was edited between
+        runs -- the stage is recomputed from the iteration index, which is the intended
+        behaviour.
+        """
+        checkpoint_path = Path(checkpoint_path)
+        with checkpoint_path.open("rb") as handle:
+            payload = pickle.load(handle)
+        self.params = payload["params"]
+        self.best_params = payload.get("best_params", self.params)
+        if payload.get("optimizer_state") is not None:
+            self.opt_state = payload["optimizer_state"]
+        else:
+            training_logger.warning(
+                "[RE] checkpoint %s has no optimizer_state; Adam moments restart from zero.",
+                checkpoint_path.name,
+            )
+        if payload.get("rng_key") is not None:
+            self.rng_key = jnp.asarray(payload["rng_key"])
+        chain = payload.get("chain_state")
+        if chain is not None:
+            self.chain_state = {
+                "R": jnp.asarray(chain["R"], dtype=jnp.float32),
+                "mask": jnp.asarray(chain["mask"], dtype=jnp.float32),
+                "species": jnp.asarray(chain["species"], dtype=jnp.int32),
+            }
+        metadata = payload.get("metadata") or {}
+        self.history = list(metadata.get("history") or [])
+        # Prefer the explicit counter; fall back to the filename, then the history length.
+        start = metadata.get("iteration")
+        if start is None:
+            digits = "".join(c for c in checkpoint_path.stem if c.isdigit())
+            start = int(digits) if digits else len(self.history)
+        start = int(start)
+        if hasattr(self.sampler, "set_params"):
+            self.sampler.set_params(self.params)
+        training_logger.info(
+            "[RE] resumed from %s at iteration %d/%d (%d history rows, chains=%s)",
+            checkpoint_path.name, start, int(self.config.iterations), len(self.history),
+            "restored" if chain is not None else "none",
+        )
+        self._resume_iteration = start
+        return start
+
+    @staticmethod
+    def latest_checkpoint(checkpoint_dir: Union[str, Path]) -> Optional[Path]:
+        """Newest `relative_entropy_iter*.pkl` in a directory, or None."""
+        checkpoint_dir = Path(checkpoint_dir)
+        if not checkpoint_dir.is_dir():
+            return None
+        candidates = sorted(checkpoint_dir.glob("relative_entropy_iter*.pkl"))
+        return candidates[-1] if candidates else None
+
     def train(self) -> Dict[str, Any]:
         last = {}
-        n_rejected = 0
+        n_rejected = sum(1 for row in self.history if row.get("rejected"))
+        start_iteration = int(getattr(self, "_resume_iteration", 0))
         if self._live_csv is not None and self._live_csv.exists():
-            self._live_csv.unlink()  # fresh file per run
-        for iteration in range(int(self.config.iterations)):
+            if start_iteration == 0:
+                self._live_csv.unlink()  # fresh file per run
+            else:
+                # Resuming: keep appending to the existing CSV, and adopt its header so a
+                # second one is not written mid-file (which would break every reader).
+                try:
+                    with self._live_csv.open("r", newline="") as handle:
+                        header = next(csv.reader(handle), None)
+                    if header:
+                        self._live_csv_fields = header
+                except OSError:
+                    pass
+        for iteration in range(start_iteration, int(self.config.iterations)):
             last = self.train_step(iteration)
             n_rejected += bool(last.get("rejected"))
             self._log_iteration(last, n_rejected, iteration + 1)
@@ -1388,6 +1538,9 @@ class RelativeEntropyTrainer:
             "metadata": {
                 "relative_entropy": True,
                 "prior_frozen": True,
+                # Number of COMPLETED iterations == the index to restart at. Written
+                # explicitly so resume_from() never has to infer it from the filename.
+                "iteration": len(self.history),
                 "history": list(self.history),
                 **(metadata or {}),
             },

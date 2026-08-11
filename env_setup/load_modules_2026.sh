@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# Stages/2026 module environment for venv_cameocg_juwels2026 (Python 3.13).
+# Stages/2026 module environment for the Jupiter cameo_cg venv (Python 3.13).
 #
 # Key differences from load_modules.sh (Stages/2025):
 #   - GCC 14.3.0, Python 3.13.5, CUDA/13
-#   - jax/0.8.1 module is CPU-only; install CUDA-enabled JAX in the venv:
-#       pip install "jax[cuda12]>=0.8.1"
+#   - The system JAX module is not used. Install CUDA-enabled JAX in the venv.
+#     The validated August 2026 environment uses JAX/JAXlib 0.10.1.
 #     (jax[cuda12] pip packages run fine on a CUDA 13 driver)
 #   - NVSHMEM is not loaded here: all CUDA-13 NVSHMEM builds require OpenMPI.
 #     Load it separately with OpenMPI/5.0.8 when compiling LAMMPS/chemtrain-deploy.

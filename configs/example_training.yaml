@@ -1,15 +1,10 @@
-# Portable training example derived from a recent production configuration.
-# Replace the input path and tune the schedule for the size of your dataset.
+# Short first force-matching starter; replace the dataset and output paths before running.
+# Its 1500 epochs / 7603-warmup / 69225-decay schedule is production-scale; shorten it for an initial smoke run.
+# See configs/base_config.yaml for the complete annotated training lookup.
 
 seed: 42
 model_context: example_training
 model_id: example_wide160_fm1500
-
-debug:
-  neighbor_logging: false
-  neighbor_rank0_only: true
-  shape_trace: false
-  model_logging: false
 
 paths:
   output_dir: local_work/outputs/example_training
@@ -40,20 +35,12 @@ data:
   tile_train_only: true
   tile_spatial_layout: grid_3d
 
-preprocessing:
-  buffer_multiplier: 4.0
-  park_multiplier: 0.95
-
 model:
   ml_model: allegro_cueq_fast
   use_priors: false
-  train_priors: false
-  prior_only: false
   cutoff: 5.5
   dr_threshold: 1.0
   neighbor_list_format: sparse
-  neighbor_disable_cell_list: false
-  pbc: false
 
   allegro:
     num_types: 4
@@ -74,7 +61,6 @@ model:
     max_edge_multiplier: 1.25
     neighbor_capacity_multiplier: 1.05
     neighbor_extra_capacity: 0
-    max_edges: null
 
   allegro_cueq:
     mlp_dtype: float32
@@ -83,25 +69,12 @@ model:
     tp_method: naive
     tp_batch_strategy: nested_vmap
     tp_left_mode: node_agg
-    tp_left_norm: null
-
-  priors:
-    use_spline_priors: false
-    residue_specific_angles: false
-    weights:
-      bond: 0.0
-      angle: 0.0
-      dihedral: 0.0
-      repulsive: 0.0
-      excluded_volume: 0.0
-      dh: 0.0
-      stickiness: 0.0
-      salt_bridge: 0.0
 
 export:
-  mode: auto
-  also_export_naive: false
   enabled: true
+  mode: auto
+  species_input_convention: model
+  also_export_naive: false
 
 optimizer:
   grad_clip: 0.5
@@ -145,28 +118,12 @@ training:
   remat_policy: none
   grad_accum_steps: 1
   grad_accum_mode: stack_scan
-  pretrain_prior: false
-  export_combined_ml_priors: false
 
-  prior_residual:
+  relative_entropy:
     enabled: false
-    cache_enabled: false
-    cache_path: null
-    force_recompute: false
-    compute_batch_size: 128
 
   profiling:
     enabled: false
-    jax_trace_enabled: false
-    trace_rank0_only: true
-    log_compiles: false
-    batch_profiler_enabled: false
-    batch_stats_enabled: false
-    loss_profile_enabled: false
-    epoch_summary_enabled: true
 
 ensemble:
   enabled: false
-  n_models: 5
-  base_seed: 42
-  save_all_models: false

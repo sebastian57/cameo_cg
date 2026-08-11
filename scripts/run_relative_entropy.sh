@@ -3,7 +3,7 @@
 #SBATCH --account=cameo
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-task=1
+#SBATCH --gpus-per-task=4
 #SBATCH --time=10:00:00
 #SBATCH --partition=booster
 #SBATCH --output=/dev/null
@@ -20,9 +20,22 @@ re_err_trap() {
 }
 trap re_err_trap ERR
 
-CONFIG_FILE="${1:-}"
+CONFIG_FILE=""
+RESUME_VALUE=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --resume)
+            RESUME_VALUE="${2:?--resume requires an argument (auto|<path>)}"; shift 2 ;;
+        -h|--help)
+            echo "Usage: sbatch scripts/run_relative_entropy.sh <config.yaml> [--resume auto|<path>]"
+            exit 0 ;;
+        *)
+            if [[ -z "${CONFIG_FILE}" ]]; then CONFIG_FILE="$1"; shift
+            else echo "ERROR: unexpected argument: $1" >&2; exit 1; fi ;;
+    esac
+done
 if [[ -z "${CONFIG_FILE}" ]]; then
-    echo "Usage: sbatch scripts/run_relative_entropy.sh <config.yaml>"
+    echo "Usage: sbatch scripts/run_relative_entropy.sh <config.yaml> [--resume auto|<path>]"
     exit 1
 fi
 
@@ -183,7 +196,9 @@ source "${PROJECT_ROOT}/runs/registry_hook.sh"
 run_registry_start relative-entropy "${CONFIG_FILE}" "${RUN_OUTPUT_DIR}"
 run_registry_install_exit_trap
 
-srun -l --ntasks-per-node=1 "${PYTHON_BIN}" -u "${SCRIPT_DIR}/train_relative_entropy.py" "${RUNTIME_CONFIG}" 2>&1 | tee "${LOGFILE}"
+RE_ARGS=("${RUNTIME_CONFIG}")
+[[ -n "${RESUME_VALUE}" ]] && RE_ARGS+=("--resume" "${RESUME_VALUE}")
+srun -l --ntasks-per-node=1 "${PYTHON_BIN}" -u "${SCRIPT_DIR}/train_relative_entropy.py" "${RE_ARGS[@]}" 2>&1 | tee "${LOGFILE}"
 echo "============================================================"
 echo "Relative entropy complete. Log: ${LOGFILE}"
 echo "============================================================"

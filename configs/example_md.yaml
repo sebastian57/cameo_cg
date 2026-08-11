@@ -1,53 +1,97 @@
-# Portable multi-replica MD example derived from a recent production run.
-# Supply a trained checkpoint and a dataset containing at least eight frames.
-
+# Portable, short JAX-MD smoke template and stable settings registry.
+# Replace the three input paths. Validate this smoke run before increasing n_steps.
 md:
-  units: physical
-
+  # Inputs and start frames. Model architecture/settings come from the saved training config.
   training_config_path: configs/example_training.yaml
   params_path: local_work/outputs/example_training/checkpoints/example_checkpoint.pkl
-
   dataset_path: local_work/input_data/example_md_starting_structures.npz
-  frame_indices:
-    - 0
-    - 1
-    - 2
-    - 3
-    - 4
-    - 5
-    - 6
-    - 7
+  # Eight distinct frame indices feed eight replicas; frame_idx is the single-frame alternative.
+  frame_indices: [0, 1, 2, 3, 4, 5, 6, 7]
 
+  # Model and prior overrides. Optional gates remain disabled for this smoke run.
+  override_use_priors: false
+  prior_only: false
+  ml_energy_scale: 1.0
+  prior_energy_scale: 1.0
+  prior_overrides: {}
+  aa_integrated_baseline_component_scales: {}
+  robustness_gate:
+    enabled: false
+    threshold: 250.0
+    width: 50.0
+    floor: 0.0
+    stop_gradient: true
+  local_extrapolation_gate:
+    enabled: false
+    artifact_path: null
+    stop_gradient_gate: true
+  edge_distance_gate:
+    enabled: false
+    artifact_path: null
+    falloff_percent: 0.05
+    floor: 0.0
+    stop_gradient: true
+
+  # Neighbor strategy. cell_list and disable_cell_list are mutually exclusive.
+  # Chunking requires divisible edge counts and is incompatible with force decomposition.
+  cell_list: false
+  disable_cell_list: true
+  scan_chunk_size: 0
+
+  # Initialization and equilibration.
   zero_com_velocity: true
+  rescale_initial_temperature: true
+  initial_temperature_scale: 1.0
+  equilibrate: true
+  n_equil_steps: 1000
 
-  equilibrate:   false
-  n_equil_steps: 0
-
+  # Integrator and units. Supported: nvt_langevin, nve, nvt_nose_hoover.
+  units: physical
   integrator: nvt_langevin
-  n_steps:    1500000
-  dt:         2.0
-  kT:         298.0
-  gamma:      5.0
-
+  n_steps: 5000
+  dt: 1.0                       # fs; start here for wide160 backbone+Cbeta models
+  kT: 298.0                     # K
+  gamma: 5.0
+  tau: 2.045                    # Nosé-Hoover only; currently AKMA even when units: physical (~100 fs)
+  # One mass per bead for this six-bead example; replace for another mapping.
   mass: [12.011, 14.007, 12.011, 12.011, 12.011, 14.007]
 
-  output_dir: local_work/md_runs/example_md
-  output_filename: trajectory.npz
-  output_every:    100
+  # Optional bias.
+  bias:
+    enabled: false
+    type: periodic_dihedral_harmonic
+    indices: [0, 1, 2, 3]
+    center_deg: 0.0
+    shift_deg: 180.0
+    k_kcal_per_mol_rad2: 0.0
 
+  # Constraints and stability.
+  h_constraints: false
+  h_constraint_species: 0
+  h_constraint_max_distance: 1.35
+  h_constraint_iterations: 8
+  stability_abort:
+    min_pair_distance_A: 0.7
+    max_force_kcal_per_mol_A: 10000.0
+    max_temperature_K: 3000.0
+
+  # Replicas and output. Launchers manage private partial-output paths internally.
   n_replicas: 8
-  seed:       42
-
-  continuous_output:       false
+  seed: 42
+  output_dir: local_work/md_runs/example_md_smoke
+  output_filename: trajectory.npz
+  output_every: 10
+  # Maintain a recoverable partial trajectory if a job is interrupted.
+  continuous_output: true
   continuous_output_every: 10
 
-  observables_every: 50
-  observables:
-    - step
-    - T
-    - KE
-    - PE
-    - E_total
-
+  # Observables, force decomposition, and visualization dumps.
+  observables_every: 10
+  observables: [step, T, KE, PE, E_total]
+  observables_filename: observables.csv
+  observables_path: null
+  # Force decomposition is unavailable for direct-force models.
+  force_decomp: false
+  force_decomp_every: 10
   dump_for_ovito: false
-  dump_padding:   20.0
+  dump_padding: 20.0

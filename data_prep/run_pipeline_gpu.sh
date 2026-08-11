@@ -41,7 +41,25 @@ RESIDUE_SPECIFIC_ANGLES="${RESIDUE_SPECIFIC_ANGLES:-0}"
 NORMALIZE_FORCES="${NORMALIZE_FORCES:-0}"
 USE_4WAY_GROUPING="${USE_4WAY_GROUPING:-0}"
 VERBOSE="${VERBOSE:-0}"
+MAPPING="${MAPPING:-1bead}"
+N_BUCKETS="${N_BUCKETS:-}"
+BUCKET_BOUNDARIES="${BUCKET_BOUNDARIES:-}"
+NO_COMBINE="${NO_COMBINE:-0}"
+SKIP_PRIOR_FITTING="${SKIP_PRIOR_FITTING:-0}"
 # -----------------------------------------------------------------------------
+
+if [[ "${MAPPING}" != "1bead" && "${MAPPING}" != "backbone_cb" ]]; then
+  echo "ERROR: MAPPING must be 1bead or backbone_cb (got ${MAPPING})." >&2
+  exit 1
+fi
+if [[ -n "${N_BUCKETS}" && -n "${BUCKET_BOUNDARIES}" ]]; then
+  echo "ERROR: Set only one of N_BUCKETS or BUCKET_BOUNDARIES." >&2
+  exit 1
+fi
+if [[ "${NO_COMBINE}" == "1" && ( -n "${N_BUCKETS}" || -n "${BUCKET_BOUNDARIES}" ) ]]; then
+  echo "ERROR: NO_COMBINE=1 cannot be combined with bucket options." >&2
+  exit 1
+fi
 
 if [[ "${H5_DIR}" != /* ]]; then
   H5_DIR="${PROJECT_ROOT}/${H5_DIR}"
@@ -56,14 +74,13 @@ exec > >(tee -a "${LOG_FILE}") 2>&1
 
 cd "${PROJECT_ROOT}"
 
-module purge
-module load Stages/2025 StdEnv/2025
-module load GCC/13.3.0 Python/3.12.3
-module load CUDA/12 ParaStationMPI cuDNN/9.5.0.50-CUDA-12 NCCL/default-CUDA-12
-module load jax/0.4.34-CUDA-12
-module load CMake/3.30.3 Ninja/1.12.1 Clang/18.1.8 UCX/default UCC/default git/2.45.1 HDF5/1.14.5-serial
-
+source "${PROJECT_ROOT}/env_setup/load_modules_2026.sh"
 source "${VENV_DIR}/bin/activate"
+PYTHON_BIN="$(command -v python)"
+if [[ -z "${PYTHON_BIN}" ]]; then
+  echo "ERROR: No python found after activating ${VENV_DIR}." >&2
+  exit 1
+fi
 
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES//[[:space:]]/}"
@@ -92,13 +109,28 @@ except Exception as exc:
 PYCHK
 
 CMD=(
-  python3 data_prep/run_pipeline.py
+  "${PYTHON_BIN}" data_prep/run_pipeline.py
   --h5_dir "${H5_DIR}"
   --out_dir "${OUT_DIR}"
   --nframes "${NFRAMES}"
   --temp "${TEMP_GROUPS[@]}"
   --T "${PRIOR_FIT_T}"
+  --mapping "${MAPPING}"
 )
+
+if [[ -n "${N_BUCKETS}" ]]; then
+  CMD+=(--n_buckets "${N_BUCKETS}")
+fi
+if [[ -n "${BUCKET_BOUNDARIES}" ]]; then
+  read -r -a BUCKET_BOUNDARY_VALUES <<< "${BUCKET_BOUNDARIES}"
+  CMD+=(--bucket_boundaries "${BUCKET_BOUNDARY_VALUES[@]}")
+fi
+if [[ "${NO_COMBINE}" == "1" ]]; then
+  CMD+=(--no_combine)
+fi
+if [[ "${SKIP_PRIOR_FITTING}" == "1" ]]; then
+  CMD+=(--skip_prior_fitting)
+fi
 
 if [[ "${ENABLE_SPLINE}" == "1" ]]; then
   CMD+=(--spline)
@@ -130,6 +162,11 @@ echo "Out dir:      ${OUT_DIR}"
 echo "Frames:       ${NFRAMES}"
 echo "Temp groups:  ${TEMP_GROUPS[*]}"
 echo "Prior-fit T:  ${PRIOR_FIT_T}"
+echo "Mapping:      ${MAPPING}"
+echo "N buckets:    ${N_BUCKETS:-none}"
+echo "Boundaries:   ${BUCKET_BOUNDARIES:-none}"
+echo "No combine:   ${NO_COMBINE}"
+echo "Skip priors:  ${SKIP_PRIOR_FITTING}"
 echo "Aggforce:     enabled"
 echo "Spline:       ${ENABLE_SPLINE}"
 echo "CUDA visible: ${CUDA_VISIBLE_DEVICES}"

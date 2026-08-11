@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
@@ -386,6 +387,122 @@ class RelativeEntropySamplerTests(unittest.TestCase):
         diagnostics = sampler.diagnostics_for_samples(result["R"], result["mask"], result["species"])
         self.assertTrue(np.isfinite(diagnostics["max_force"]))
 
+    def test_nested_scan_rollout_is_bit_identical_to_the_flat_retention_buffer(self):
+        """REGRESSION GUARD for the 2026-08-11 nested-scan rewrite.
+
+        The old rollout carried the retained buffer through every MD step
+        (dynamic_update_index_in_dim + a full-buffer jnp.where select per step). The new one
+        uses an outer scan over retained samples and an inner scan over `sample_stride`.
+        Both perform exactly the same number of step_fn calls in the same order, so they
+        consume the RNG stream identically and MUST agree bit-for-bit. If this test ever
+        fails, the rewrite changed the trajectory, not just its bookkeeping.
+        """
+        from jax_md import simulate
+
+        cfg = RelativeEntropyConfig(
+            enabled=True, reference_data_path="data/example.npz", n_replicas=3,
+            steps_per_iteration=12, burn_in_steps=4, sample_stride=2,
+            dt=0.002, kT=0.15, gamma=0.3, mass=12.0,
+        )
+
+        def energy_fn(R, mask=None, species=None):
+            del species
+            return 0.5 * jnp.sum(jnp.where(mask[:, None] > 0, R, 0.0) ** 2)
+
+        def shift_fn(R, dR):
+            return R + dR
+
+        sampler = InProcessLangevinSampler(energy_fn, shift_fn, cfg)
+
+        def legacy_run_single(R0, mask, species, key):
+            """Verbatim pre-2026-08-11 implementation, kept only as the reference."""
+            mask = jnp.asarray(mask, dtype=jnp.float32)
+            species = jnp.asarray(species, dtype=jnp.int32)
+            R0 = jnp.asarray(R0, dtype=jnp.float32)
+
+            def energy_for_md(R):
+                R_masked = jnp.where(mask[:, None] > 0, R, jax.lax.stop_gradient(R0))
+                return energy_fn(R_masked, mask=mask, species=species)
+
+            init_fn, step_fn = simulate.nvt_langevin(
+                energy_for_md, shift_fn, float(cfg.dt), float(cfg.kT), float(cfg.gamma)
+            )
+            state = init_fn(key, R0, mass=jnp.full((species.shape[0], 1), 12.0, jnp.float32))
+            n_retained = int(cfg.retained_samples_per_replica)
+            retained0 = jnp.zeros((n_retained,) + R0.shape, dtype=R0.dtype)
+
+            def scan_step(carry, step_idx):
+                state, retained, retained_count = carry
+                state = step_fn(state)
+                position = jnp.where(mask[:, None] > 0, state.position, R0)
+                state = state.set(position=position)
+                after_burn = step_idx > int(cfg.burn_in_steps)
+                on_stride = (step_idx - int(cfg.burn_in_steps)) % int(cfg.sample_stride) == 0
+                should_retain = jnp.logical_and(after_burn, on_stride)
+                safe_index = jnp.minimum(retained_count, n_retained - 1)
+                updated = jax.lax.dynamic_update_index_in_dim(
+                    retained, jax.lax.stop_gradient(position[None, ...]), safe_index, axis=0
+                )
+                retained = jnp.where(should_retain, updated, retained)
+                return (state, retained, retained_count + should_retain.astype(jnp.int32)), None
+
+            steps = jnp.arange(1, int(cfg.steps_per_iteration) + 1)
+            (final_state, retained, _), _ = jax.lax.scan(
+                scan_step, (state, retained0, jnp.asarray(0, dtype=jnp.int32)), steps
+            )
+            return retained, jnp.where(mask[:, None] > 0, final_state.position, R0)
+
+        R0 = jnp.array(
+            [[[0.1, 0.0, 0.0], [1.0, 0.0, 0.0]],
+             [[0.0, 0.1, 0.0], [1.0, 0.1, 0.0]],
+             [[0.2, 0.1, 0.3], [0.9, 0.2, 0.1]]], dtype=jnp.float32
+        )
+        mask = jnp.ones((3, 2), dtype=jnp.float32)
+        species = jnp.zeros((3, 2), dtype=jnp.int32)
+        keys = jax.random.split(jnp.array([0, 1], dtype=jnp.uint32), 3)
+
+        new_retained, new_final = jax.vmap(sampler._run_single)(R0, mask, species, keys)
+        old_retained, old_final = jax.vmap(legacy_run_single)(R0, mask, species, keys)
+
+        self.assertEqual(new_retained.shape, old_retained.shape)
+        np.testing.assert_array_equal(np.asarray(new_retained), np.asarray(old_retained))
+        np.testing.assert_array_equal(np.asarray(new_final), np.asarray(old_final))
+
+    def test_rollout_recompiles_when_the_schedule_changes_stage(self):
+        """jax.jit keys its cache on the function object, NOT on closed-over Python values.
+
+        Caching the compiled rollout without invalidating it on configure_rollout() would
+        silently keep running the previous stage's step count for the rest of training.
+        """
+        cfg = RelativeEntropyConfig(
+            enabled=True, reference_data_path="data/example.npz", n_replicas=2,
+            steps_per_iteration=6, burn_in_steps=2, sample_stride=2,
+            dt=0.001, kT=0.1, gamma=0.1, mass=12.0,
+        )
+
+        def energy_fn(R, mask=None, species=None):
+            del species
+            return 0.5 * jnp.sum(jnp.where(mask[:, None] > 0, R, 0.0) ** 2)
+
+        sampler = InProcessLangevinSampler(energy_fn, lambda R, dR: R + dR, cfg)
+        R0 = jnp.zeros((2, 2, 3), dtype=jnp.float32) + 0.1
+        mask = jnp.ones((2, 2), dtype=jnp.float32)
+        species = jnp.zeros((2, 2), dtype=jnp.int32)
+        key = jnp.array([0, 1], dtype=jnp.uint32)
+
+        first = sampler.run(R0, mask, species, key)
+        self.assertEqual(first["R"].shape[0], 2 * 2)  # (6-2)//2 = 2 retained per replica
+        fn_before = sampler._compiled_rollout
+
+        sampler.configure_rollout(
+            RelativeEntropyRolloutStage(start_iteration=1, steps_per_iteration=12,
+                                        burn_in_steps=2, sample_stride=2)
+        )
+        self.assertIsNone(sampler._compiled_rollout, "cache must be dropped on stage change")
+        second = sampler.run(R0, mask, species, key)
+        self.assertEqual(second["R"].shape[0], 2 * 5)  # (12-2)//2 = 5 retained per replica
+        self.assertIsNot(sampler._compiled_rollout, fn_before)
+
     def test_sampler_rejects_wrong_replica_count(self):
         cfg = RelativeEntropyConfig(
             enabled=True,
@@ -424,6 +541,108 @@ class _FakeSampler:
                 "n_samples": 1,
             },
         }
+
+
+class RelativeEntropyResumeTests(unittest.TestCase):
+    """REM had no resume, so a run that hit the 10 h QOS wall lost everything after its
+    last checkpoint. These cover the restart path added 2026-08-11."""
+
+    @staticmethod
+    def _make_trainer(tmpdir, iterations=4, seed=0):
+        cfg = RelativeEntropyConfig(
+            enabled=True, reference_data_path="data/example.npz", reference_batch_size=1,
+            n_replicas=1, iterations=iterations, steps_per_iteration=2, burn_in_steps=0,
+            sample_stride=1, kT=2.0, checkpoint_freq=1,
+        )
+        params = {"ml": {"w": jnp.array(2.0)}, "prior": {"k": jnp.array(7.0)}}
+        reference = {
+            "R": jnp.array([[[2.0, 0.0, 0.0]]], dtype=jnp.float32),
+            "mask": jnp.ones((1, 1), dtype=jnp.float32),
+            "species": jnp.zeros((1, 1), dtype=jnp.int32),
+        }
+
+        def energy_fn(ml_params, R, mask, species):
+            del mask, species
+            return ml_params["w"] * jnp.sum(R * R)
+
+        return RelativeEntropyTrainer(
+            params=params, reference_data=reference, sampler=_FakeSampler(),
+            energy_fn=energy_fn, optimizer=optax.sgd(learning_rate=0.1), config=cfg,
+            seed=seed, checkpoint_dir=Path(tmpdir) / "checkpoints",
+        )
+
+    def test_resume_continues_from_checkpoint_without_redoing_iterations(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            first = self._make_trainer(tmpdir, iterations=2)
+            first.train()
+            self.assertEqual(len(first.history), 2)
+            w_after_two = float(first.params["ml"]["w"])
+
+            ckpt = RelativeEntropyTrainer.latest_checkpoint(Path(tmpdir) / "checkpoints")
+            self.assertIsNotNone(ckpt)
+
+            resumed = self._make_trainer(tmpdir, iterations=4)
+            start = resumed.resume_from(ckpt)
+
+            self.assertEqual(start, 2)
+            self.assertEqual(len(resumed.history), 2)
+            self.assertAlmostEqual(float(resumed.params["ml"]["w"]), w_after_two, places=6)
+
+            resumed.train()
+            # 4 total, not 6: the first two are not repeated.
+            self.assertEqual(len(resumed.history), 4)
+            self.assertEqual([row["iteration"] for row in resumed.history], [0, 1, 2, 3])
+
+    def test_resume_restores_optimizer_state_and_rng_key(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            first = self._make_trainer(tmpdir, iterations=2)
+            first.train()
+            ckpt = RelativeEntropyTrainer.latest_checkpoint(Path(tmpdir) / "checkpoints")
+
+            resumed = self._make_trainer(tmpdir, iterations=4)
+            fresh_key = np.asarray(resumed.rng_key).copy()
+            resumed.resume_from(ckpt)
+
+            # RNG must come from the checkpoint, or resumed rollouts replay old randomness.
+            self.assertFalse(np.array_equal(np.asarray(resumed.rng_key), fresh_key))
+            np.testing.assert_array_equal(
+                np.asarray(resumed.rng_key), np.asarray(first.rng_key)
+            )
+            # Optimizer moments must survive: restarting them at zero silently changes the
+            # effective learning-rate schedule mid-run.
+            self.assertEqual(
+                jax.tree_util.tree_structure(resumed.opt_state),
+                jax.tree_util.tree_structure(first.opt_state),
+            )
+
+    def test_latest_checkpoint_picks_the_highest_iteration_and_tolerates_no_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "checkpoints"
+            self.assertIsNone(RelativeEntropyTrainer.latest_checkpoint(root))
+            root.mkdir(parents=True)
+            self.assertIsNone(RelativeEntropyTrainer.latest_checkpoint(root))
+            for i in (5, 40, 100):
+                (root / f"relative_entropy_iter{i:06d}.pkl").write_bytes(b"x")
+            self.assertEqual(
+                RelativeEntropyTrainer.latest_checkpoint(root).name,
+                "relative_entropy_iter000100.pkl",
+            )
+
+    def test_resume_appends_to_the_live_csv_without_a_second_header(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            first = self._make_trainer(tmpdir, iterations=2)
+            first.train()
+            live = Path(tmpdir) / "relative_entropy_history_live.csv"
+            self.assertTrue(live.exists())
+
+            resumed = self._make_trainer(tmpdir, iterations=4)
+            resumed.resume_from(RelativeEntropyTrainer.latest_checkpoint(Path(tmpdir) / "checkpoints"))
+            resumed.train()
+
+            rows = live.read_text().strip().splitlines()
+            headers = [r for r in rows if r.startswith("iteration,")]
+            self.assertEqual(len(headers), 1, f"expected exactly one header, got {len(headers)}")
+            self.assertEqual(len(rows), 5)  # 1 header + 4 iterations
 
 
 class RelativeEntropyTrainerTests(unittest.TestCase):

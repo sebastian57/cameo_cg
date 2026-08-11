@@ -1,167 +1,306 @@
-# Command Reference
+# Command reference
 
-## Core Pattern
+Run these commands from `$CAMEO_CG_PROJECT_ROOT`. Replace placeholders and
+inspect `--help` before using uncommon options. Environment setup lives in
+`env_setup/SETUP_ENV.md`; workflow explanations live in `WORKFLOW.md`.
 
-Run commands from the repository root, but keep configs and outputs in `local_work/`.
-
-```bash
-mkdir -p local_work/example_run
-cp configs/base_config.yaml local_work/example_run/example_config.yaml
-sbatch ./scripts/run_training.sh local_work/example_run/example_config.yaml
-```
-
-Single-run outputs appear under:
-
-```text
-local_work/outputs/YYYYMMDD_example_config/
-```
-
-## Training
-
-Single node:
+## Shell setup and checks
 
 ```bash
-sbatch ./scripts/run_training.sh local_work/example_run/example_config.yaml
+source ~/.bashrc
+cd "$CAMEO_CG_PROJECT_ROOT"
+source env_setup/load_modules_2026.sh
+source "$CAMEO_STANDARD_VENV/bin/activate"
+python -c "import jax; print(jax.__version__, jax.__file__, jax.devices())"
+bash scripts/configure_user_env.sh
 ```
 
-Two nodes:
+Override environment selection for one submission:
 
 ```bash
-sbatch --nodes=2 ./scripts/run_training.sh local_work/example_run/example_config.yaml
+CAMEO_ACTIVE_VENV=/path/to/venv sbatch scripts/run_training.sh CONFIG.yaml
 ```
 
-Resume from the latest checkpoint:
+## Training: force matching and mSAM
+
+Create a local config from a maintained reference:
 
 ```bash
-sbatch ./scripts/run_training.sh local_work/example_run/example_config.yaml --resume auto
+mkdir -p local_work/my_run
+cp configs/base_config.yaml local_work/my_run/config.yaml
+sbatch scripts/run_training.sh local_work/my_run/config.yaml
 ```
 
-Resume from a specific checkpoint:
+The YAML selects standard force matching or mSAM and defines batch size,
+tiling, gradient accumulation, optimizer stages, losses, priors, and model.
+Use the same launcher for either method.
 
 ```bash
-sbatch ./scripts/run_training.sh   local_work/example_run/example_config.yaml   --resume local_work/outputs/YYYYMMDD_example_config/checkpoints/stage_sgd_nesterov_epoch2.pkl
+# Two nodes
+sbatch --nodes=2 scripts/run_training.sh local_work/my_run/config.yaml
+
+# Resume the newest compatible checkpoint
+sbatch scripts/run_training.sh local_work/my_run/config.yaml --resume auto
+
+# Resume an explicit checkpoint
+sbatch scripts/run_training.sh local_work/my_run/config.yaml \
+  --resume local_work/outputs/RUN/checkpoints/CHECKPOINT.pkl
+
+# Explicit bucketed multi-protein directory
+sbatch scripts/run_training.sh local_work/my_run/config.yaml \
+  --multi-protein-dir data_prep/datasets/buckets
+
+# Profile the config
+sbatch scripts/run_profiling.sh local_work/my_run/config.yaml
 ```
 
-## Suite Submission
-
-Prepare a config directory under `local_work/`, then submit:
+Submit every YAML in a directory as a bounded Slurm array:
 
 ```bash
-bash ./scripts/submit_suite.sh   --input_dir local_work/my_suite/configs   --name my_suite
+bash scripts/submit_suite.sh \
+  --input_dir local_work/my_suite/configs \
+  --name my_suite --max_concurrent 4 --nodes 1 --time 10:00:00
 ```
 
-Suite outputs are written under `local_work/outputs` by default:
+## Relative entropy / REM fine-tuning
 
-```text
-local_work/outputs/YYYYMMDD_training_suite_my_suite/
-```
-
-## Monitoring
-
-Follow the main training log:
+Configure `training.relative_entropy` and checkpoint initialization in the
+YAML, then submit:
 
 ```bash
-tail -f local_work/outputs/YYYYMMDD_example_config/train_<jobid>.log
+sbatch scripts/run_relative_entropy.sh local_work/my_rem/config.yaml
 ```
 
-Follow the SLURM log:
+Use persistent trajectories, multiple diverse initial frames/replicas, and a
+short diagnostic stage before a long REM run. The training config controls
+simulation length, state reuse, clipping/stability behavior, and optimizer.
+
+## Direct-force teacher and ensemble preparation
+
+Build guarded cross-fit folds:
 
 ```bash
-tail -f local_work/outputs/YYYYMMDD_example_config/slurm-<jobid>.out
+python scripts/build_crossfit_manifest.py DATASET.npz MANIFEST.json \
+  --n-folds 5 --guard-frames 10 --group-key trajectory_id
 ```
 
-Cluster helpers:
+Materialize an ensemble teacher locally:
 
 ```bash
-squeue -u $USER
-scontrol show job <jobid>
-scancel <jobid>
+python scripts/materialize_direct_force_teacher.py \
+  DATASET.npz MANIFEST.json ENSEMBLE_SPEC.yaml TEACHER.npz --batch-size 32
 ```
 
-## Export
-
-Post-hoc MLIR re-export:
+Or submit materialization:
 
 ```bash
-python export/reexport_mlir.py   /path/to/model_params.pkl   /path/to/model_config.yaml   --mode combined   --prior-source config   --output-name model_with_priors --export-mode symbolic
+sbatch scripts/submit_teacher_materialization.sh \
+  DATASET.npz MANIFEST.json ENSEMBLE_SPEC.yaml TEACHER.npz 32
 ```
 
-Batch re-export:
+## Data preprocessing
+
+Run the complete HDF5-to-CG pipeline on Jupiter:
 
 ```bash
-sbatch export/run_reexport.sh   /path/to/model_params.pkl   /path/to/export_config.yaml   --mode combined   --prior-source config   --output-name model_with_priors
+H5_DIR=/path/to/h5_inputs \
+OUT_DIR=local_work/data/pipeline_run \
+NFRAMES=2500 TEMP_GROUPS='298 320' PRIOR_FIT_T=320 \
+MAPPING=backbone_cb N_BUCKETS=4 \
+sbatch data_prep/run_pipeline_gpu.sh
 ```
 
-## Evaluation And Analysis
-
-Force evaluation:
+Useful environment switches are:
 
 ```bash
-python analysis_tests/evaluate_forces.py   /path/to/model_params.pkl   /path/to/config.yaml   --frames 50
+# Exact size boundaries instead of N_BUCKETS
+BUCKET_BOUNDARIES='64 128 256'
+# Keep per-system NPZs and do not combine
+NO_COMBINE=1
+# Skip the prior-fitting stage
+SKIP_PRIOR_FITTING=1
+# Optional fitting/mapping switches
+ENABLE_SPLINE=1 RESIDUE_SPECIFIC_ANGLES=1 NORMALIZE_FORCES=1 \
+USE_4WAY_GROUPING=1 VERBOSE=1
 ```
 
-Suite analysis:
+`N_BUCKETS`, `BUCKET_BOUNDARIES`, and `NO_COMBINE=1` are mutually constrained;
+the wrapper validates incompatible combinations. Run the pipeline directly in
+an allocated environment when debugging:
 
 ```bash
-sbatch scripts/run_analysis.sh /path/to/suite/output
+python data_prep/run_pipeline.py --h5_dir INPUT --out_dir OUTPUT \
+  --nframes 2500 --temp 298 320 --T 320 --mapping backbone_cb --n_buckets 4
 ```
+
+Individual operations:
 
 ```bash
-sbatch scripts/run_analysis.sh \
-  --input-dir /p/project1/cameo/schmidt36/cameo_cg/local_work/outputs/<your_run_dir> \
-  --name <analysis_name> \
-  --detailed-force-eval \
-  --complete-eval \
-  --detailed-batch-size 8 \
-  --complete-eval-batch-size 4
+python data_prep/cg_1bead.py --infile AA.npz --outfile CA_CG.npz --verbose
+python data_prep/cg_backbone_cb.py --help
+python data_prep/pad_and_combine_datasets.py --help
+python data_prep/prior_fitting_script.py --help
+python data_prep/analyze_dataset.py --npz DATASET.npz
 ```
 
+## Enhanced/region-balanced dataset assembly
 
-Direct suite analysis:
+Mix reference and prioritized enhanced sources:
 
 ```bash
-python analysis_tests/analyze_suite.py /path/to/suite/output --detailed-force-eval
+python -m data_prep.build_mixed_training_set \
+  --reference REFERENCE.npz --n-reference 100000 \
+  --enhanced inversion.npz:25000:priority --enhanced tica.npz:25000 \
+  --mapping ala2_backbone_cb_6 --chi-window 0.15 --enhanced-basin-frac 0.25 \
+  --seed 17 --out local_work/data/mixed.npz
 ```
 
-## Data Preparation
-
-Coarse-grain a trajectory:
+Build a fixed-size region-balanced set (repeat `--source` and `--region`):
 
 ```bash
-python data_prep/cg_1bead.py   --npz raw_data/protein_allatom.npz   --pdb raw_data/protein_topology.pdb   --output data_prep/datasets/protein_cg.npz
+python -m data_prep.build_region_balanced_set \
+  --source reference=REFERENCE.npz --source enhanced=ENHANCED.npz \
+  --region alpha=-120:-20:-100:40 \
+  --region mirror=20:120:-40:100 \
+  --n-per-region 10000 --mapping ala2_backbone_cb_6 --max-bond 6.0 \
+  --seed 17 --out local_work/data/region_balanced.npz
 ```
 
-Fit priors:
+Precompute special targets/features only when enabled by the training config:
 
 ```bash
-python data_prep/prior_fitting_script.py   --data /path/to/dataset.npz   --out_yaml data_prep/fitted_priors.yaml   --plots_dir data_prep/plots   --T 320.0   --spline   --spline_out data_prep/datasets/fitted_priors_spline.npz
+python data_prep/precompute_hvp_targets.py --help
+python data_prep/precompute_edge_distance_gate.py --help
+python data_prep/noise_decoy_frames.py --help
 ```
 
-## Environment
-
-Primary setup docs:
-- `env_setup/SETUP_ENV.md`
-- `env_setup/interactive_job.md`
-- `env_setup/LAMMPS_build.md`
-- `CONNECTOR_REBUILD.md`
-
-Override the selected environment for a run:
+## Model evaluation and run analysis
 
 ```bash
-export CAMEO_ACTIVE_VENV=/path/to/venv
-sbatch ./scripts/run_training.sh local_work/example_run/example_config.yaml
+# Full run/suite analysis on Slurm
+sbatch scripts/run_analysis.sh --input-dir local_work/outputs/RUN \
+  --name RUN_analysis --detailed-force-eval --complete-eval \
+  --detailed-batch-size 8 --complete-eval-batch-size 4
+
+# Direct force check
+python analysis_tests/evaluate_forces.py PARAMS.pkl CONFIG.yaml --frames 50
+
+# Direct suite analysis in an allocated environment
+python analysis_tests/analyze_suite.py local_work/outputs/RUN \
+  --detailed-force-eval
 ```
 
-## Repository Map
+Equivalence and regression diagnostics:
 
-- `scripts/`: launchers and top-level entry points
-- `config/`: config manager and path helpers
-- `configs/`: shared reference configs
-- `models/`: ML and prior-energy code
-- `training/`: trainer wrappers and optimizer setup
-- `export/`: deployment export code
-- `analysis_tests/`: evaluation scripts
-- `data/`: runtime data loading
-- `data_prep/`: offline preprocessing
-- `env_setup/`: environment setup helpers
-- `local_work/`: ignored local experiment workspace
+```bash
+python analysis_tests/check_tiled_equivalence.py --help
+python analysis_tests/check_static_neighbor_equivalence.py --help
+python analysis_tests/check_prior_residual_equivalence.py --help
+python -m pytest -q tests
+```
+
+## MLIR export
+
+```bash
+python export/reexport_mlir.py PARAMS.pkl CONFIG.yaml \
+  --mode combined --prior-source config --output-dir local_work/export \
+  --output-name model_with_priors --export-mode symbolic
+
+sbatch export/run_reexport.sh PARAMS.pkl CONFIG.yaml \
+  --mode combined --prior-source config --output-name model_with_priors
+```
+
+The wrapper defaults to ML-only export unless extra arguments request combined
+energy/priors. Always retain the config used to reconstruct species, topology,
+and priors.
+
+## JAX-MD
+
+Start from the short safe example:
+
+```bash
+mkdir -p local_work/my_md
+cp configs/example_md.yaml local_work/my_md/md.yaml
+sbatch scripts/submit_md.sh local_work/my_md/md.yaml
+sbatch scripts/submit_md_parallel.sh local_work/my_md/md.yaml
+sbatch scripts/submit_md_array.sh local_work/my_md/md.yaml --max_concurrent 3
+```
+
+Direct execution in an allocated shell:
+
+```bash
+export CONFIG_FILE="$CAMEO_CG_PROJECT_ROOT/local_work/my_md/md.yaml"
+source scripts/slurm_env.sh
+"$PYTHON_BIN" scripts/run_md.py "$CONFIG_FILE" local
+```
+
+Analyze NPZ output or a LAMMPS dump:
+
+```bash
+python md/analyze_traj.py --npz TRAJECTORY.npz --outdir ANALYSIS_DIR \
+  --method tica --lagtime 10
+python md/analyze_traj.py --dump TRAJECTORY.dump --outdir ANALYSIS_DIR
+```
+
+See `md_setup/README.md` before extending duration or using LAMMPS.
+
+## Enhanced-sampling campaigns
+
+Generate a campaign from an existing YAML:
+
+```bash
+python -m sampling.cases \
+  --config sampling/campaigns/ala2_bb6_teacher_tica_pilot.yaml \
+  --output-dir local_work/sampling/teacher_tica_pilot
+```
+
+Other maintained examples cover standard TICA MetaD, teacher-only,
+TICA-only, teacher+TICA, local inversion smoke/window ladders, and corridor
+shooting under `sampling/campaigns/`. Inspect and copy a YAML; do not edit the
+shared campaign in place.
+
+Collect a complete campaign:
+
+```bash
+python -m sampling.collect \
+  --campaign local_work/sampling/teacher_tica_pilot \
+  --mapping ala2_backbone_cb_6 \
+  --weights local_work/input_data/ala2_bb6_aggforce_weight_matrix.npz \
+  --discard-ps 2.0 --force-cap 10000 \
+  --out local_work/data/teacher_tica_collected.npz
+```
+
+Collect one case by replacing `--campaign` with `--case`. Add `--coords-only`
+when forces are intentionally absent; use `--delete-trr` only after verifying
+the collected output.
+
+Build bias inputs/diagnostics:
+
+```bash
+python -m sampling.build_transition_map --grid-dir GRID_DIR \
+  --reference REFERENCE.npz --enhanced tica=ENHANCED.npz \
+  --outdir local_work/sampling/transition_map
+python -m sampling.build_reference_bias --grid-dir GRID_DIR \
+  --reference REFERENCE.npz --temperature 298 --mode log_ratio \
+  --out local_work/sampling/reference_bias.npz
+python -m sampling.pick_start_frames --help
+python -m sampling.plot_bias_landscape --help
+```
+
+The campaign generator normally starts the socket server and writes the
+GROMACS case files. `sampling/server.py` is primarily a generated-campaign
+runtime component, not the first user entry point.
+
+## Run registry and monitoring
+
+```bash
+python3 runs/registry.py sync
+python3 runs/registry.py status
+python3 runs/registry.py show RUN_ID
+python3 runs/registry.py render
+
+squeue -u "$USER"
+scontrol show job JOB_ID
+scancel JOB_ID
+tail -f local_work/outputs/RUN/slurm-JOB_ID.out
+```

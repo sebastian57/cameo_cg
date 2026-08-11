@@ -34,24 +34,52 @@ fi
 export PROJECT_ROOT
 
 # ---------------------------------------------------------------------------
-# Parse ml_model from YAML without Python (awk-based, fast)
+# Parse ml_model from a training config, or follow md.training_config_path.
+# This stays awk-only so environment selection works before venv activation.
 # ---------------------------------------------------------------------------
-MODEL_TYPE="$(
-    awk '
+yaml_scalar() {
+    local key="$1"
+    local file="$2"
+    awk -v key="${key}" '
         /^[[:space:]]*#/ { next }
-        /^[[:space:]]*ml_model:[[:space:]]*/ {
+        $0 ~ "^[[:space:]]*" key ":[[:space:]]*" {
             line = $0
-            sub(/^[[:space:]]*ml_model:[[:space:]]*/, "", line)
+            sub("^[[:space:]]*" key ":[[:space:]]*", "", line)
             sub(/[[:space:]]*#.*/, "", line)
-            gsub(/[[:space:]"]/, "", line)
+            gsub(/^[[:space:]"\047]+|[[:space:]"\047]+$/, "", line)
             print line
             exit
         }
-    ' "${CONFIG_FILE}"
-)"
+    ' "${file}"
+}
+
+MODEL_CONFIG_FILE="${CONFIG_FILE}"
+MODEL_TYPE="$(yaml_scalar ml_model "${MODEL_CONFIG_FILE}")"
+if [[ -z "${MODEL_TYPE}" ]]; then
+    TRAINING_CONFIG_PATH="$(yaml_scalar training_config_path "${CONFIG_FILE}")"
+    if [[ -z "${TRAINING_CONFIG_PATH}" ]]; then
+        echo "ERROR: Could not determine model.ml_model or md.training_config_path from config: ${CONFIG_FILE}" >&2
+        return 1 2>/dev/null || exit 1
+    fi
+    if [[ "${TRAINING_CONFIG_PATH}" == /* ]]; then
+        MODEL_CONFIG_FILE="${TRAINING_CONFIG_PATH}"
+    else
+        CONFIG_DIR="$(cd "$(dirname "${CONFIG_FILE}")" && pwd -P)"
+        if [[ -f "${CONFIG_DIR}/${TRAINING_CONFIG_PATH}" ]]; then
+            MODEL_CONFIG_FILE="${CONFIG_DIR}/${TRAINING_CONFIG_PATH}"
+        else
+            MODEL_CONFIG_FILE="${PROJECT_ROOT}/${TRAINING_CONFIG_PATH}"
+        fi
+    fi
+    if [[ ! -f "${MODEL_CONFIG_FILE}" ]]; then
+        echo "ERROR: MD training config not found: ${MODEL_CONFIG_FILE}" >&2
+        return 1 2>/dev/null || exit 1
+    fi
+    MODEL_TYPE="$(yaml_scalar ml_model "${MODEL_CONFIG_FILE}")"
+fi
 
 if [[ -z "${MODEL_TYPE}" ]]; then
-    echo "ERROR: Could not determine model.ml_model from config: ${CONFIG_FILE}" >&2
+    echo "ERROR: Could not determine model.ml_model from config: ${MODEL_CONFIG_FILE}" >&2
     return 1 2>/dev/null || exit 1
 fi
 
@@ -114,7 +142,14 @@ CUDA_ROOT="$(${PYTHON_BIN} -c 'import os; from jax_plugins import xla_cuda12; pr
 SITE_PACKAGES="$(${PYTHON_BIN} -c 'import site; print(site.getsitepackages()[0])')"
 export LD_LIBRARY_PATH="${CUDA_ROOT}:${SITE_PACKAGES}/nvidia/cudnn/lib:${SITE_PACKAGES}/nvidia/cuda_runtime/lib:${SITE_PACKAGES}/nvidia/cublas/lib:${SITE_PACKAGES}/nvidia/cusolver/lib:${LD_LIBRARY_PATH:-}"
 
-export XLA_FLAGS="--xla_gpu_cuda_data_dir=${CUDA_HOME} --xla_gpu_autotune_level=0"
+# XLA kernel autotuning. Level 0 disables it and was measurably expensive on the ala2 bb6
+# wide160 model (2026-08-11, one GH200): REM rollout 8.00 s -> 5.87 s and the 384-frame
+# parameter gradient 85.0 ms -> 40.1 ms (2.12x) simply by restoring the default level 4.
+# Autotuning costs a one-off compile-time search, which is irrelevant for runs measured in
+# hours. Set CAMEO_XLA_AUTOTUNE_LEVEL=0 to restore the old behaviour if a kernel search ever
+# misbehaves on a new architecture.
+CAMEO_XLA_AUTOTUNE_LEVEL="${CAMEO_XLA_AUTOTUNE_LEVEL:-4}"
+export XLA_FLAGS="--xla_gpu_cuda_data_dir=${CUDA_HOME} --xla_gpu_autotune_level=${CAMEO_XLA_AUTOTUNE_LEVEL}"
 export ALLEGRO_TP_METHOD_FALLBACK="${ALLEGRO_TP_METHOD_FALLBACK:-error}"
 
 # ---------------------------------------------------------------------------

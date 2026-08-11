@@ -17,6 +17,8 @@ set -euo pipefail
 BASHRC_PATH="${HOME}/.bashrc"
 START_MARK="# >>> cameo_cg env >>>"
 END_MARK="# <<< cameo_cg env <<<"
+LEGACY_START_MARK="# >>> cameo_cg_pkgflow env >>>"
+LEGACY_END_MARK="# <<< cameo_cg_pkgflow env <<<"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
 DEFAULT_PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 
@@ -155,9 +157,11 @@ touch "${BASHRC_PATH}"
 TMP_FILE="$(mktemp)"
 trap 'rm -f "${TMP_FILE}"' EXIT
 
-awk -v start="${START_MARK}" -v end="${END_MARK}" '
-    $0 == start { skipping = 1; next }
-    $0 == end { skipping = 0; next }
+awk \
+    -v start="${START_MARK}" -v end="${END_MARK}" \
+    -v legacy_start="${LEGACY_START_MARK}" -v legacy_end="${LEGACY_END_MARK}" '
+    $0 == start || $0 == legacy_start { skipping = 1; next }
+    $0 == end || $0 == legacy_end { skipping = 0; next }
     !skipping { print }
 ' "${BASHRC_PATH}" > "${TMP_FILE}"
 

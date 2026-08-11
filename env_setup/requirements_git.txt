@@ -1,223 +1,205 @@
-absl-py @ file:///dev/shm/swmanage/juwelsbooster/jax/0.4.34/gpsfbf-2024a-CUDA-12/abslpy/absl-py-2.1.0
-aggforce @ file:///p/project1/cameo/schmidt36/aggforce
-alabaster @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/alabaster/alabaster-0.7.16
+absl-py==2.4.0
+aggforce @ file:///e/project1/cameo/schmidt36/aggforce
+aiofiles==25.1.0
 annotated-types==0.7.0
-appdirs @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/appdirs/appdirs-1.4.4
-asn1crypto @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/asn1crypto/asn1crypto-1.5.1
-atomicwrites @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/atomicwrites/atomicwrites-1.4.1
-attrs @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/attrs/attrs-23.2.0
-Babel @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/Babel/babel-2.15.0
-backports.entry_points_selectable @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/backportsentrypointsselectable/backports.entry_points_selectable-1.3.0
-backports.functools_lru_cache @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/backportsfunctoolslrucache/backports.functools_lru_cache-2.0.0
-beniget @ file:///dev/shm/swmanage/juwelsbooster/SciPybundle/2024.05/gcccoreflexiblas-13.3.0-3.4.4/beniget/beniget-0.4.1
-bitarray @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/bitarray/bitarray-2.9.2
-bitstring @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/bitstring/bitstring-4.2.3
+anthropic==0.46.0
+anyio==4.13.0
+attrs==26.1.0
+beautifulsoup4==4.14.3
+bibtexparser==1.4.4
 blackjax==0.3.0
-blist @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/blist/blist-1.3.6
-Bottleneck @ file:///dev/shm/swmanage/juwelsbooster/SciPybundle/2024.05/gcccoreflexiblas-13.3.0-3.4.4/Bottleneck/Bottleneck-1.3.8
-CacheControl @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/CacheControl/cachecontrol-0.14.0
-cachy @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/cachy/cachy-0.3.0
-certifi @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/certifi/certifi-2024.6.2
-cffi @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/cffi/cffi-1.16.0
-chardet @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/chardet/chardet-5.2.0
-charset-normalizer @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/charsetnormalizer/charset-normalizer-3.3.2
--e git+https://github.com/tummfm/chemtrain.git@9cad115c715b3f9df7813410153c2fc192a8240c#egg=chemtrain
--e git+https://github.com/tummfm/chemtrain-deploy.git@d88382e081683bdd0d4f5282e63fca4ce58793c2#egg=chemutils&subdirectory=external/chemutils
-chex==0.1.90
-cleo @ file:///p/data1/swmanage/EasyBuild/sources/p/Python-bundle-PyPI/extensions/cleo-2.1.0-py3-none-any.whl#sha256=4a31bd4dd45695a64ee3c4758f583f134267c2bc518d8ae9a29cf237d009b07e
-click @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/click/click-8.1.7
-cloudpickle @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/cloudpickle/cloudpickle-3.0.0
-colorama @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/colorama/colorama-0.4.6
-commonmark @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/commonmark/commonmark-0.9.1
+certifi==2026.5.20
+cffi==2.0.0
+cfgv==3.5.0
+charset-normalizer==3.4.7
+-e git+https://github.com/sebastian57/chemtrain_cameo.git@2df5b21f2f97673e6c43a4c597097165b6f6c99d#egg=chemtrain
+-e git+https://github.com/tummfm/chemtrain-deploy.git@773ada599fbf71a4b7792d4105648a6575df4662#egg=chemutils&subdirectory=external/chemutils
+chex==0.1.91
+click==8.4.1
+cloudpickle==3.1.2
 contourpy==1.3.3
-crashtest @ file:///p/data1/swmanage/EasyBuild/sources/p/Python-bundle-PyPI/extensions/crashtest-0.4.1-py3-none-any.whl#sha256=8d23eac5fa660409f57472e3851dab7ac18aba459a8d19cbbba86d3d5aecd2a5
-cryptography @ file:///dev/shm/swmanage/juwelsbooster/cryptography/42.0.8/GCCcore-13.3.0/cryptography-42.0.8
+cryptography==48.0.0
+cuda-bindings==13.3.1
+cuda-pathfinder==1.5.5
+cuda-toolkit==13.0.2
+cuequivariance==0.10.0
+cuequivariance-jax==0.10.0
+cuequivariance-ops-cu12==0.10.0
+cuequivariance-ops-jax-cu12==0.10.0
 cycler==0.12.1
-Cython @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/Cython/Cython-3.0.10
 dataclasses==0.6
-deap @ file:///dev/shm/swmanage/juwelsbooster/SciPybundle/2024.05/gcccoreflexiblas-13.3.0-3.4.4/deap/deap-1.4.1
-decorator @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/decorator/decorator-5.1.1
-distlib @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/distlib/distlib-0.3.8
-distro @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/distro/distro-1.9.0
-dm-haiku==0.0.15
-dm-tree==0.1.9
-docopt @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/docopt/docopt-0.6.2
-docutils @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/docutils/docutils-0.21.2
-doit @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/doit/doit-0.36.0
-dulwich @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/dulwich/dulwich-0.22.1
-e3nn-jax==0.20.8
-ecdsa @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/ecdsa/ecdsa-0.19.0
-editables @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/editables/editables-0.5
-einops==0.8.1
-etils==1.13.0
-exceptiongroup @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/exceptiongroup/exceptiongroup-1.2.1
-execnet @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/execnet/execnet-2.1.1
-filelock @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/filelock/filelock-3.15.1
-flatbuffers @ file:///dev/shm/swmanage/juwelsbooster/flatbufferspython/24.3.25/GCCcore-13.3.0/flatbuffers-24.3.25
-flax==0.10.4
-fonttools==4.60.1
-fsspec @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/fsspec/fsspec-2024.6.0
-future @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/future/future-1.0.0
-gast @ file:///dev/shm/swmanage/juwelsbooster/SciPybundle/2024.05/gcccoreflexiblas-13.3.0-3.4.4/gast/gast-0.5.4
-glob2 @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/glob2/glob2-0.7
-grpcio==1.76.0
-h5py==3.15.1
-html5lib @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/html5lib/html5lib-1.1
-humanize==4.14.0
-idna @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/idna/idna-3.7
-imagesize @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/imagesize/imagesize-1.4.1
-importlib_metadata @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/importlibmetadata/importlib_metadata-7.1.0
-importlib_resources @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/importlibresources/importlib_resources-6.4.0
-iniconfig @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/iniconfig/iniconfig-2.0.0
-intervaltree @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/intervaltree/intervaltree-3.1.0
-intreehooks @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/intreehooks/intreehooks-1.0
-ipaddress @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/ipaddress/ipaddress-1.0.23
-jaraco.classes @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/jaracoclasses/jaraco.classes-3.4.0
-jaraco.context @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/jaracocontext/jaraco.context-5.3.0
-jax @ file:///dev/shm/swmanage/juwelsbooster/jax/0.4.34/gpsfbf-2024a-CUDA-12/jax/jax-jax-v0.4.34
-jax-cuda12-pjrt @ file:///dev/shm/swmanage/juwelsbooster/jax/0.4.34/gpsfbf-2024a-CUDA-12/jax-jax-v0.4.34/dist/jax_cuda12_pjrt-0.4.34-py3-none-manylinux2014_x86_64.whl#sha256=8ea4d6454a148ee8e393e0f019655a04834ed818927eca342187e3b217abb31e
-jax-cuda12-plugin @ file:///dev/shm/swmanage/juwelsbooster/jax/0.4.34/gpsfbf-2024a-CUDA-12/jax-jax-v0.4.34/dist/jax_cuda12_plugin-0.4.34-cp312-cp312-manylinux2014_x86_64.whl#sha256=f659943a114d5ec425cb0100a420032cec191db01dad976169aeefdb0ac6a7a5
-jax-md==0.2.8
+deeptime==0.4.5
+distlib==0.4.0
+distro==1.9.0
+dm-haiku==0.0.16
+dm-tree==0.1.10
+dmff @ git+https://github.com/deepmodeling/DMFF.git@809f656153018498e3260e07162197139ba103d6
+e3nn-jax==0.21.0
+einops==0.8.2
+etils==1.14.0
+filelock==3.29.0
+filetype==1.2.0
+flax==0.12.7
+flit_core @ file:///dev/shm/swmanage/jupiter/Python/3.13.5/GCCcore-14.3.0/flit_core/flit_core-3.12.0
+fonttools==4.63.0
+freud-analysis==3.5.0
+frozendict==2.4.7
+fsspec==2026.4.0
+ftfy==6.3.1
+google-auth==2.53.0
+google-genai==1.75.0
+h11==0.16.0
+h5py==3.16.0
+hf-xet==1.5.0
+httpcore==1.0.9
+httpx==0.28.1
+huggingface_hub==0.36.2
+humanize==4.15.0
+identify==2.6.19
+idna==3.15
+iniconfig==2.3.0
+jax==0.10.1
+jax-cuda12-pjrt==0.10.1
+jax-cuda12-plugin==0.10.1
+jax-md==0.2.28
 jax-sgmc==0.1.5
-jaxlib @ file:///dev/shm/swmanage/juwelsbooster/jax/0.4.34/gpsfbf-2024a-CUDA-12/jax-jax-v0.4.34/dist/jaxlib-0.4.34-cp312-cp312-manylinux2014_x86_64.whl#sha256=c6e67dcb21bff5ab7bcf2cd98256205d460afcba8531c17c36e4c61b70012c63
+jaxlib==0.10.1
 jaxopt==0.8.5
-jeepney @ file:///p/data1/swmanage/EasyBuild/sources/p/Python-bundle-PyPI/extensions/jeepney-0.8.0-py3-none-any.whl#sha256=c0a454ad016ca575060802ee4d590dd912e35c122fa04e70306de3d076cce755
-Jinja2 @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/Jinja2/jinja2-3.1.4
+Jinja2==3.1.6
+jiter==0.15.0
 jmp==0.0.4
-joblib @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/joblib/joblib-1.4.2
+joblib==1.5.3
 jraph==0.0.6.dev0
-jsonschema @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/jsonschema/jsonschema-4.22.0
-jsonschema-specifications @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/jsonschemaspecifications/jsonschema_specifications-2023.12.1
-keyring @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/keyring/keyring-24.3.1
-keyrings.alt @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/keyringsalt/keyrings.alt-5.0.1
-kiwisolver==1.4.9
-liac-arff @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/liacarff/liac-arff-2.5.0
-lockfile @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/lockfile/lockfile-0.12.2
-Markdown==3.10
-markdown-it-py @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/markdownitpy/markdown-it-py-3.0.0
-MarkupSafe @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/MarkupSafe/MarkupSafe-2.1.5
-matplotlib==3.10.7
-mdtraj==1.11.0
-mdurl @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/mdurl/mdurl-0.1.2
+kiwisolver==1.5.0
+lxml==6.1.1
+markdown-it-py==4.2.0
+markdown2==2.5.5
+markdownify==1.2.2
+marker-pdf==1.10.2
+MarkupSafe==3.0.3
+matplotlib==3.10.9
+mdtraj==1.11.1.post1
+mdurl==0.1.2
 ml_collections==1.1.0
-ml_dtypes @ file:///p/data1/swmanage/EasyBuild/sources/j/jax/extensions/ml_dtypes-0.5.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl#sha256=a38df8df61194aeaae1ab7579075779b4ad32cd1cffd012c28be227fa7f2a70a
-mock @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/mock/mock-5.1.0
-more-itertools @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/moreitertools/more-itertools-10.3.0
-mpmath @ file:///dev/shm/swmanage/juwelsbooster/SciPybundle/2024.05/gcccoreflexiblas-13.3.0-3.4.4/mpmath/mpmath-1.3.0
-msgpack @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/msgpack/msgpack-1.0.8
-nest-asyncio==1.6.0
-netaddr @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/netaddr/netaddr-1.3.0
-netifaces @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/netifaces/netifaces-0.11.0
-networkx==3.5
-numexpr @ file:///dev/shm/swmanage/juwelsbooster/SciPybundle/2024.05/gcccoreflexiblas-13.3.0-3.4.4/numexpr/numexpr-2.10.0
-numpy @ file:///dev/shm/swmanage/juwelsbooster/SciPybundle/2024.05/gcccoreflexiblas-13.3.0-3.4.4/numpy/numpy-1.26.4
-nvidia-cublas-cu12==12.9.1.4
+ml_dtypes==0.5.4
+monty==2026.5.18
+more-itertools==11.1.0
+mpmath==1.3.0
+msgpack==1.1.2
+narwhals==2.21.2
+networkx==3.6.1
+nodeenv==1.10.0
+numexpr==2.14.1
+numpy==2.4.6
+nvidia-cublas==13.1.1.3
+nvidia-cublas-cu12==12.9.2.10
+nvidia-cuda-cccl-cu12==12.9.27
+nvidia-cuda-cupti==13.0.85
 nvidia-cuda-cupti-cu12==12.9.79
 nvidia-cuda-nvcc-cu12==12.9.86
+nvidia-cuda-nvrtc==13.0.88
+nvidia-cuda-nvrtc-cu12==12.9.86
+nvidia-cuda-runtime==13.0.96
 nvidia-cuda-runtime-cu12==12.9.79
-nvidia-cudnn-cu12==9.17.0.29
+nvidia-cudnn-cu12==9.22.0.52
+nvidia-cudnn-cu13==9.20.0.48
+nvidia-cufft==12.0.0.61
 nvidia-cufft-cu12==11.4.1.4
+nvidia-cufile==1.15.1.6
+nvidia-curand==10.4.0.35
+nvidia-cusolver==12.0.4.66
 nvidia-cusolver-cu12==11.7.5.82
+nvidia-cusparse==12.6.3.3
 nvidia-cusparse-cu12==12.5.10.65
-nvidia-nccl-cu12==2.28.9
+nvidia-cusparselt-cu13==0.8.1
+nvidia-ml-py==13.595.45
+nvidia-nccl-cu12==2.30.4
+nvidia-nccl-cu13==2.29.7
+nvidia-nvjitlink==13.0.88
 nvidia-nvjitlink-cu12==12.9.86
-opt_einsum @ file:///dev/shm/swmanage/juwelsbooster/jax/0.4.34/gpsfbf-2024a-CUDA-12/opt_einsum/opt_einsum-3.4.0
-optax==0.2.5
-orbax-checkpoint==0.6.4
-osqp==1.0.5
-packaging @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/packaging/packaging-24.1
-pandas @ file:///dev/shm/swmanage/juwelsbooster/SciPybundle/2024.05/gcccoreflexiblas-13.3.0-3.4.4/pandas/pandas-2.2.2
-pastel @ file:///p/data1/swmanage/EasyBuild/sources/p/Python-bundle-PyPI/extensions/pastel-0.2.1-py2.py3-none-any.whl#sha256=4349225fcdf6c2bb34d483e523475de5bb04a5c10ef711263452cb37d7dd4364
-pathlib2 @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/pathlib2/pathlib2-2.3.7.post1
-pathspec @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/pathspec/pathspec-0.12.1
-pbr @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/pbr/pbr-6.0.0
-pexpect @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/pexpect/pexpect-4.9.0
-pillow==12.0.0
-pkginfo @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/pkginfo/pkginfo-1.11.1
-platformdirs @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/platformdirs/platformdirs-4.2.2
-pluggy @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/pluggy/pluggy-1.5.0
-ply @ file:///dev/shm/swmanage/juwelsbooster/SciPybundle/2024.05/gcccoreflexiblas-13.3.0-3.4.4/ply/ply-3.11
-pooch @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/pooch/pooch-1.8.2
-protobuf==3.20.0
-psutil @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/psutil/psutil-5.9.8
-ptyprocess @ file:///p/data1/swmanage/EasyBuild/sources/p/Python-bundle-PyPI/extensions/ptyprocess-0.7.0-py2.py3-none-any.whl#sha256=4b41f3967fce3af57cc7e94b888626c18bf37a083e3651ca8feeb66d492fef35
-py @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/py/py-1.11.0
-py_expression_eval @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/pyexpressioneval/py_expression_eval-0.3.14
-pyarrow==22.0.0
-pyasn1 @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/pyasn1/pyasn1-0.6.0
-pybind11 @ file:///dev/shm/swmanage/juwelsbooster/pybind11/2.12.0/GCCcore-13.3.0/pybind11-2.12.0
-pycparser @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/pycparser/pycparser-2.22
-pycryptodome @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/pycryptodome/pycryptodome-3.20.0
-pydantic==2.12.5
-pydantic_core==2.41.5
-pydevtool @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/pydevtool/pydevtool-0.3.0
-Pygments @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/Pygments/pygments-2.18.0
-pylev @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/pylev/pylev-1.4.0
-PyNaCl @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/PyNaCl/PyNaCl-1.5.0
-pyparsing @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/pyparsing/pyparsing-3.1.2
-pyrsistent @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/pyrsistent/pyrsistent-0.20.0
-pytest @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/pytest/pytest-8.2.2
-pytest-xdist @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/pytestxdist/pytest_xdist-3.6.1
-python-dateutil @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/pythondateutil/python-dateutil-2.9.0.post0
-pythran @ file:///dev/shm/swmanage/juwelsbooster/SciPybundle/2024.05/gcccoreflexiblas-13.3.0-3.4.4/pythran/pythran-0.16.1
-pytoml @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/pytoml/pytoml-0.1.21
-pytz @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/pytz/pytz-2024.1
+nvidia-nvshmem-cu12==3.6.5
+nvidia-nvshmem-cu13==3.4.5
+nvidia-nvtx==13.0.85
+openai==1.109.1
+opencv-python-headless==4.11.0.86
+OpenMM==8.5.1
+opt_einsum==3.4.0
+optax==0.2.8
+orbax-checkpoint==0.11.40
+orjson==3.11.9
+osqp==1.1.1
+packaging @ file:///dev/shm/swmanage/jupiter/Python/3.13.5/GCCcore-14.3.0/packaging/packaging-25.0
+palettable==3.3.3
+pandas==3.0.3
+parsnip-cif==0.5.0
+pdftext==0.6.3
+pillow==10.4.0
+platformdirs==4.9.6
+plotly==6.7.0
+pluggy==1.6.0
+pre_commit==4.6.0
+prometheus_client==0.25.0
+protobuf==3.20.3
+psutil==7.2.2
+pyasn1==0.6.3
+pyasn1_modules==0.4.2
+pycparser==3.0
+pydantic==2.13.4
+pydantic-settings==2.14.1
+pydantic_core==2.46.4
+Pygments==2.20.0
+pymatgen==2026.5.4
+pymatgen-core==2026.5.18
+pymbar==4.0.3
+pyparsing==3.3.2
+pypdfium2==4.30.0
+pytest==9.0.3
+python-dateutil==2.9.0.post0
+python-discovery==1.4.0
+python-dotenv==1.2.2
 PyYAML==6.0.3
-qpsolvers==4.8.2
-rapidfuzz @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/rapidfuzz/rapidfuzz-3.9.3
-referencing @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/referencing/referencing-0.35.1
-regex @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/regex/regex-2024.5.15
-requests @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/requests/requests-2.32.3
-requests-toolbelt @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/requeststoolbelt/requests-toolbelt-1.0.0
-rich @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/rich/rich-13.7.1
-rich-click @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/richclick/rich_click-1.8.3
-rpds-py @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/rpdspy/rpds_py-0.18.1
-scandir @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/scandir/scandir-1.10.0
-scikit-learn==1.7.2
-scipy==1.13.1
-SecretStorage @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/SecretStorage/SecretStorage-3.3.3
-semantic_version @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/semanticversion/semantic_version-2.10.0
-setuptools==80.9.0
-shellingham @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/shellingham/shellingham-1.5.4
-simplegeneric @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/simplegeneric/simplegeneric-0.8.1
-simplejson @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/simplejson/simplejson-3.19.2
-six @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/six/six-1.16.0
-snowballstemmer @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/snowballstemmer/snowballstemmer-2.2.0
-sortedcontainers @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/sortedcontainers/sortedcontainers-2.4.0
-Sphinx @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/Sphinx/sphinx-7.3.7
-sphinx-bootstrap-theme @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/sphinxbootstraptheme/sphinx-bootstrap-theme-0.8.1
-sphinxcontrib-applehelp @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/sphinxcontribapplehelp/sphinxcontrib_applehelp-1.0.8
-sphinxcontrib-devhelp @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/sphinxcontribdevhelp/sphinxcontrib_devhelp-1.0.6
-sphinxcontrib-htmlhelp @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/sphinxcontribhtmlhelp/sphinxcontrib_htmlhelp-2.0.5
-sphinxcontrib-jsmath @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/sphinxcontribjsmath/sphinxcontrib-jsmath-1.0.1
-sphinxcontrib-qthelp @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/sphinxcontribqthelp/sphinxcontrib_qthelp-1.0.7
-sphinxcontrib-serializinghtml @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/sphinxcontribserializinghtml/sphinxcontrib_serializinghtml-1.1.10
-sphinxcontrib-websupport @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/sphinxcontribwebsupport/sphinxcontrib_websupport-1.2.7
+qpsolvers==4.12.0
+RapidFuzz==3.14.5
+regex==2024.11.6
+requests==2.34.2
+rich==15.0.0
+rowan==1.3.2
+ruamel.yaml==0.19.1
+safetensors==0.7.0
+scikit-learn==1.8.0
+scipy==1.17.1
+setuptools @ file:///dev/shm/swmanage/jupiter/Python/3.13.5/GCCcore-14.3.0/setuptools/setuptools-80.9.0
+setuptools-scm @ file:///dev/shm/swmanage/jupiter/Python/3.13.5/GCCcore-14.3.0/setuptools_scm/setuptools_scm-8.3.1
+simplejson==4.1.1
+six==1.17.0
+sniffio==1.3.1
+soupsieve==2.8.4
+spglib==2.7.0
+surya-ocr==0.17.1
 sympy==1.14.0
-tabulate @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/tabulate/tabulate-0.9.0
-tensorboard-data-server==0.7.2
-tensorstore==0.1.79
-threadpoolctl @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/threadpoolctl/threadpoolctl-3.5.0
-toml @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/toml/toml-0.10.2
-tomli @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/tomli/tomli-2.0.1
-tomli_w @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/tomliw/tomli_w-1.0.0
-tomlkit @ file:///p/data1/swmanage/EasyBuild/sources/p/Python-bundle-PyPI/extensions/tomlkit-0.12.5-py3-none-any.whl#sha256=af914f5a9c59ed9d0762c7b64d3b5d5df007448eb9cd2edc8a46b1eafead172f
+tabulate==0.10.0
+tenacity==9.1.4
+tensorstore==0.1.84
+threadpoolctl==3.6.0
+tokenizers==0.22.2
+tomli @ file:///dev/shm/swmanage/jupiter/Python/3.13.5/GCCcore-14.3.0/tomli/tomli-2.2.1
+tomli_w==1.2.0
 toolz==1.1.0
-tqdm==4.67.1
+torch==2.12.0
+tqdm==4.67.3
+transformers==4.57.6
 tree-math==0.2.1
 treescope==0.1.10
+triton==3.7.0
 typing-inspection==0.4.2
 typing_extensions==4.15.0
-tzdata @ file:///dev/shm/swmanage/juwelsbooster/SciPybundle/2024.05/gcccoreflexiblas-13.3.0-3.4.4/tzdata/tzdata-2024.1
-ujson @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/ujson/ujson-5.10.0
-urllib3 @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/urllib3/urllib3-2.2.1
-versioneer @ file:///dev/shm/swmanage/juwelsbooster/SciPybundle/2024.05/gcccoreflexiblas-13.3.0-3.4.4/versioneer/versioneer-0.29
-virtualenv @ file:///dev/shm/swmanage/juwelsbooster/virtualenv/20.26.2/GCCcore-13.3.0/virtualenv/virtualenv-20.26.2
-wcwidth @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/wcwidth/wcwidth-0.2.13
-webencodings @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/webencodings/webencodings-0.5.1
-Werkzeug==3.1.4
-wrapt==2.0.1
-xlrd @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/xlrd/xlrd-2.0.1
-z3-solver @ file:///dev/shm/swmanage/juwelsbooster/Z3/4.13.0/GCCcore-13.3.0/z3solver/z3-solver-4.13.0.0
-zipfile36 @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/zipfile36/zipfile36-0.1.3
-zipp @ file:///dev/shm/swmanage/juwelsbooster/PythonbundlePyPI/2024.06/GCCcore-13.3.0/zipp/zipp-3.19.2
+uncertainties==3.2.3
+urllib3==2.7.0
+uvloop==0.22.1
+virtualenv==21.4.2
+wcwidth==0.7.0
+websockets==16.0
+wheel @ file:///dev/shm/swmanage/jupiter/Python/3.13.5/GCCcore-14.3.0/wheel/wheel-0.45.1
+wrapt==2.2.0
+z3-solver @ file:///dev/shm/swmanage/jupiter/Z3/4.15.1/GCCcore-14.3.0/z3_solver/z3_solver-4.15.1.0
+zipp==4.1.0

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Discover LAMMPS / chemtrain-deploy runtime paths from the active environment.
-# For use with load_modules_2026.sh + venv_cameocg_juwels2026.
+# For use with load_modules_2026.sh and the Jupiter cameo_cg venv.
 #
 # Expected usage:
 #   1. activate the desired Python environment first

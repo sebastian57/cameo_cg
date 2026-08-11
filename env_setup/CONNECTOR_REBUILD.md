@@ -1,5 +1,12 @@
 # Connector Rebuild Guide
 
+> **Historical deployment record (JUWELS, JAX 0.9.1).** The exact versions,
+> `/p/...` paths, and commands below are not the current Jupiter runtime setup.
+> Use `SETUP_ENV.md` and `../md_setup/README.md` for normal installation and
+> execution. Revalidate the connector against the active JAX/XLA generation
+> before adapting this rebuild record; it is intentionally preserved as
+> troubleshooting provenance.
+
 This document records the full working rebuild and relinking procedure for the
 modernized `chemtrain-deploy` stack used with:
 

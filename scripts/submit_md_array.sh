@@ -30,7 +30,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_ROOT="${CAMEO_CG_PROJECT_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd -P)}"
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
-CONFIG="${1:-configs/md_1pro_4zoh.yaml}"
+CONFIG="${1:-configs/example_md.yaml}"
 MAX_CONCURRENT="${MAX_CONCURRENT:-0}"  # 0 = no limit
 TIME_LIMIT="${TIME_LIMIT:-}"
 
@@ -51,13 +51,11 @@ if [[ ! -f "${CONFIG}" ]]; then
     echo "ERROR: Config not found: ${CONFIG}"
     exit 1
 fi
+export CONFIG_FILE="${CONFIG}"
+source "${PROJECT_ROOT}/scripts/slurm_env.sh"
 
 # ── Read n_replicas from the YAML ────────────────────────────────────────────
-source "${PROJECT_ROOT}/../load_modules_2026.sh"
-source "${PROJECT_ROOT}/../venv_cameocg_jupiter2026/bin/activate"
-source "${PROJECT_ROOT}/../set_lammps_paths_2026.sh"
-
-N_REPLICAS="$(python3 -c "
+N_REPLICAS="$("${PYTHON_BIN}" -c "
 import yaml, sys
 with open('${CONFIG}') as f:
     cfg = yaml.safe_load(f)
@@ -103,10 +101,6 @@ fi
 # because SLURM_ARRAY_TASK_ID is unset.
 if [[ -n "${SLURM_ARRAY_TASK_ID+x}" ]]; then
     # ── Per-task execution ───────────────────────────────────────────────────
-    source "${PROJECT_ROOT}/../load_modules_2026.sh"
-    source "${PROJECT_ROOT}/../venv_cameocg_jupiter2026/bin/activate"
-    source "${PROJECT_ROOT}/../set_lammps_paths_2026.sh"
-
     echo "============================================================"
     echo "CAMEO CG MD Replica"
     echo "Config     : ${MD_CONFIG}"
@@ -122,7 +116,7 @@ if [[ -n "${SLURM_ARRAY_TASK_ID+x}" ]]; then
     run_registry_start md "${MD_CONFIG}"
     run_registry_install_exit_trap
 
-    python scripts/run_md.py "${MD_CONFIG}" "${SLURM_JOB_ID}" --replica "${SLURM_ARRAY_TASK_ID}"
+    "${PYTHON_BIN}" scripts/run_md.py "${MD_CONFIG}" "${SLURM_JOB_ID}" --replica "${SLURM_ARRAY_TASK_ID}"
 else
     # ── First invocation: re-submit self as an array job ────────────────────
     sbatch "${SBATCH_ARGS[@]}" "${BASH_SOURCE[0]}" "${CONFIG}"

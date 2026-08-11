@@ -1,103 +1,88 @@
-# cameo_cg_pkgflow
+# cameo_cg
 
-`cameo_cg_pkgflow` contains the training, prior-energy, export, and analysis code used for the CAMEO coarse-grained protein force-field workflow. It is the main working repository for training Allegro, Allegro-cuEq, MACE, and PaiNN-based coarse-grained models and exporting them for downstream MD use.
+`cameo_cg` trains and evaluates coarse-grained energy models, exports them for
+simulation, runs JAX-MD validation, and supports enhanced-sampling data
+acquisition. Allegro/cuEquivariance is the main model path; MACE and PaiNN
+remain available through the same config-driven interface.
 
-## Recommended Workflow
+## Start here
 
-Use the repository root for shared code, scripts, and documentation.
-Use `local_work/` for everything experiment-specific.
+1. Recreate or activate the Jupiter environment with
+   [`env_setup/SETUP_ENV.md`](env_setup/SETUP_ENV.md).
+2. Read [`WORKFLOW.md`](WORKFLOW.md) for the end-to-end data, training, MD, and
+   sampling flow.
+3. Use [`COMMANDS.md`](COMMANDS.md) for exact launch commands.
+4. Use [`md_setup/README.md`](md_setup/README.md) for JAX-MD and LAMMPS details.
 
-That means:
-- run shell launchers from the repository root
-- keep training configs in `local_work/<experiment>/`
-- let training outputs be created under `local_work/outputs/`
-- keep temporary notes, copied checkpoints, debug artifacts, and one-off analysis products in `local_work/`
-- only create files outside `local_work/` if they are intended to be shared and potentially committed
+Run launchers from the repository root. Keep experiment-specific configs,
+outputs, copied checkpoints, and scratch analysis under `local_work/`, which is
+ignored by git.
 
-`local_work/` is ignored by git by default.
+## Jupiter quick start
 
-## Quick Start
-
-Create a local workspace, copy the shared base config into it, edit that config there, and submit from the repository root.
+The normal `.bashrc` setup defines the repository and venv paths:
 
 ```bash
-mkdir -p local_work/example_run
-cp configs/base_config.yaml local_work/example_run/example_config.yaml
-
-sbatch ./scripts/run_training.sh local_work/example_run/example_config.yaml
+source ~/.bashrc
+cd "$CAMEO_CG_PROJECT_ROOT"
+mkdir -p local_work/example_fm
+cp configs/base_config.yaml local_work/example_fm/config.yaml
+# Edit paths.dataset_path and the model/training sections.
+sbatch scripts/run_training.sh local_work/example_fm/config.yaml
 ```
 
-For a single run, outputs are written to:
+Single-run output defaults to:
 
 ```text
-local_work/outputs/YYYYMMDD_example_config/
+local_work/outputs/YYYYMMDD_<config-name>/
 ```
 
-That run directory contains the copied input config, the resolved runtime config, training logs, checkpoints, exports, profiles, and the SLURM log for the run.
-
-## Important Path Behavior
-
-The launchers are designed so that:
-- the submitted config can live in `local_work/`
-- single-run outputs default to `local_work/outputs/YYYYMMDD_<config_name>/`
-- set `paths.output_dir` in a config to force an explicit run directory
-- suite outputs are written under `local_work/outputs/` by default
-- relative dataset and spline-prior paths can be resolved relative to either the config directory or the repository root
-- launchers should still be invoked from the repository root, for example `sbatch ./scripts/run_training.sh ...`
-
-## Environment Setup
-
-Environment and deployment setup is documented in:
-- `env_setup/SETUP_ENV.md`
-- `env_setup/interactive_job.md`
-- `env_setup/LAMMPS_build.md`
-- `env_setup/CONNECTOR_REBUILD.md`
-
-### chemtrain Layout
-
-The expected local layout is:
-- `chemtrain-deploy/` cloned from the upstream online source
-- `chemtrain_cameo/` cloned from your own source
-- `chemtrain_cameo/` placed at `chemtrain-deploy/external/chemtrain/chemtrain_cameo`
-
-This repository expects the active Python environment to import `chemtrain` from that local editable `chemtrain_cameo` checkout.
-
-### Environment Variables For Training
-
-The launchers no longer fall back to hard-coded old venv paths. Before training, set the environment variables explicitly:
-- `CAMEO_CG_PROJECT_ROOT`: repository root for this checkout
-- `CAMEO_ACTIVE_VENV`: optional explicit override for any model type
-- `CAMEO_CUEQ_VENV`: required for `allegro_cueq*` models when `CAMEO_ACTIVE_VENV` is not set
-- `CAMEO_STANDARD_VENV`: required for non-cueq models when `CAMEO_ACTIVE_VENV` is not set
-- `CAMEO_LAMMPS_BUILD_DIR`: optional override for a local LAMMPS build location
-
-A typical setup looks like:
+Set `paths.output_dir` in the YAML when an exact output directory is needed.
+The run contains the submitted and resolved configs, logs, checkpoints,
+exports, and profiling/analysis artifacts. Register and inspect runs with:
 
 ```bash
-export CAMEO_CG_PROJECT_ROOT=/path/to/cameo_cg_pkgflow
-export CAMEO_CUEQ_VENV=/path/to/your/cueq_venv
-export CAMEO_STANDARD_VENV=/path/to/your/standard_venv
+python3 runs/registry.py sync
+python3 runs/registry.py status
 ```
 
-Or force one specific environment for a run:
+## Repository layout
 
-```bash
-export CAMEO_ACTIVE_VENV=/path/to/your/venv
-```
+| Path | Purpose |
+|---|---|
+| `configs/` | Shared reference training and MD configs |
+| `config/` | YAML loading, validation, and path resolution |
+| `data/`, `data_prep/` | Runtime loading and offline preprocessing/assembly |
+| `models/` | Allegro, MACE, PaiNN, priors, topology, combined energy |
+| `training/` | Force matching, mSAM, REM, optimizers, batching/tiling |
+| `md/`, `md_setup/` | JAX-MD runtime/analysis and simulation documentation |
+| `sampling/` | TICA, teacher, inversion biases and GROMACS campaigns |
+| `analysis_tests/` | Model/run evaluation and plots |
+| `export/` | MLIR export and re-export |
+| `scripts/` | Slurm launchers and top-level automation |
+| `runs/` | Lightweight run registry; generated state is ignored |
+| `local_work/` | Local experiment workspace and outputs; ignored |
 
-If the required variable is missing, `scripts/slurm_env.sh` now exits with a short `Python Venv not set at ...` error.
+## Path and environment rules
 
-## Repository Structure
+- Use config-relative or repository-relative paths in YAML; avoid personal
+  absolute paths in shared configs.
+- `CAMEO_CG_PROJECT_ROOT` locates this checkout.
+- `CAMEO_STANDARD_VENV` and `CAMEO_CUEQ_VENV` select the normal environments.
+- `CAMEO_ACTIVE_VENV` overrides selection for one shell/job.
+- `CAMEO_MD_PROJECT_ROOT` identifies the optional separate MD workspace.
+- `CAMEO_LAMMPS_BUILD_DIR` identifies the local LAMMPS build.
+- Training and JAX-MD Slurm launchers share `scripts/slurm_env.sh`; JAX-MD
+  resolves the referenced training config before choosing a venv.
 
-The most important directories are:
-- `scripts/`: SLURM launchers and top-level training/export entry points
-- `config/`: config loading and path helper logic
-- `configs/`: shared reference configs, especially `configs/base_config.yaml`
-- `models/`: ML backbones, combined model, prior energy, and topology code
-- `training/`: trainer wrappers, optimizers, and prior-residual support
-- `export/`: MLIR export and re-export tooling
-- `analysis_tests/`: evaluation and post-training analysis scripts
-- `data/`: runtime dataset loading and preprocessing helpers
-- `data_prep/`: offline dataset generation, coarse-graining, and prior fitting
-- `env_setup/`: environment, module, and deployment setup helpers
-- `local_work/`: ignored local workspace for configs, outputs, and temporary work
+## Supported workflows
+
+The same training launcher handles standard force matching, mSAM, and relative
+entropy/REM according to the YAML configuration. Data enhancement is a loop:
+train a baseline, run safe MD and analysis, acquire edge/transition structures
+with teacher/TICA/local-inversion campaigns, collect and validate data, assemble
+a balanced dataset, then retrain or fine-tune.
+
+The repository does not infer safe production-MD settings. Begin with the short
+`configs/example_md.yaml` smoke configuration and only extend duration after
+checking forces, temperature, geometry, and neighbor-list behavior.

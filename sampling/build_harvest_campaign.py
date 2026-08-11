@@ -35,6 +35,37 @@ SEEDS come from AA trajectories of a previous DISCOVERY campaign (biased.trr), n
 reference: the reference has only 236 independent alphaL visits, while the MetaD campaigns
 supply tens of thousands of diverse in-region frames. Selection is farthest-point in the
 region's CVs so the seeds tile it rather than clustering.
+
+SIZING THE RESTRAINT -- the v1 failure, and the rule that replaces it (2026-08-11)
+    v1 ran KAPPA=50 kJ/mol/rad^2 on phi AND psi, with every case at the same psi centre.
+    Both choices were wrong, and the campaign produced 34,656 decorrelated frames that did
+    NOT reduce the model's alphaL force bias at all, because they re-sampled the basin CORE
+    that the reference already covers:
+
+        commanded phi   30     50     70     90
+        achieved  phi   45.1   51.5   57.3   63.2      <- 60 deg commanded -> 18 deg achieved
+        psi sd:   harvest 10.4 vs reference 19.2       <- compressed ~2x by the psi restraint
+
+    A harmonic restraint has width sqrt(kT/kappa); at 298 K (kT = 2.478 kJ/mol) KAPPA=50
+    gives 12.8 deg -- COMPARABLE TO THE BASIN'S OWN WIDTH. Such a restraint is a tether, not
+    a clamp: it cannot displace the molecule against the free-energy gradient, so every
+    window slides back to the free-energy minimum.
+
+    RULES:
+    1. Size kappa from the FES gradient, not a default. From an observed offset d at
+       kappa_old, the local restoring force is kappa_old*d; to hold within e use
+       kappa >= kappa_old*d/e. For ala2 alphaL that is ~270 minimum; use 300-500.
+    2. Windows must OVERLAP. Stiff windows are narrow (kappa=400 -> sd 4.5 deg), so spacing
+       must be ~1.5x the width or the tiling has gaps. Tiling 20..100 deg needs ~12 centres,
+       not 4.
+    3. Only clamp the coordinate you are tiling. For a coordinate whose SPREAD you want to
+       reproduce, leave it FREE (or match kappa = kT/sigma^2 to the target spread). Clamping
+       phi already prevents escape; psi does not need restraining.
+    4. PILOT FIRST. `--check <campaign_dir>` reads colvar.dat and prints achieved-vs-commanded
+       per window. Run a short pilot and check it before spending the full budget.
+
+    Independence is necessary but NOT sufficient: samples must TILE the region, not pile up
+    at its minimum.
 """
 from __future__ import annotations
 
@@ -69,11 +100,22 @@ gmx mdrun -s biased.tpr -rerun biased.trr -deffnm unbiased_forces -ntmpi 1 -ntom
 echo "harvest case {case} complete"
 """
 
-PLUMED = """# Harvest umbrella: hold the molecule in the target region so residence becomes samples.
-# KAPPA is deliberately WEAK -- enough to stop escape, not enough to freeze the basin.
+# v1 used KAPPA=50 on BOTH phi and psi and put every case at the same psi centre.
+# Both were wrong -- see "SIZING THE RESTRAINT" in the module docstring.
+PLUMED_PHI_ONLY = """# Harvest umbrella: CLAMP phi to tile the region; leave psi FREE to equilibrate.
+# phi is clamped because it is the coordinate that defines the region and the one the
+# molecule escapes along. psi is left free ON PURPOSE: we want its natural conditional
+# distribution at each phi, not a compressed one (v1 restrained it and cut its spread ~2x).
 phi: TORSION ATOMS={phi_atoms}
 psi: TORSION ATOMS={psi_atoms}
-RESTRAINT ARG=phi,psi AT={phi_c:.4f},{psi_c:.4f} KAPPA={kappa:.1f},{kappa:.1f} LABEL=umb
+RESTRAINT ARG=phi AT={phi_c:.4f} KAPPA={kappa_phi:.1f} LABEL=umb
+PRINT ARG=phi,psi,umb.bias FILE=colvar.dat STRIDE={print_stride}
+"""
+
+PLUMED_BOTH = """# Harvest umbrella: clamp phi AND psi (2-D tiling).
+phi: TORSION ATOMS={phi_atoms}
+psi: TORSION ATOMS={psi_atoms}
+RESTRAINT ARG=phi,psi AT={phi_c:.4f},{psi_c:.4f} KAPPA={kappa_phi:.1f},{kappa_psi:.1f} LABEL=umb
 PRINT ARG=phi,psi,umb.bias FILE=colvar.dat STRIDE={print_stride}
 """
 
@@ -91,33 +133,105 @@ def _farthest_point(phi, psi, k, rng):
     return np.array(sel)
 
 
+def check_campaign(root: Path) -> int:
+    """ACHIEVED vs COMMANDED per window, straight from PLUMED's own colvar.dat.
+
+    Run this on a short pilot BEFORE committing the full budget. It is the check whose
+    absence let v1 spend 19.2 ns of AA re-sampling the basin core: every case ran, every
+    case wrote frames, and nothing reported that the windows had slid off their centres.
+    Works on a partial campaign -- colvar.dat is written every 100 steps.
+    """
+    cam = json.loads((root / "campaign.json").read_text())
+    by_centre: dict[float, list] = {}
+    n_missing = 0
+    for case in cam["cases"]:
+        f = root / case["case"] / "colvar.dat"
+        if not f.exists():
+            n_missing += 1
+            continue
+        rows = np.loadtxt(f, comments="#")
+        if rows.ndim < 2 or len(rows) < 2:
+            n_missing += 1
+            continue
+        half = len(rows) // 2                       # drop the first half as equilibration
+        ph = np.degrees(rows[half:, 1])
+        ps = np.degrees(rows[half:, 2])
+        by_centre.setdefault(float(case["umbrella_phi"]), []).append((ph, ps))
+    if not by_centre:
+        print(f"no colvar.dat found under {root} -- has the campaign run?")
+        return 1
+    kappa = cam.get("kappa_phi_kJ_mol_rad2", cam.get("kappa_kJ_mol_rad2"))
+    print(f"campaign {cam['name']}  kappa_phi={kappa}  "
+          f"psi_restrained={cam.get('psi_restrained')}  ({n_missing} case(s) without data)")
+    print(f"\n{'commanded phi':>13} {'n':>4} {'achieved <phi>':>15} {'offset':>8} "
+          f"{'sd(phi)':>8} {'<psi>':>8} {'sd(psi)':>8}")
+    worst = 0.0
+    for c in sorted(by_centre):
+        ph = np.concatenate([x[0] for x in by_centre[c]])
+        ps = np.concatenate([x[1] for x in by_centre[c]])
+        off = ph.mean() - c
+        worst = max(worst, abs(off))
+        print(f"{c:13.1f} {len(by_centre[c]):4d} {ph.mean():15.1f} {off:+8.1f} "
+              f"{ph.std():8.1f} {ps.mean():8.1f} {ps.std():8.1f}")
+    print(f"\nworst |offset| = {worst:.1f} deg")
+    if worst > 10.0:
+        print("  !! FAIL: windows are sliding off their centres -- kappa_phi is too soft.\n"
+              f"     Local restoring force ~ {kappa}*{np.radians(worst):.3f} rad = "
+              f"{kappa*np.radians(worst):.1f} kJ/mol/rad.\n"
+              f"     To hold within 5 deg use kappa_phi >= "
+              f"{kappa*np.radians(worst)/np.radians(5.0):.0f}. DO NOT run the full campaign.")
+        return 1
+    print("  OK: windows hold their commanded centres. Safe to run the full campaign.")
+    return 0
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--discovery-campaign", type=Path, required=True,
+    ap.add_argument("--check", type=Path, default=None,
+                    help="analyse an existing (possibly partial) campaign dir: achieved vs "
+                         "commanded phi per window, then exit. Run this on a pilot FIRST.")
+    ap.add_argument("--out", type=Path)
+    ap.add_argument("--discovery-campaign", type=Path,
                     help="campaign dir whose replica_*/biased.trr supply AA seed frames")
-    ap.add_argument("--frames-npz", type=Path, required=True,
+    ap.add_argument("--frames-npz", type=Path,
                     help="collected CG frames of that campaign (frame order must match)")
     ap.add_argument("--n-replicas", type=int, default=96)
-    ap.add_argument("--region", required=True, metavar="phi0:phi1:psi0:psi1")
-    ap.add_argument("--umbrella-centres", type=int, default=4,
-                    help="tile the region with this many restraint centres; ONE centre "
-                         "would bias the intra-region distribution toward it")
-    ap.add_argument("--kappa", type=float, default=50.0,
-                    help="kJ/mol/rad^2. Weak by design: stop escape, do not freeze the basin")
+    ap.add_argument("--region", metavar="phi0:phi1:psi0:psi1")
+    ap.add_argument("--umbrella-centres", type=int, default=12,
+                    help="phi restraint centres tiling the region. Must be dense enough that "
+                         "adjacent windows OVERLAP: spacing ~1.5x sqrt(kT/kappa_phi). v1 used "
+                         "4 centres with a soft kappa and left 60%% of the range unsampled")
+    ap.add_argument("--kappa-phi", type=float, default=400.0,
+                    help="kJ/mol/rad^2 on phi. Must CLAMP (hold against the FES gradient), "
+                         "not tether -- see SIZING THE RESTRAINT in the module docstring. "
+                         "v1's 50.0 let every window slide back to the basin minimum")
+    ap.add_argument("--kappa-psi", type=float, default=0.0,
+                    help="kJ/mol/rad^2 on psi. DEFAULT 0 = psi UNRESTRAINED, which is what "
+                         "you want when the goal is to reproduce psi's natural conditional "
+                         "spread. Clamping phi already prevents escape")
+    ap.add_argument("--psi-centres", type=int, default=1,
+                    help="only used when --kappa-psi > 0: psi centres tiling the region")
     ap.add_argument("--ps-per-case", type=float, default=200.0)
     ap.add_argument("--output-ps", type=float, default=0.5,
                     help="frame spacing. tau(phi,psi) inside alphaL is 0.20 ps, so 0.5 ps "
                          "is still near-independent at 5x less data than the usual 0.1 ps")
-    ap.add_argument("--topology", required=True)
+    ap.add_argument("--topology")
     ap.add_argument("--mdp", type=Path,
                     default=REPO / "sampling/campaigns/production_298K_dt1fs.mdp")
-    ap.add_argument("--gmx", required=True)
+    ap.add_argument("--gmx")
     ap.add_argument("--ntomp", type=int, default=8)
     ap.add_argument("--mapping", default="ala2_backbone_cb_6")
     ap.add_argument("--seed", type=int, default=20260808)
     a = ap.parse_args()
+
+    if a.check is not None:
+        raise SystemExit(check_campaign(a.check))
+    missing = [f"--{k.replace('_','-')}" for k in
+               ("out", "discovery_campaign", "frames_npz", "region", "topology", "gmx")
+               if getattr(a, k) is None]
+    if missing:
+        ap.error("required unless --check is given: " + ", ".join(missing))
 
     m = get_mapping(a.mapping)
     p0, p1, s0, s1 = (float(x) for x in a.region.split(":"))
@@ -151,9 +265,42 @@ def main() -> None:
         mdp.append(line)
     mdp_body = "\n".join(mdp)
 
-    # umbrella centres tiling the region
-    cs = np.linspace(p0 + (p1 - p0) / 8, p1 - (p1 - p0) / 8, max(1, a.umbrella_centres))
-    ss = np.full_like(cs, 0.5 * (s0 + s1))
+    # Umbrella centres tiling the region. phi always; psi only if it is restrained at all
+    # (with --kappa-psi 0 the psi "centre" is unused and must not narrow the sampling).
+    kT_kJ = 0.0083144621 * 298.0
+    n_phi = max(1, a.umbrella_centres)
+    cs = np.linspace(p0 + (p1 - p0) / 8, p1 - (p1 - p0) / 8, n_phi)
+    if a.kappa_psi > 0:
+        n_psi = max(1, a.psi_centres)
+        ss_grid = (np.linspace(s0 + (s1 - s0) / 8, s1 - (s1 - s0) / 8, n_psi) if n_psi > 1
+                   else np.array([0.5 * (s0 + s1)]))
+    else:
+        ss_grid = np.array([0.5 * (s0 + s1)])          # recorded only; no psi RESTRAINT emitted
+    centres = [(float(c), float(s)) for c in cs for s in ss_grid]
+
+    # Overlap check: stiff windows are narrow, so a coarse grid leaves holes.
+    sd_phi = np.degrees(np.sqrt(kT_kJ / a.kappa_phi))
+    spacing = (cs[1] - cs[0]) if len(cs) > 1 else float(p1 - p0)
+    print(f"phi windows: {len(cs)} centres {cs[0]:.1f}..{cs[-1]:.1f}, spacing {spacing:.1f} deg, "
+          f"width sd {sd_phi:.1f} deg (kappa_phi {a.kappa_phi:g})")
+    if spacing > 1.5 * sd_phi:
+        print(f"  !! WARNING: spacing {spacing:.1f} > 1.5*sd {1.5*sd_phi:.1f} -- windows do NOT "
+              f"overlap; the tiling will have gaps. Raise --umbrella-centres to "
+              f"~{int(np.ceil((p1-p0)/(1.5*sd_phi)))+1} or lower --kappa-phi.")
+    print(f"psi: {'FREE (unrestrained)' if a.kappa_psi <= 0 else f'{len(ss_grid)} centres, kappa {a.kappa_psi:g}'}"
+          f"   -> {len(centres)} distinct windows over {a.n_replicas} cases")
+
+    # Pair each seed with a NEARBY window rather than round-robin. A stiff restraint whose
+    # centre is far from its seed yanks the molecule on step 1 (kappa*dphi: at kappa=400 a
+    # 48 deg mismatch is ~335 kJ/mol/rad) and wastes the equilibration window. Both seeds and
+    # centres tile the same phi range, so rank-ordering both and pairing by rank is
+    # near-optimal and keeps the windows exactly balanced.
+    order = np.argsort(phi[pick])
+    win_of_seed = np.empty(len(pick), dtype=int)
+    win_of_seed[order] = (np.arange(len(pick)) * len(centres)) // len(pick)
+    mism = np.abs(phi[pick] - np.array([centres[w][0] for w in win_of_seed]))
+    print(f"seed->window pairing: |phi_seed - phi_centre| mean {mism.mean():.1f} deg, "
+          f"max {mism.max():.1f} deg")
 
     a.out.mkdir(parents=True, exist_ok=True)
     cases = []
@@ -175,8 +322,10 @@ def main() -> None:
         if proc.returncode != 0 or not (d / "seed.gro").exists():
             raise SystemExit(f"{d.name}: trjconv failed (rc={proc.returncode})\n"
                              + proc.stderr[-1500:])
-        ci = i % len(cs)
-        (d / "plumed.dat").write_text(PLUMED.format(
+        ci = int(win_of_seed[i])
+        phi_c_deg, psi_c_deg = centres[ci]
+        tmpl = PLUMED_BOTH if a.kappa_psi > 0 else PLUMED_PHI_ONLY
+        (d / "plumed.dat").write_text(tmpl.format(
             phi_atoms=",".join(str(x) for x in m.cvs["phi"].atom_indices_1based(m)),
             psi_atoms=",".join(str(x) for x in m.cvs["psi"].atom_indices_1based(m)),
             # PLUMED's TORSION == our +180 convention DIRECTLY, so pass the target as-is.
@@ -187,9 +336,9 @@ def main() -> None:
             # alphaL frames out of 34,656, every one landing in beta/PPII instead.
             # VERIFIED: collected frames' our-convention phi mean -145.1 vs PLUMED colvar
             # mean -144.2 -- the two conventions agree with no shift.
-            phi_c=np.deg2rad(cs[ci]),
-            psi_c=np.deg2rad(ss[ci]),
-            kappa=a.kappa, print_stride=100))
+            phi_c=np.deg2rad(phi_c_deg),
+            psi_c=np.deg2rad(psi_c_deg),
+            kappa_phi=a.kappa_phi, kappa_psi=a.kappa_psi, print_stride=100))
         (d / "production.mdp").write_text(
             mdp_body + f"\ngen_vel                 = yes\ngen_temp                = 298\n"
                        f"gen_seed                = {a.seed + i}\ncontinuation            = no\n")
@@ -198,12 +347,18 @@ def main() -> None:
         rc.chmod(0o755)
         cases.append({"case": d.name, "seed_frame": int(fidx), "replica": rep.name,
                       "phi": float(phi[fidx]), "psi": float(psi[fidx]),
-                      "umbrella_phi": float(cs[ci]), "umbrella_psi": float(ss[ci])})
+                      "umbrella_phi": phi_c_deg,
+                      "umbrella_psi": (psi_c_deg if a.kappa_psi > 0 else None)})
 
     (a.out / "campaign.json").write_text(json.dumps({
         "name": a.out.name, "mapping": a.mapping, "stage": "harvest",
         "region": [p0, p1, s0, s1], "n_cases": len(cases),
-        "kappa_kJ_mol_rad2": a.kappa, "umbrella_centres": list(map(float, cs)),
+        "kappa_phi_kJ_mol_rad2": a.kappa_phi,
+        "kappa_psi_kJ_mol_rad2": a.kappa_psi,
+        "psi_restrained": bool(a.kappa_psi > 0),
+        "phi_window_sd_deg": float(sd_phi),
+        "umbrella_centres": list(map(float, cs)),
+        "umbrella_psi_centres": (list(map(float, ss_grid)) if a.kappa_psi > 0 else None),
         "ps_per_case": a.ps_per_case, "output_ps": a.output_ps, "dt_fs": dt_fs,
         "required_discard_ps": 20.0,
         "discovery_campaign": str(a.discovery_campaign),

@@ -17,8 +17,17 @@
 
 set -euo pipefail
 
-CONFIG="${1:-configs/md_1pro_4zoh.yaml}"
-PROJECT_ROOT="${CAMEO_CG_PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+CONFIG="${1:-configs/example_md.yaml}"
+PROJECT_ROOT="${CAMEO_CG_PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
+if [[ "${CONFIG}" != /* ]]; then
+  CONFIG="${PROJECT_ROOT}/${CONFIG}"
+fi
+if [[ ! -f "${CONFIG}" ]]; then
+  echo "ERROR: MD config not found: ${CONFIG}" >&2
+  exit 1
+fi
+export CONFIG_FILE="${CONFIG}"
+source "${PROJECT_ROOT}/scripts/slurm_env.sh"
 
 echo "============================================================"
 echo "CAMEO CG JAX-MD Simulation"
@@ -27,11 +36,6 @@ echo "Project root: $PROJECT_ROOT"
 echo "Job ID      : $SLURM_JOB_ID"
 echo "Node        : $SLURMD_NODENAME"
 echo "============================================================"
-
-# Load environment (same as training).
-source "$PROJECT_ROOT/../load_modules_2026.sh"
-source "$PROJECT_ROOT/../venv_cameocg_jupiter2026/bin/activate"
-source "$PROJECT_ROOT/../set_lammps_paths_2026.sh"
 
 mkdir -p "$PROJECT_ROOT/slurm"
 cd "$PROJECT_ROOT"
@@ -43,4 +47,4 @@ source "${PROJECT_ROOT}/runs/registry_hook.sh"
 run_registry_start md "${CONFIG}"
 run_registry_install_exit_trap
 
-python scripts/run_md.py "$CONFIG" "$SLURM_JOB_ID"
+"${PYTHON_BIN}" scripts/run_md.py "$CONFIG" "$SLURM_JOB_ID"
