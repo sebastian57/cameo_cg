@@ -33,7 +33,7 @@ md:
     stop_gradient: true
 
   # Neighbor strategy. cell_list and disable_cell_list are mutually exclusive.
-  # Chunking requires divisible edge counts and is incompatible with force decomposition.
+  # Chunking requires n_steps divisible by scan_chunk_size and is incompatible with force decomposition.
   cell_list: false
   disable_cell_list: true
   scan_chunk_size: 0
@@ -88,8 +88,9 @@ md:
   # Observables, force decomposition, and visualization dumps.
   observables_every: 10
   observables: [step, T, KE, PE, E_total]
-  observables_filename: observables.csv
-  observables_path: null
+  # Replica CSV names are derived from each trajectory. For single-replica runs only, uncomment fixed-name lookup overrides:
+  # observables_filename: observables.csv
+  # observables_path: null
   # Force decomposition is unavailable for direct-force models.
   force_decomp: false
   force_decomp_every: 10

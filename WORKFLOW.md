@@ -76,9 +76,10 @@ all generated frames as training data.
 
 ## 3. Configure a model and training run
 
-Copy `configs/base_config.yaml` into the experiment directory. Treat that file
-as the current schema reference, then change only the sections relevant to the
-run:
+Start the first force-matching run from `configs/example_training.yaml`.
+Consult `configs/base_config.yaml`, the complete stable annotated training
+lookup, when enabling another method or setting; copy only the sections relevant
+to the run:
 
 - `paths`: output/export/checkpoint locations
 - `data`: dataset, standard/tiled batching, bucketing/static neighbors

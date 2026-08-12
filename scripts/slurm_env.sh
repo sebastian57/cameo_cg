@@ -142,13 +142,20 @@ CUDA_ROOT="$(${PYTHON_BIN} -c 'import os; from jax_plugins import xla_cuda12; pr
 SITE_PACKAGES="$(${PYTHON_BIN} -c 'import site; print(site.getsitepackages()[0])')"
 export LD_LIBRARY_PATH="${CUDA_ROOT}:${SITE_PACKAGES}/nvidia/cudnn/lib:${SITE_PACKAGES}/nvidia/cuda_runtime/lib:${SITE_PACKAGES}/nvidia/cublas/lib:${SITE_PACKAGES}/nvidia/cusolver/lib:${LD_LIBRARY_PATH:-}"
 
-# XLA kernel autotuning. Level 0 disables it and was measurably expensive on the ala2 bb6
-# wide160 model (2026-08-11, one GH200): REM rollout 8.00 s -> 5.87 s and the 384-frame
-# parameter gradient 85.0 ms -> 40.1 ms (2.12x) simply by restoring the default level 4.
-# Autotuning costs a one-off compile-time search, which is irrelevant for runs measured in
-# hours. Set CAMEO_XLA_AUTOTUNE_LEVEL=0 to restore the old behaviour if a kernel search ever
-# misbehaves on a new architecture.
-CAMEO_XLA_AUTOTUNE_LEVEL="${CAMEO_XLA_AUTOTUNE_LEVEL:-4}"
+# XLA kernel autotuning. Kept at the historical default of 0 pending a clean measurement.
+#
+# Measured 2026-08-11 on one GH200, ala2 bb6 wide160, level 4 vs level 0:
+#   RUNTIME  autotuning helps -- REM rollout 8.00 s -> 5.87 s (1.36x), and the 384-frame
+#            parameter gradient 85.0 ms -> 40.1 ms (2.12x).
+#   COMPILE  autotuning adds a GPU-side kernel search. A REM stage-3 rollout (10,000-step
+#            scan, 24 replicas over 4 GPUs) spends ~15 min compiling either way; with level 4
+#            that time is spent at 100% GPU, with level 0 it is CPU-only.
+# NOT established: whether level 4 makes the compile materially LONGER. An earlier note here
+# claimed it did, based on a monitoring bug (a log grep that never matched), and that claim
+# was wrong -- the level-4 run reached iteration 226 at 81.8 s/iter perfectly happily.
+# 0 stays the default only because it is what every previously validated REM run used; raise
+# it to 4 once someone times both compiles side by side.
+CAMEO_XLA_AUTOTUNE_LEVEL="${CAMEO_XLA_AUTOTUNE_LEVEL:-0}"
 export XLA_FLAGS="--xla_gpu_cuda_data_dir=${CUDA_HOME} --xla_gpu_autotune_level=${CAMEO_XLA_AUTOTUNE_LEVEL}"
 export ALLEGRO_TP_METHOD_FALLBACK="${ALLEGRO_TP_METHOD_FALLBACK:-error}"
 

@@ -5,6 +5,10 @@ connector path for deployment checks. Both use the environment variables
 documented in `../env_setup/SETUP_ENV.md`; no launcher should depend on a
 particular parent-directory layout.
 
+All stable user-facing MD settings are annotated in
+[`configs/example_md.yaml`](../configs/example_md.yaml). Private runtime fields
+are deliberately absent; launchers derive them when needed.
+
 ## JAX-MD smoke run
 
 Copy the safe short example and edit its paths:

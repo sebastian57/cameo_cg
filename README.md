@@ -18,20 +18,63 @@ Run launchers from the repository root. Keep experiment-specific configs,
 outputs, copied checkpoints, and scratch analysis under `local_work/`, which is
 ignored by git.
 
-## Jupiter quick start
+## New-user checklist
 
-The normal `.bashrc` setup defines the repository and venv paths:
+1. Create a workspace with this sibling layout:
 
-```bash
-source ~/.bashrc
-cd "$CAMEO_CG_PROJECT_ROOT"
-mkdir -p local_work/example_fm
-cp configs/base_config.yaml local_work/example_fm/config.yaml
-# Edit paths.dataset_path and the model/training sections.
-sbatch scripts/run_training.sh local_work/example_fm/config.yaml
-```
+   ```text
+   <workspace>/
+   ├── cameo_cg/
+   ├── aggforce/
+   ├── chemtrain-deploy/
+   │   └── external/
+   │       ├── chemutils/
+   │       └── chemtrain/
+   │           └── chemtrain_cameo/
+   └── venv_cameocg_jupiter2026/
+   ```
 
-Single-run output defaults to:
+2. Clone `cameo_cg`, `aggforce`, `chemtrain-deploy`, and `chemtrain_cameo`.
+3. Place the ChemTrain checkout at
+   `chemtrain-deploy/external/chemtrain/chemtrain_cameo`; use the Chemutils
+   checkout already under `chemtrain-deploy/external/chemutils`.
+4. Follow [Jupiter environment setup](env_setup/SETUP_ENV.md) to load the 2026
+   modules and create the Python 3.13 system-site-packages venv.
+5. Complete that guide's editable installs and supported numerical-package
+   cross-check. The package list and exact commands live only there.
+6. Add the documented `CAMEO_*` variables to `.bashrc`, then reload it.
+7. Run the setup guide's import/device and repository-entry-point checks.
+8. Place or link a coarse-grained NPZ dataset under `local_work/`.
+9. Copy the first-FM starter, edit its required inputs, and submit it:
+
+   ```bash
+   cd "$CAMEO_CG_PROJECT_ROOT"
+   mkdir -p local_work/first_fm
+   cp configs/example_training.yaml local_work/first_fm/config.yaml
+   # Edit data.path, paths.output_dir, model.allegro.num_types, and mapping-specific model/prior choices.
+   sbatch scripts/run_training.sh local_work/first_fm/config.yaml
+   ```
+
+   The starter retains a production-scale schedule; shorten its optimizer-stage
+   epoch counts before using it as a smoke run.
+10. Use the cross-reference below to find later workflows without scanning the
+    repository.
+
+| Need | Read | Use |
+|---|---|---|
+| Installation | [Environment setup](env_setup/SETUP_ENV.md) | Its layout, venv, package, shell, and verification sections |
+| Data preprocessing | [Workflow: prepare data](WORKFLOW.md#2-prepare-data) | [Command reference: data preprocessing](COMMANDS.md#data-preprocessing) |
+| First FM | [Workflow: configure a run](WORKFLOW.md#3-configure-a-model-and-training-run) | [`configs/example_training.yaml`](configs/example_training.yaml) |
+| Full training settings | [Workflow: batching and losses](WORKFLOW.md#4-choose-batching-and-loss-semantics) | [`configs/base_config.yaml`](configs/base_config.yaml), the complete stable annotated lookup |
+| mSAM / REM | [Workflow: FM and REM](WORKFLOW.md#5-train-and-inspect-force-matching) | [`COMMANDS.md`](COMMANDS.md) and the disabled method blocks in `configs/base_config.yaml` |
+| Analysis / export | [Workflow: evaluation and provenance](WORKFLOW.md#6-evaluate-before-md) | [Analysis and export commands](COMMANDS.md#model-evaluation-and-run-analysis) |
+| JAX-MD | [MD setup and safety](md_setup/README.md#jax-md-smoke-run) | [`configs/example_md.yaml`](configs/example_md.yaml), the annotated MD lookup and safe smoke template |
+| LAMMPS | [LAMMPS/MLIR path](md_setup/README.md#lammpsmlir-path) | [Export and analysis commands](COMMANDS.md#mlir-export) |
+| Enhanced sampling | [Workflow: acquire difficult configurations](WORKFLOW.md#8-acquire-difficult-configurations) | [Campaign commands](COMMANDS.md#enhanced-sampling-campaigns) and [`sampling/campaigns/`](sampling/campaigns/) |
+
+## Run outputs
+
+After the first submission, the launcher writes single-run output by default to:
 
 ```text
 local_work/outputs/YYYYMMDD_<config-name>/
@@ -39,12 +82,9 @@ local_work/outputs/YYYYMMDD_<config-name>/
 
 Set `paths.output_dir` in the YAML when an exact output directory is needed.
 The run contains the submitted and resolved configs, logs, checkpoints,
-exports, and profiling/analysis artifacts. Register and inspect runs with:
-
-```bash
-python3 runs/registry.py sync
-python3 runs/registry.py status
-```
+exports, and profiling/analysis artifacts. Use the
+[run-registry commands](COMMANDS.md#run-registry-and-monitoring) to register and
+inspect runs.
 
 ## Repository layout
 

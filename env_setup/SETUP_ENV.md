@@ -132,6 +132,10 @@ python scripts/train.py --help
 python scripts/run_md.py --help
 ```
 
+After these checks pass, return to the
+[README new-user checklist](../README.md#new-user-checklist) to prepare data and
+submit the first force-matching run.
+
 ## LAMMPS connector
 
 LAMMPS has a separate compiled dependency chain. See `md_setup/README.md` for

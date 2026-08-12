@@ -20,9 +20,13 @@
 #include "plumed/core/Colvar.h"
 #include "plumed/core/ActionRegister.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
+#include <iterator>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -30,6 +34,13 @@
 #include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
+
+// Optional in-process backend (see the CGBIAS_WITH_CONNECTOR notes further down). This MUST
+// be included at global scope: inside namespace PLMD the library's `jcn` namespace would be
+// nested and nothing would link.
+#ifdef CGBIAS_WITH_CONNECTOR
+#include "libconnector.h"
+#endif
 
 namespace PLMD {
 namespace colvar {
@@ -84,6 +95,32 @@ void setSocketTimeout(const int fd, const double seconds) {
 
 }  // namespace
 
+// ---------------------------------------------------------------------------
+// Optional in-process backend: evaluate an exported model through chemtrain-deploy's
+// libconnector instead of shipping positions over the socket. Compile with
+// -DCGBIAS_WITH_CONNECTOR and link -lconnector; without it the plugin builds exactly as
+// before and MODEL= is rejected at parse time.
+//
+// UNITS. PLUMED is internally nm / kJ-mol regardless of any UNITS line in the input (UNITS
+// only affects parsing and printing). The exported models are "real" units: Angstrom and
+// kcal/mol. So positions are scaled by 10 on the way in, and the returned energy and forces
+// by 4.184 and 41.84 on the way out -- the same constants sampling/protocol.py applies on
+// the Python route.
+//
+// SPECIES. The connector subtracts one from every type internally, so types are passed
+// ONE-BASED here. Passing model-convention (zero-based) values would silently shift every
+// species by one and produce a plausible wrong energy. See export_check/MD_DEPLOY_CORR.md.
+// ---------------------------------------------------------------------------
+// NOTE: libconnector.h is included at the TOP of this file, outside namespace PLMD.
+// Including it here would nest the library's namespace as PLMD::colvar::jcn and every
+// symbol would fail to resolve at dlopen time with an undefined-symbol error naming
+// _ZN4PLMD6colvar3jcn... instead of _ZN3jcn...
+
+namespace {
+constexpr double A_PER_NM = 10.0;
+constexpr double KJ_PER_KCAL = 4.184;
+}  // namespace
+
 class CGBias : public Colvar {
   std::string socketPath_;
   std::size_t nAtoms_;
@@ -101,6 +138,21 @@ class CGBias : public Colvar {
   double cachedEnergy_;
   std::vector<double> cachedForces_;
 
+  // ---- in-process compiled-model backend ----
+  std::string modelPath_;
+  bool useConnector_;
+  std::vector<int> species_;      // one-based, as the connector expects
+  double cutoff_;
+  bool halfList_;
+  // Rank decomposition over PLUMED's intra-replica communicator. PLUMED shares the
+  // requested atoms to every rank, so each rank holds all beads but OWNS a contiguous
+  // slice; ghosts are the remaining beads within cutoff. Forces are reduced with comm.Sum.
+  std::size_t ownBegin_, ownEnd_;
+#ifdef CGBIAS_WITH_CONNECTOR
+  std::unique_ptr<jcn::Connector> connector_;
+#endif
+  void evaluateConnector();
+
 public:
   explicit CGBias(const ActionOptions&);
   ~CGBias() override {
@@ -115,7 +167,15 @@ PLUMED_REGISTER_ACTION(CGBias, "CG_BIAS")
 void CGBias::registerKeywords(Keywords& keys) {
   Colvar::registerKeywords(keys);
   keys.add("atoms", "ATOMS", "the CG bead atoms, in mapping order; any count");
-  keys.add("compulsory", "SOCKET", "Unix-domain socket served by sampling/server.py");
+  keys.add("optional", "SOCKET", "Unix-domain socket served by sampling/server.py. "
+           "Mutually exclusive with MODEL.");
+  keys.add("optional", "MODEL",
+           "exported model (compiled MLIR) evaluated in-process through libconnector, with "
+           "no Python in the timestep loop. Mutually exclusive with SOCKET.");
+  keys.add("optional", "SPECIES",
+           "per-bead species indices in MODEL convention (zero-based); one is added before "
+           "they reach the connector. Defaults to 0,1,...,n-1.");
+  keys.add("optional", "BACKEND", "connector backend, 'cpu' (default) or a PJRT plugin name");
   keys.add("optional", "RECOMPUTE_STRIDE",
            "recompute the bias every N steps and hold it constant in between "
            "(default 1). The bias is applied on every step regardless.");
@@ -132,12 +192,42 @@ CGBias::CGBias(const ActionOptions& options)
   if(atoms.empty()) error("CG_BIAS requires at least one atom in ATOMS");
   nAtoms_ = atoms.size();
   parse("SOCKET", socketPath_);
+  parse("MODEL", modelPath_);
+  if(socketPath_.empty() == modelPath_.empty()) {
+    error("CG_BIAS needs exactly one of SOCKET= (Python bias server) or MODEL= "
+          "(compiled model via libconnector)");
+  }
+  useConnector_ = !modelPath_.empty();
   parse("RECOMPUTE_STRIDE", recomputeStride_);
   if(recomputeStride_ < 1) error("RECOMPUTE_STRIDE must be >= 1");
   parse("TIMEOUT", timeout_);
   if(timeout_ <= 0.0) error("TIMEOUT must be > 0");
-  if(socketPath_.size() >= sizeof(sockaddr_un::sun_path)) error("SOCKET path is too long");
+  if(!socketPath_.empty() && socketPath_.size() >= sizeof(sockaddr_un::sun_path)) {
+    error("SOCKET path is too long");
+  }
+  std::vector<int> speciesIn;
+  parseVector("SPECIES", speciesIn);
+  std::string backend = "cpu";
+  parse("BACKEND", backend);
   checkRead();
+
+  species_.resize(nAtoms_);
+  for(std::size_t i = 0; i < nAtoms_; ++i) {
+    // +1: the connector subtracts one internally.
+    species_[i] = (speciesIn.empty() ? static_cast<int>(i) : speciesIn.at(i)) + 1;
+  }
+  if(!speciesIn.empty() && speciesIn.size() != nAtoms_) {
+    error("SPECIES must have one entry per atom in ATOMS");
+  }
+
+  // Contiguous ownership slice for this rank; ghosts are handled in evaluateConnector().
+  {
+    const std::size_t nRanks = std::max<std::size_t>(1, comm.Get_size());
+    const std::size_t rank = comm.Get_rank();
+    const std::size_t base = nAtoms_ / nRanks, rem = nAtoms_ % nRanks;
+    ownBegin_ = rank * base + std::min<std::size_t>(rank, rem);
+    ownEnd_ = ownBegin_ + base + (rank < rem ? 1 : 0);
+  }
 
   // header (4 x 8 bytes) + payload
   cachedForces_.assign(3 * nAtoms_, 0.0);
@@ -148,6 +238,37 @@ CGBias::CGBias(const ActionOptions& options)
   addValueWithDerivatives();
   setNotPeriodic();
   requestAtoms(atoms);
+
+  if(useConnector_) {
+#ifndef CGBIAS_WITH_CONNECTOR
+    error("CG_BIAS MODEL= requires the plugin to be built with -DCGBIAS_WITH_CONNECTOR "
+          "and linked against libconnector; rebuild with sampling/plugin/compile_plugin.sh "
+          "--with-connector");
+#else
+    std::ifstream blob(modelPath_, std::ios::binary);
+    if(!blob) error("Could not open CG_BIAS MODEL file " + modelPath_);
+    const std::string modelBytes((std::istreambuf_iterator<char>(blob)),
+                                 std::istreambuf_iterator<char>());
+    jcn::ConnectorConfig ccfg;
+    ccfg.backend = backend;
+    ccfg.device = 0;
+    ccfg.memory_fraction = 0.25f;   // several ranks may share one GPU
+    connector_ = std::make_unique<jcn::Connector>(ccfg);
+    jcn::ModelConfig mcfg;
+    mcfg.model = modelBytes;
+    mcfg.newton = true;
+    const jcn::ModelProperties props = connector_->load_model(mcfg);
+    cutoff_ = props.cutoff;
+    halfList_ = props.neighbor_list.half_list;
+    log.printf("  CG_BIAS model  : %s (backend %s)\n", modelPath_.c_str(), backend.c_str());
+    log.printf("  model cutoff   : %g A, half_list %d, unit_style %s\n",
+               cutoff_, static_cast<int>(halfList_), props.unit_style);
+    log.printf("  rank %u/%u owns beads [%u,%u)\n",
+               static_cast<unsigned>(comm.Get_rank()), static_cast<unsigned>(comm.Get_size()),
+               static_cast<unsigned>(ownBegin_), static_cast<unsigned>(ownEnd_));
+#endif
+    return;   // no socket in this mode
+  }
 
   socketFd_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
   if(socketFd_ < 0) error("Could not create CG_BIAS socket");
@@ -168,10 +289,122 @@ CGBias::CGBias(const ActionOptions& options)
   log.printf("  all bias logic (alpha schedules, TICA, term composition) lives server-side\n");
 }
 
+// Evaluate the compiled model in-process, distributed over PLUMED's intra-replica
+// communicator. Fills cachedEnergy_ / cachedForces_ in PLUMED units.
+//
+// PLUMED shares the requested atoms to every rank, so each rank already holds all bead
+// positions. It therefore does not need a halo exchange -- it just picks its owned slice,
+// gathers the beads within cutoff as ghosts, and evaluates that subdomain. The connector's
+// (n_local, n_ghost) interface is exactly this decomposition, and it returns ghost forces
+// under Newton's third law, so summing every rank's contribution over comm gives the total.
+void CGBias::evaluateConnector() {
+#ifdef CGBIAS_WITH_CONNECTOR
+  std::fill(cachedForces_.begin(), cachedForces_.end(), 0.0);
+  cachedEnergy_ = 0.0;
+
+  const std::size_t nOwn = ownEnd_ - ownBegin_;
+  if(nOwn > 0) {
+    // positions in Angstrom, owned beads first then ghosts (the layout the connector wants)
+    std::vector<std::size_t> globalIndex;
+    globalIndex.reserve(nAtoms_);
+    for(std::size_t i = ownBegin_; i < ownEnd_; ++i) globalIndex.push_back(i);
+    const double cut2 = cutoff_ * cutoff_;
+    for(std::size_t j = 0; j < nAtoms_; ++j) {
+      if(j >= ownBegin_ && j < ownEnd_) continue;
+      const Vector pj = getPosition(static_cast<unsigned>(j));
+      bool near = false;
+      for(std::size_t i = ownBegin_; i < ownEnd_ && !near; ++i) {
+        const Vector d = pj - getPosition(static_cast<unsigned>(i));
+        near = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) * A_PER_NM * A_PER_NM <= cut2;
+      }
+      if(near) globalIndex.push_back(j);
+    }
+    const std::size_t nTotal = globalIndex.size();
+    const std::size_t nGhost = nTotal - nOwn;
+
+    std::vector<std::vector<double>> xs(nTotal, std::vector<double>(3, 0.0));
+    std::vector<std::vector<double>> fs(nTotal, std::vector<double>(3, 0.0));
+    std::vector<double*> xp(nTotal), fp(nTotal);
+    std::vector<int> types(nTotal);
+    for(std::size_t k = 0; k < nTotal; ++k) {
+      const Vector p = getPosition(static_cast<unsigned>(globalIndex[k]));
+      for(unsigned d = 0; d < 3; ++d) xs[k][d] = p[d] * A_PER_NM;
+      xp[k] = xs[k].data();
+      fp[k] = fs[k].data();
+      types[k] = species_[globalIndex[k]];
+    }
+
+    // LAMMPS-style CSR neighbour list, brute force. Trivial at CG bead counts, and the
+    // indices must be local to this subdomain, not global.
+    std::vector<int> ilist(nOwn), numneigh(nOwn, 0);
+    std::vector<std::vector<int>> storage(nOwn);
+    std::vector<int*> firstneigh(nOwn);
+    for(std::size_t i = 0; i < nOwn; ++i) {
+      ilist[i] = static_cast<int>(i);
+      for(std::size_t j = 0; j < nTotal; ++j) {
+        if(j == i) continue;
+        if(halfList_ && j < i) continue;   // canonical (min,max) ordering
+        const double dx = xs[i][0] - xs[j][0], dy = xs[i][1] - xs[j][1],
+                     dz = xs[i][2] - xs[j][2];
+        if(dx * dx + dy * dy + dz * dz <= cut2) storage[i].push_back(static_cast<int>(j));
+      }
+      numneigh[i] = static_cast<int>(storage[i].size());
+      firstneigh[i] = storage[i].empty() ? nullptr : storage[i].data();
+    }
+
+    jcn::Results results;
+    try {
+      results = connector_->compute_force(
+          static_cast<int>(nOwn), static_cast<int>(nGhost), xp.data(), fp.data(),
+          types.data(), static_cast<int>(nOwn), ilist.data(), numneigh.data(),
+          firstneigh.data(), /*list_changed=*/true, /*allow_recompile=*/false);
+    } catch(const jcn::RecompilationRequired&) {
+      // Buffer capacity grew; retry once with compilation permitted. Settles after the
+      // first step at fixed system size.
+      results = connector_->compute_force(
+          static_cast<int>(nOwn), static_cast<int>(nGhost), xp.data(), fp.data(),
+          types.data(), static_cast<int>(nOwn), ilist.data(), numneigh.data(),
+          firstneigh.data(), true, true);
+    }
+
+    cachedEnergy_ = results.potential * KJ_PER_KCAL;
+    // forces are kcal/mol/A -> kJ/mol/nm, scattered back to global bead indices
+    for(std::size_t k = 0; k < nTotal; ++k) {
+      const std::size_t g = globalIndex[k];
+      for(unsigned d = 0; d < 3; ++d) {
+        cachedForces_[3 * g + d] += fs[k][d] * KJ_PER_KCAL * A_PER_NM;
+      }
+    }
+  }
+
+  // Every rank contributed its own subdomain; sum to get the whole bias.
+  if(comm.Get_size() > 1) {
+    comm.Sum(cachedEnergy_);
+    comm.Sum(cachedForces_);
+  }
+  haveCached_ = true;
+#endif
+}
+
 void CGBias::calculate() {
   const long long mdStep = static_cast<long long>(getStep());
   const bool recompute =
       (!haveCached_) || (recomputeStride_ <= 1) || (mdStep % recomputeStride_ == 0);
+
+  if(useConnector_) {
+    if(recompute) evaluateConnector();
+    setValue(cachedEnergy_);
+    for(std::size_t atom = 0; atom < nAtoms_; ++atom) {
+      setAtomsDerivatives(static_cast<unsigned>(atom),
+                          Vector(-cachedForces_[3 * atom + 0],
+                                 -cachedForces_[3 * atom + 1],
+                                 -cachedForces_[3 * atom + 2]));
+    }
+    Tensor boxDerivative;
+    boxDerivative.zero();
+    setBoxDerivatives(boxDerivative);
+    return;
+  }
 
   if(recompute) {
   char* out = requestBuffer_.data();

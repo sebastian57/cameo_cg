@@ -87,7 +87,8 @@ PRINT ARG=d_ace,d_nme,umb.bias FILE=colvar.dat STRIDE={print_stride}
 
 def build(out_dir: Path, structure: str, topology: str, mdp_template: Path,
           windows_A, n_per_window: int, ps_per_case: float, kappa: float,
-          ntomp: int, mapping_name: str) -> None:
+          ntomp: int, mapping_name: str, launch: str = "per-case",
+          replicas_per_job: int = 8, gpus_per_node: int = 4) -> None:
     m = get_mapping(mapping_name)
     caps = [(0, 1, "d_ace"), (4, 5, "d_nme")]
     base_mdp = mdp_template.read_text()
@@ -154,7 +155,27 @@ def build(out_dir: Path, structure: str, topology: str, mdp_template: Path,
     }, indent=2))
 
     slurm = out_dir / "submit.slurm"
-    slurm.write_text(f"""#!/bin/bash
+    if launch == "multidir":
+        # Pure-PLUMED restraints, no bias server, so this is purely a launch change.
+        from .launch import cpus_per_rank, group_ranges, multidir_group_script, submit_script
+
+        groups = group_ranges(len(cases), int(replicas_per_job))
+        ntomp = cpus_per_rank(max(len(g) for g in groups))
+        for gi, members in enumerate(groups):
+            script = out_dir / f"run_group_{gi:03d}.sh"
+            script.write_text(multidir_group_script(
+                case_dirs=[cases[i]["case"] for i in members],
+                structure_for=[structure] * len(members),
+                topology=topology, ntomp=ntomp, n_gpus=int(gpus_per_node),
+                use_server=False))
+            script.chmod(0o755)
+        slurm.write_text(submit_script(campaign_dir=out_dir, groups=groups,
+                                       job_name="bb6_capstretch", hours=1.0,
+                                       n_gpus=int(gpus_per_node)))
+        print(f"  launch: multidir, {len(groups)} group(s) of up to {replicas_per_job} "
+              f"cases, ntomp={ntomp}")
+    else:
+        slurm.write_text(f"""#!/bin/bash
 #SBATCH --job-name=bb6_capstretch
 #SBATCH --account=cameo
 #SBATCH --nodes=1
@@ -193,9 +214,16 @@ def main() -> None:
                     help="kJ/mol/nm^2; must exceed the amide bond constant (~238,000) to hold")
     ap.add_argument("--ntomp", type=int, default=8)
     ap.add_argument("--mapping", default="ala2_backbone_cb_6")
+    ap.add_argument("--launch", choices=("per-case", "multidir"), default="per-case",
+                    help="multidir packs --replicas-per-job cases into one gmx_mpi run "
+                         "sharing the node's GPUs; see sampling/launch.py")
+    ap.add_argument("--replicas-per-job", type=int, default=8)
+    ap.add_argument("--gpus-per-node", type=int, default=4)
     a = ap.parse_args()
     build(a.out, a.structure, a.topology, a.mdp, a.windows, a.n_per_window,
-          a.ps_per_case, a.kappa, a.ntomp, a.mapping)
+          a.ps_per_case, a.kappa, a.ntomp, a.mapping,
+          launch=a.launch, replicas_per_job=a.replicas_per_job,
+          gpus_per_node=a.gpus_per_node)
 
 
 if __name__ == "__main__":

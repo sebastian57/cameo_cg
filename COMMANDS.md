@@ -4,6 +4,15 @@ Run these commands from `$CAMEO_CG_PROJECT_ROOT`. Replace placeholders and
 inspect `--help` before using uncommon options. Environment setup lives in
 `env_setup/SETUP_ENV.md`; workflow explanations live in `WORKFLOW.md`.
 
+Choose a configuration by its canonical role:
+
+- `configs/example_training.yaml` is the first-FM starter; shorten its
+  production-scale optimizer schedule when preparing a smoke run.
+- `configs/base_config.yaml` is the complete stable annotated training lookup,
+  not a ready-to-run experiment.
+- `configs/example_md.yaml` is the stable annotated MD lookup and safe smoke
+  template.
+
 ## Shell setup and checks
 
 ```bash
@@ -23,17 +32,18 @@ CAMEO_ACTIVE_VENV=/path/to/venv sbatch scripts/run_training.sh CONFIG.yaml
 
 ## Training: force matching and mSAM
 
-Create a local config from a maintained reference:
+Create a first-FM config from the starter:
 
 ```bash
 mkdir -p local_work/my_run
-cp configs/base_config.yaml local_work/my_run/config.yaml
+cp configs/example_training.yaml local_work/my_run/config.yaml
 sbatch scripts/run_training.sh local_work/my_run/config.yaml
 ```
 
 The YAML selects standard force matching or mSAM and defines batch size,
 tiling, gradient accumulation, optimizer stages, losses, priors, and model.
-Use the same launcher for either method.
+Use the same launcher for either method. Consult `configs/base_config.yaml`
+before enabling additional stable settings or methods.
 
 ```bash
 # Two nodes

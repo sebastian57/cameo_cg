@@ -222,6 +222,14 @@ def main() -> None:
     ap.add_argument("--gmx")
     ap.add_argument("--ntomp", type=int, default=8)
     ap.add_argument("--mapping", default="ala2_backbone_cb_6")
+    ap.add_argument("--launch", choices=("per-case", "multidir"), default="per-case",
+                    help="per-case: one SLURM array task per case (one GPU each, most of the "
+                         "node idle). multidir: pack --replicas-per-job cases into one "
+                         "gmx_mpi invocation sharing the node's GPUs")
+    ap.add_argument("--replicas-per-job", type=int, default=8,
+                    help="multidir group size. Smaller groups bound the damage from a "
+                         "crashed rank, which aborts its whole mdrun")
+    ap.add_argument("--gpus-per-node", type=int, default=4)
     ap.add_argument("--seed", type=int, default=20260808)
     a = ap.parse_args()
 
@@ -365,7 +373,28 @@ def main() -> None:
         "labels": "unbiased_forces.trr (bias-free rerun); umbrella force excluded",
         "cases": cases}, indent=2))
     slurm = a.out / "submit.slurm"
-    slurm.write_text(f"""#!/bin/bash
+    if a.launch == "multidir":
+        # Harvest cases are pure PLUMED (an umbrella; no bias server), so packing them is
+        # just a launch change -- see sampling/launch.py for why gmx_mpi and why groups.
+        from .launch import cpus_per_rank, group_ranges, multidir_group_script, submit_script
+
+        groups = group_ranges(len(cases), int(a.replicas_per_job))
+        ntomp = cpus_per_rank(max(len(g) for g in groups))
+        for gi, members in enumerate(groups):
+            script = a.out / f"run_group_{gi:03d}.sh"
+            script.write_text(multidir_group_script(
+                case_dirs=[f"case_{i:03d}" for i in members],
+                structure_for=["seed.gro"] * len(members),   # extracted per case at build time
+                topology=a.topology, ntomp=ntomp,
+                n_gpus=int(a.gpus_per_node), use_server=False))
+            script.chmod(0o755)
+        slurm.write_text(submit_script(campaign_dir=a.out, groups=groups,
+                                       job_name=a.out.name, hours=1.0,
+                                       n_gpus=int(a.gpus_per_node)))
+        print(f"  launch: multidir, {len(groups)} group(s) of up to {a.replicas_per_job} "
+              f"cases, ntomp={ntomp}")
+    else:
+        slurm.write_text(f"""#!/bin/bash
 #SBATCH --job-name={a.out.name[:14]}
 #SBATCH --account=cameo
 #SBATCH --nodes=1

@@ -58,11 +58,16 @@ def test_example_md_is_the_stable_md_registry_without_runtime_keys():
         "tau", "equilibrate", "zero_com_velocity", "stability_abort",
         "bias", "override_use_priors", "prior_only", "robustness_gate",
         "local_extrapolation_gate", "edge_distance_gate", "h_constraints",
-        "force_decomp", "force_decomp_every", "observables_filename",
+        "force_decomp", "force_decomp_every",
         "continuous_output", "dump_for_ovito",
     }
     assert not sorted(required - set(md))
     assert "_partial_output_path" not in md
+    assert "observables_filename" not in md
+    assert "observables_path" not in md
+    annotated_yaml = (PROJECT_ROOT / "configs" / "example_md.yaml").read_text()
+    assert "# observables_filename:" in annotated_yaml
+    assert "# observables_path:" in annotated_yaml
 
 
 def test_example_md_is_a_safe_smoke_template():
@@ -77,6 +82,16 @@ def test_example_md_is_a_safe_smoke_template():
         "max_force_kcal_per_mol_A": 10_000.0,
         "max_temperature_K": 3_000.0,
     }
+
+
+def test_root_docs_route_to_canonical_onboarding_and_configs():
+    readme = (PROJECT_ROOT / "README.md").read_text()
+    for marker in (
+        "New-user checklist", "env_setup/SETUP_ENV.md", "COMMANDS.md",
+        "WORKFLOW.md", "md_setup/README.md", "configs/base_config.yaml",
+        "configs/example_training.yaml", "configs/example_md.yaml",
+    ):
+        assert marker in readme
 
 
 def test_lammps_data_generator_is_parameterized(tmp_path: Path):
