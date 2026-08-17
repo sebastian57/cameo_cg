@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -119,6 +120,35 @@ void setSocketTimeout(const int fd, const double seconds) {
 namespace {
 constexpr double A_PER_NM = 10.0;
 constexpr double KJ_PER_KCAL = 4.184;
+
+// Which GPU this rank should evaluate the model on.
+//
+// `ConnectorConfig::device` becomes PJRT's `visible_devices`, i.e. an index INTO
+// CUDA_VISIBLE_DEVICES. Hardcoding 0 puts every rank on the same physical GPU, which is
+// wrong in exactly the configuration we care about: in the packed regime each replica is
+// its own mdrun rank, so PLUMED's INTRA-REPLICA communicator reports rank 0 for all of
+// them and comm.Get_rank() cannot tell them apart. SLURM_LOCALID is the rank index on the
+// NODE, and is the only quantity here that differs between packed replicas.
+//
+// Falls back to the PLUMED rank outside SLURM (e.g. `plumed driver`), where a single rank
+// on device 0 is the right answer anyway.
+int autoDevice(const int commRank) {
+  int localRank = commRank;
+  if(const char* slurmLocal = std::getenv("SLURM_LOCALID")) {
+    if(slurmLocal[0] != '\0') localRank = std::atoi(slurmLocal);
+  }
+  // SLURM sets CUDA_VISIBLE_DEVICES from --gres=gpu:N, so its entry count is how many GPUs
+  // this process may touch. If it is unset we cannot know, so return the raw local rank and
+  // let PJRT reject an out-of-range index -- a loud failure beats silently stacking every
+  // replica onto one device, which is the bug this function exists to prevent.
+  const char* visible = std::getenv("CUDA_VISIBLE_DEVICES");
+  if(visible == nullptr || visible[0] == '\0') return localRank;
+  int nDevices = 1;
+  for(const char* c = visible; *c != '\0'; ++c) {
+    if(*c == ',') ++nDevices;
+  }
+  return localRank % nDevices;
+}
 }  // namespace
 
 class CGBias : public Colvar {
@@ -175,7 +205,12 @@ void CGBias::registerKeywords(Keywords& keys) {
   keys.add("optional", "SPECIES",
            "per-bead species indices in MODEL convention (zero-based); one is added before "
            "they reach the connector. Defaults to 0,1,...,n-1.");
-  keys.add("optional", "BACKEND", "connector backend, 'cpu' (default) or a PJRT plugin name");
+  keys.add("optional", "BACKEND", "connector backend, 'cpu' (default) or a PJRT plugin name "
+           "such as 'cuda12' (requires JCN_PJRT_PLUGIN to point at the matching plugin .so)");
+  keys.add("optional", "DEVICE",
+           "GPU index within CUDA_VISIBLE_DEVICES. Default -1 derives it from SLURM_LOCALID "
+           "so that replicas packed onto one node land on different GPUs; set it explicitly "
+           "only to override that.");
   keys.add("optional", "RECOMPUTE_STRIDE",
            "recompute the bias every N steps and hold it constant in between "
            "(default 1). The bias is applied on every step regardless.");
@@ -209,6 +244,8 @@ CGBias::CGBias(const ActionOptions& options)
   parseVector("SPECIES", speciesIn);
   std::string backend = "cpu";
   parse("BACKEND", backend);
+  int device = -1;                 // -1 = derive per rank, see autoDevice()
+  parse("DEVICE", device);
   checkRead();
 
   species_.resize(nAtoms_);
@@ -251,8 +288,20 @@ CGBias::CGBias(const ActionOptions& options)
                                  std::istreambuf_iterator<char>());
     jcn::ConnectorConfig ccfg;
     ccfg.backend = backend;
-    ccfg.device = 0;
+    ccfg.device = (device >= 0) ? device : autoDevice(comm.Get_rank());
     ccfg.memory_fraction = 0.25f;   // several ranks may share one GPU
+    log.printf("  CG_BIAS model  : %s (backend %s)\n", modelPath_.c_str(), backend.c_str());
+    // Logged BEFORE the Connector is constructed, and unconditionally: a wrong device is
+    // otherwise invisible (the run just gets slower as replicas contend for one GPU), and
+    // when a GPU backend fails to initialise this line is the only record of what it tried.
+    if(backend == "cpu") {
+      log.printf("  device         : n/a (cpu backend; DEVICE is ignored)\n");
+    } else {
+      log.printf("  device         : %d (%s), CUDA_VISIBLE_DEVICES=%s\n", ccfg.device,
+                 (device >= 0) ? "explicit DEVICE=" : "derived from SLURM_LOCALID",
+                 std::getenv("CUDA_VISIBLE_DEVICES") ? std::getenv("CUDA_VISIBLE_DEVICES")
+                                                     : "(unset)");
+    }
     connector_ = std::make_unique<jcn::Connector>(ccfg);
     jcn::ModelConfig mcfg;
     mcfg.model = modelBytes;
@@ -260,7 +309,6 @@ CGBias::CGBias(const ActionOptions& options)
     const jcn::ModelProperties props = connector_->load_model(mcfg);
     cutoff_ = props.cutoff;
     halfList_ = props.neighbor_list.half_list;
-    log.printf("  CG_BIAS model  : %s (backend %s)\n", modelPath_.c_str(), backend.c_str());
     log.printf("  model cutoff   : %g A, half_list %d, unit_style %s\n",
                cutoff_, static_cast<int>(halfList_), props.unit_style);
     log.printf("  rank %u/%u owns beads [%u,%u)\n",

@@ -84,6 +84,29 @@ def _without_walls(bias: SmoothTICABias) -> SmoothTICABias:
     return clone
 
 
+def padded_bounds(bias: SmoothTICABias, pad: float = 0.15,
+                  pad_sigma: float = 4.0) -> tuple[np.ndarray, np.ndarray]:
+    """TICA bounds widened by the thermal excursion the walls actually permit.
+
+    Both PLUMED actions that take a grid -- `EXTERNAL` and gridded `METAD` -- abort mid-run
+    if the CV leaves it, so the padding is sized from PHYSICS: a wall of stiffness k lets the
+    CV wander `sigma = sqrt(kT/k)` past `bounds`. `pad` (a fraction of the range) is only a
+    floor. For the ala2 artifact k = [1.29, 11.2] gives sigma = [0.68, 0.23] while a 15 % pad
+    supplies 0.79 on tic1 -- barely one sigma -- so the fraction alone is not safe.
+
+    Shared by the EXTERNAL grid and the METAD grid so the two cannot disagree about where
+    the sampled region ends.
+    """
+    wall_k = np.asarray(bias.wall_k_kcal_mol, dtype=float)
+    kbt = float(bias.kbt_kcal_mol)
+    lo = np.asarray(bias.bounds[:, 0], dtype=float)
+    hi = np.asarray(bias.bounds[:, 1], dtype=float)
+    with np.errstate(divide="ignore"):
+        sigma = np.where(wall_k > 0, np.sqrt(kbt / np.maximum(wall_k, 1e-30)), 0.0)
+    margin = np.maximum(pad * (hi - lo), pad_sigma * sigma)
+    return lo - margin, hi + margin
+
+
 def tica_cv_block(bias: SmoothTICABias, mapping: CGMapping, prefix: str = "tic") -> str:
     """DISTANCE per bead pair + one COMBINE per TIC.
 
@@ -128,7 +151,8 @@ def walls_block(bias: SmoothTICABias, prefix: str = "tic", label: str = "twall")
 def metad_block(prefix: str = "tic", *, height: float, sigma: Sequence[float], pace: int,
                 bias_factor: float, temperature: float, equilibrate_steps: int,
                 dt_ps: float, grid_min: Sequence[float] | None = None,
-                grid_max: Sequence[float] | None = None, label: str = "metad") -> str:
+                grid_max: Sequence[float] | None = None, walkers_mpi: bool = False,
+                label: str = "metad") -> str:
     """Well-tempered MetaD on the TICA CVs.
 
     Two differences from the Python term, both intentional:
@@ -137,11 +161,24 @@ def metad_block(prefix: str = "tic", *, height: float, sigma: Sequence[float], p
         expressed here as UPDATE_FROM in PLUMED time units (ps), hence `dt_ps`.
       * Hills go to a PLUMED HILLS file, which supports RESTART. The Python NPZ path never
         wrote hills in production, so this only adds capability.
+
+    `walkers_mpi=True` turns N replicas into N walkers on ONE shared bias -- required for
+    wide-and-short discovery, see the comment at the emission site.
     """
     args = ",".join(f"{prefix}{t + 1}" for t in range(len(sigma)))
     line = (f"{label}: METAD ARG={args} HEIGHT={height:.10g} SIGMA={_fmt(sigma)} "
             f"PACE={int(pace)} BIASFACTOR={bias_factor:.10g} TEMP={temperature:.10g} "
             f"FILE=HILLS")
+    if walkers_mpi:
+        # MULTIPLE WALKERS. Without this, N replicas each build their OWN hill history from
+        # zero: 64 replicas give 64x redundant filling and no replica gets far, which defeats
+        # the whole "short but wide" discovery strategy. With it they share ONE growing bias.
+        #
+        # WALKERS_MPI shares hills over the MPI communicator, NOT through a shared directory
+        # (WALKERS_DIR is the file-based alternative and is the only compatible WALKERS_*
+        # option -- checked against the deployed 2.9.3 kernel's own manual). `-multidir`
+        # already sets up the multi-replica communicator, so nothing else is needed.
+        line += " WALKERS_MPI"
     if equilibrate_steps > 0:
         line += f" UPDATE_FROM={equilibrate_steps * dt_ps:.10g}"
     if grid_min is not None and grid_max is not None:
@@ -190,18 +227,11 @@ def write_external_grid(bias: SmoothTICABias, path: Path, *, n_points: Sequence[
     straight at the double count. Zeroing them here also makes the wall forces exact
     (analytic in PLUMED) instead of grid-interpolated.
     """
-    wall_k = np.asarray(bias.wall_k_kcal_mol, dtype=float)
-    kbt = float(bias.kbt_kcal_mol)
-    bias = _without_walls(bias)
-
+    lo_p, hi_p = padded_bounds(bias, pad=pad, pad_sigma=pad_sigma)
     lo = np.asarray(bias.bounds[:, 0], dtype=float)
     hi = np.asarray(bias.bounds[:, 1], dtype=float)
     span = hi - lo
-    # thermal excursion past each wall; infinite if a wall is switched off
-    with np.errstate(divide="ignore"):
-        sigma = np.where(wall_k > 0, np.sqrt(kbt / np.maximum(wall_k, 1e-30)), 0.0)
-    margin = np.maximum(pad * span, pad_sigma * sigma)
-    lo_p, hi_p = lo - margin, hi + margin
+    bias = _without_walls(bias)
 
     # keep the ORIGINAL spacing (from n_points over the fraction-padded range) as the range
     # grows, instead of stretching the same number of points over a wider window
@@ -322,3 +352,43 @@ class PlumedNativeBias:
             printed.append(name)
         parts.append(f"PRINT ARG={','.join(printed)} FILE={colvar} STRIDE={int(print_stride)}\n")
         return "".join(parts)
+
+
+def write_grid_from_fn(fn, path: Path, lo, hi, *, n_points=(401, 401), label: str = "treg",
+                       prefix: str = "tic") -> tuple[np.ndarray, np.ndarray]:
+    """Tabulate ANY `z -> (V, grad V)` callable as a PLUMED EXTERNAL grid.
+
+    Generic counterpart of `write_external_grid`, which is hard-wired to the KDE artifact.
+    Used for the flow-based acquisition bias, whose `V` comes from `flow_bias.AcquisitionBias`.
+
+    The same three header traps apply, each of which cost a debugging cycle when the KDE grid
+    was first written:
+      * the value column MUST be named `<label>.bias` -- PLUMED looks it up by the label of the
+        EXTERNAL action, not by a fixed name, and aborts otherwise;
+      * `nbins_` must come from the ACTUAL axis length, or PLUMED reads the whole grid on the
+        wrong stride and produces a plausible-looking wrong field;
+      * PLUMED varies the FIRST field fastest, so the first coordinate is the inner loop.
+
+    WALLS ARE NOT INCLUDED, by the same argument as `write_external_grid`: they are emitted as
+    separate UPPER_WALLS/LOWER_WALLS actions, and tabulating them too would apply them twice.
+    """
+    lo = np.asarray(lo, dtype=float)
+    hi = np.asarray(hi, dtype=float)
+    axes = [np.linspace(lo[a], hi[a], int(n_points[a])) for a in range(2)]
+    names = [f"{prefix}1", f"{prefix}2"]
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as fh:
+        fh.write(f"#! FIELDS {names[0]} {names[1]} {label}.bias "
+                 f"der_{names[0]} der_{names[1]}\n")
+        for a in range(2):
+            fh.write(f"#! SET min_{names[a]} {axes[a][0]:.10g}\n")
+            fh.write(f"#! SET max_{names[a]} {axes[a][-1]:.10g}\n")
+            fh.write(f"#! SET nbins_{names[a]} {len(axes[a]) - 1}\n")
+            fh.write(f"#! SET periodic_{names[a]} false\n")
+        for y in axes[1]:
+            row = np.stack([axes[0], np.full(len(axes[0]), float(y))], -1)
+            V, dV = fn(row)
+            for i, x in enumerate(axes[0]):
+                fh.write(f"{x:.10g} {y:.10g} {V[i]:.10g} {dV[i, 0]:.10g} {dV[i, 1]:.10g}\n")
+    return axes[0], axes[1]

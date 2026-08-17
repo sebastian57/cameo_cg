@@ -1114,6 +1114,7 @@ class RelativeEntropyTrainer:
         seed: int,
         checkpoint_dir: Optional[Union[str, Path]] = None,
         initial_states: Optional[Dict[str, Any]] = None,
+        basin_energy_monitor: Optional[Any] = None,
     ):
         self.params = params
         self.best_params = params
@@ -1126,6 +1127,7 @@ class RelativeEntropyTrainer:
         self.energy_fn = energy_fn
         self.optimizer = optimizer
         self.config = config
+        self.basin_energy_monitor = basin_energy_monitor
         self.rng_key = jax.random.PRNGKey(int(seed) + int(config.seed_offset))
         self.opt_state = optimizer.init(self.params["ml"])
         self._relative_entropy_gradient = jax.jit(
@@ -1500,6 +1502,18 @@ class RelativeEntropyTrainer:
         last = {}
         n_rejected = sum(1 for row in self.history if row.get("rejected"))
         start_iteration = int(getattr(self, "_resume_iteration", 0))
+        final_iteration = int(self.config.iterations)
+        monitor = getattr(self, "basin_energy_monitor", None)
+        if monitor is not None and monitor.should_record(
+            start_iteration, final_step=final_iteration
+        ):
+            monitor.record(
+                self.params,
+                mode="rem",
+                stage="relative_entropy",
+                step=start_iteration,
+                rejected=False,
+            )
         if self._live_csv is not None and self._live_csv.exists():
             if start_iteration == 0:
                 self._live_csv.unlink()  # fresh file per run
@@ -1513,17 +1527,32 @@ class RelativeEntropyTrainer:
                         self._live_csv_fields = header
                 except OSError:
                     pass
-        for iteration in range(start_iteration, int(self.config.iterations)):
+        for iteration in range(start_iteration, final_iteration):
             last = self.train_step(iteration)
             n_rejected += bool(last.get("rejected"))
             self._log_iteration(last, n_rejected, iteration + 1)
             self._append_live_row(last)
+            completed = iteration + 1
+            if monitor is not None and monitor.should_record(
+                completed, final_step=final_iteration
+            ):
+                monitor.record(
+                    self.params,
+                    mode="rem",
+                    stage="relative_entropy",
+                    step=completed,
+                    rejected=bool(last.get("rejected")),
+                )
             if (
                 self.checkpoint_dir is not None
                 and int(self.config.checkpoint_freq) > 0
-                and (iteration + 1) % int(self.config.checkpoint_freq) == 0
+                and completed % int(self.config.checkpoint_freq) == 0
             ):
-                self.save_checkpoint(self.checkpoint_dir / f"relative_entropy_iter{iteration + 1:06d}.pkl")
+                self.save_checkpoint(
+                    self.checkpoint_dir / f"relative_entropy_iter{completed:06d}.pkl"
+                )
+        if monitor is not None:
+            monitor.finalize()
         return {"final": last, "history": list(self.history)}
 
     def save_checkpoint(self, output_path: Union[str, Path], metadata: Optional[Dict[str, Any]] = None) -> None:

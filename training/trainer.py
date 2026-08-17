@@ -23,6 +23,7 @@ from chemtrain.data.data_loaders import DataLoaders
 from config.types import PretrainResult, TrainingResults, StageResult
 from .optimizers import create_optimizer_from_config
 from .swa import SWAState, save_swa_checkpoint
+from .basin_energy_monitor import build_basin_energy_monitor
 from .msam import shmap_msam_update_fn
 from .dsm import add_dsm_noise_fields, dsm_config, dsm_enabled, dsm_error, make_dsm_quantity
 from .hvp_matching import hvp_config, hvp_error, make_hvp_quantity
@@ -216,6 +217,9 @@ class Trainer:
             os.environ.get("CHEMTRAIN_GRAD_ACCUM_MODE", "stack_scan")
         ).strip().lower()
         self._force_loss_normalization = config.get_force_loss_normalization()
+        # A genuine held-out split, as opposed to scripts/train.py's `val_loader =
+        # train_loader` fallback. Gates whether the per-epoch evaluation pass runs at all.
+        self._has_holdout_validation = float(config.get_val_fraction()) > 0.0
         self._config_tile_rebuild_each_epoch = (
             self._batch_mode == "tiled" and config.tile_rebuild_each_epoch_enabled()
         )
@@ -497,6 +501,9 @@ class Trainer:
 
         # Current trainer instance (will be set during training)
         self._chemtrain_trainer = None
+        self._basin_energy_monitor = self._build_basin_energy_monitor_for_rank(
+            config, model, rank=self._rank, default_output_dir=config.get_output_dir()
+        )
 
         # Optimizer state to restore on next train_stage call (set by load_chemtrain_checkpoint)
         self._resume_opt_state = None
@@ -674,16 +681,16 @@ class Trainer:
             return None
 
         if not hasattr(self, "_manual_force_profile_fn"):
-            def _single_force(params_, R_, mask_, species_, segment_id_):
+            def _single_force(params_, R_, mask_, species_, segment_id_, box_):
                 species_safe = jnp.where(mask_ > 0, species_, 0).astype(jnp.int32)
                 def _energy_fn(R_eval):
                     return self.model.compute_energy(
-                        params_, R_eval, mask_, species_safe, segment_id=segment_id_
+                        params_, R_eval, mask_, species_safe, segment_id=segment_id_, box=box_
                     )
                 return -jax.grad(_energy_fn)(R_)
 
             self._manual_force_profile_fn = jax.jit(
-                jax.vmap(_single_force, in_axes=(None, 0, 0, 0, 0))
+                jax.vmap(_single_force, in_axes=(None, 0, 0, 0, 0, 0))
             )
 
         R = jnp.asarray(batch_host["R"])
@@ -694,8 +701,12 @@ class Trainer:
         if segment_id is None:
             segment_id = np.zeros_like(batch_host["mask"], dtype=np.int32)
         segment_id = jnp.asarray(segment_id, dtype=jnp.int32)
+        box = batch_host.get("box")
+        if box is None:
+            box = np.zeros((R.shape[0], 3), dtype=np.float32)
+        box = jnp.asarray(box, dtype=jnp.float32)
 
-        F_pred = self._manual_force_profile_fn(params, R, mask, species, segment_id)
+        F_pred = self._manual_force_profile_fn(params, R, mask, species, segment_id, box)
         sq = np.asarray(jax.device_get(jnp.square(F_ref - F_pred)), dtype=np.float64)
         mask_np = np.asarray(batch_host["mask"], dtype=np.float64)
         mask3 = np.broadcast_to(mask_np[..., None], sq.shape)
@@ -1607,9 +1618,10 @@ class Trainer:
             train_split = self._build_epoch_tiled_split(epoch_idx)
             train_loader = NumpyDataLoader(**self._split_loader_kwargs(train_split))
             chemtrain_trainer.set_loader(train_loader, stage="training")
-            chemtrain_trainer.set_loader(train_loader, stage="validation")
+            if self._has_holdout_validation:
+                chemtrain_trainer.set_loader(train_loader, stage="validation")
+                self.val_loader = train_loader
             self.train_loader = train_loader
-            self.val_loader = train_loader
             self._set_dataset_profile(train_split, log=False)
 
         trainer.add_task("pre_epoch", _refresh_tiles)
@@ -1883,6 +1895,57 @@ class Trainer:
 
         trainer.add_task("post_epoch", _sample_swa)
 
+    @staticmethod
+    def _build_basin_energy_monitor_for_rank(
+        config: Any,
+        model: Any,
+        *,
+        rank: int,
+        default_output_dir: str | Path,
+    ) -> Any:
+        """Construct the file-writing monitor on rank zero only."""
+        if int(rank) != 0:
+            return None
+        return build_basin_energy_monitor(
+            config, model, default_output_dir=default_output_dir
+        )
+
+    def _install_basin_energy_monitor(
+        self,
+        trainer: Any,
+        *,
+        stage_name: str,
+        stage_start_epoch: int,
+        stage_end_epoch: int,
+    ) -> None:
+        """Attach post-epoch basin diagnostics using stage-global epoch numbers."""
+        monitor = getattr(self, "_basin_energy_monitor", None)
+        if monitor is None:
+            return
+        if monitor.should_record(stage_start_epoch, final_step=stage_end_epoch):
+            monitor.record(
+                trainer.params,
+                mode="fm",
+                stage=stage_name,
+                step=stage_start_epoch,
+            )
+
+        def _record(chemtrain_trainer, *args, **kwargs):
+            completed_epoch = int(
+                stage_start_epoch + getattr(chemtrain_trainer, "_epoch", 0) + 1
+            )
+            if monitor.should_record(completed_epoch, final_step=stage_end_epoch):
+                monitor.record(
+                    chemtrain_trainer.params,
+                    mode="fm",
+                    stage=stage_name,
+                    step=completed_epoch,
+                )
+
+        trainer.add_task("post_epoch", _record)
+
+
+
     def _save_swa_checkpoint_if_ready(
         self,
         state: Optional[SWAState],
@@ -2089,18 +2152,37 @@ class Trainer:
             (t_set_train_loader_end - t_set_train_loader_start) * 1e3,
             observations=int(loaders.train_loader.static_information["observation_count"]),
         )
-        t_set_val_loader_start = time.perf_counter()
-        trainer.set_loader(loaders.val_loader, stage="validation")
-        t_set_val_loader_end = time.perf_counter()
-        self._record_loader_setup(
-            "validation",
-            "set_loader_validation",
-            (t_set_val_loader_end - t_set_val_loader_start) * 1e3,
-            observations=int(loaders.val_loader.static_information["observation_count"]),
-        )
+        # Register validation ONLY when there is a genuine held-out split. With
+        # val_fraction 0.0 scripts/train.py falls back to `val_loader = train_loader`, and
+        # registering that made chemtrain evaluate the ENTIRE training set every epoch --
+        # a measured 26% of wall time for a "val loss" computed on the training data.
+        # Skipping registration makes chemtrain report `val_loss = None`, which prints as
+        # "not evaluated (no held-out split)" instead of a number that looks like validation.
+        if self._has_holdout_validation:
+            t_set_val_loader_start = time.perf_counter()
+            trainer.set_loader(loaders.val_loader, stage="validation")
+            t_set_val_loader_end = time.perf_counter()
+            self._record_loader_setup(
+                "validation",
+                "set_loader_validation",
+                (t_set_val_loader_end - t_set_val_loader_start) * 1e3,
+                observations=int(loaders.val_loader.static_information["observation_count"]),
+            )
+        else:
+            training_logger.warning(
+                "[Validation] val_fraction=0 -> NO held-out split. Skipping the per-epoch "
+                "evaluation pass (worth ~26% of wall time); val loss will be reported as "
+                "not evaluated. Set training.val_fraction > 0 to get a real one."
+            )
         self._install_batch_fetch_profiler(trainer, stage="training")
         self._install_epochwise_tile_rebuild(trainer, stage_start_epoch=start_epoch)
         self._install_dsm_step_refresh(trainer)
+        self._install_basin_energy_monitor(
+            trainer,
+            stage_name=optimizer_name,
+            stage_start_epoch=start_epoch,
+            stage_end_epoch=epochs,
+        )
         if swa_state is not None:
             self._install_swa_sampler(trainer, swa_state, stage_start_epoch=start_epoch)
         if msam_cfg is not None:
@@ -2186,6 +2268,8 @@ class Trainer:
         self.params = trainer.params
         self.best_params = trainer.best_inference_params
         self._chemtrain_trainer = trainer
+        if self._basin_energy_monitor is not None:
+            self._basin_energy_monitor.finalize()
         if self.model.use_priors and getattr(self.model, "train_priors", False) and "prior" in self.params:
             self.model.prior.params = self.params["prior"]
 
@@ -2660,18 +2744,22 @@ class Trainer:
         F_ref = self.train_loader.F[frame_idx]
         mask = self.train_loader.mask[frame_idx]
         species = self.train_loader.species[frame_idx]
+        frame_box = getattr(self.train_loader, "box", None)
+        if frame_box is None:
+            frame_box = getattr(self.train_loader, "box_per_frame", None)
+        frame_box = frame_box[frame_idx] if frame_box is not None and np.asarray(frame_box).ndim == 2 else frame_box
 
         # Compute energy components
         components = self.model.compute_components(
             self.best_params or self.params,
-            R, mask, species
+            R, mask, species, box=frame_box
         )
 
         # Compute forces
         def energy_fn(R_):
             return self.model.compute_energy(
                 self.best_params or self.params,
-                R_, mask, species
+                R_, mask, species, box=frame_box
             )
 
         F_pred = -jax.grad(energy_fn)(R)

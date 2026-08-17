@@ -54,7 +54,8 @@ class CombinedModel:
                  init_mask: Optional[jax.Array] = None,
                  prior_only: bool = False, n_species_override: Optional[int] = None,
                  id_to_aa: Optional[Dict[int, str]] = None,
-                 support_gate_bank: Optional[SupportGateBank] = None):
+                 support_gate_bank: Optional[SupportGateBank] = None,
+                 box_min: Optional[jax.Array] = None):
         """
         Initialize combined model.
 
@@ -95,6 +96,8 @@ class CombinedModel:
         }
         if "init_mask" in inspect.signature(ModelClass.__init__).parameters:
             ml_kwargs["init_mask"] = init_mask
+        if "box_min" in inspect.signature(ModelClass.__init__).parameters:
+            ml_kwargs["box_min"] = box_min
         self.ml_model = ModelClass(
             config, R0, box, species, N_max,
             **ml_kwargs,
@@ -264,6 +267,7 @@ class CombinedModel:
         species: jax.Array,
         neighbor: Optional[Any],
         segment_id: Optional[jax.Array],
+        box: Optional[jax.Array] = None,
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
         if self.local_extrapolation_gate_enabled and self.local_extrapolation_gate is not None:
             if not hasattr(self.ml_model, "compute_per_atom_energy"):
@@ -282,10 +286,11 @@ class CombinedModel:
                     species,
                     neighbor,
                     segment_id=segment_id,
+                    box=box,
                 )
             else:
                 per_atom_raw = self.ml_model.compute_per_atom_energy(
-                    ml_params, R, mask, species, neighbor, segment_id=segment_id
+                    ml_params, R, mask, species, neighbor, segment_id=segment_id, box=box
                 )
             per_atom = self.ml_energy_scale * per_atom_raw
             gates = self.local_extrapolation_gate.compute_gates(R, mask)
@@ -304,7 +309,7 @@ class CombinedModel:
             or segment_id is None
         ):
             E_ml_raw = self.ml_energy_scale * self.ml_model.compute_energy(
-                ml_params, R, mask, species, neighbor, segment_id=segment_id
+                ml_params, R, mask, species, neighbor, segment_id=segment_id, box=box
             )
             if not self.support_gate_enabled or self.support_gate_bank is None:
                 one = jnp.asarray(1.0, dtype=jnp.float32)
@@ -317,7 +322,7 @@ class CombinedModel:
                 "compute_per_atom_energy(). Use scope='batch' for this backend."
             )
         per_atom = self.ml_energy_scale * self.ml_model.compute_per_atom_energy(
-            ml_params, R, mask, species, neighbor, segment_id=segment_id
+            ml_params, R, mask, species, neighbor, segment_id=segment_id, box=box
         )
         num_segments = int(R.shape[0])
         seg_safe = jnp.where((mask > 0) & (segment_id >= 0), segment_id, 0).astype(jnp.int32)
@@ -361,6 +366,7 @@ class CombinedModel:
         species: jax.Array,
         neighbor: Optional[Any] = None,
         segment_id: Optional[jax.Array] = None,
+        box: Optional[jax.Array] = None,
     ) -> jax.Array:
         """
         Compute total energy (ML + Prior if enabled, or prior-only).
@@ -398,7 +404,7 @@ class CombinedModel:
                 )
 
         E_ml, _, _ = self._support_gated_ml_energy(
-            params['ml'], R, mask, species, neighbor, segment_id
+            params['ml'], R, mask, species, neighbor, segment_id, box
         )
 
         if self.use_priors:
@@ -428,6 +434,7 @@ class CombinedModel:
         species: jax.Array,
         neighbor: Optional[Any] = None,
         segment_id: Optional[jax.Array] = None,
+        box: Optional[jax.Array] = None,
     ) -> jax.Array:
         """Return ML-only direct forces for teacher training/inference."""
         if not self.direct_force_enabled:
@@ -443,6 +450,7 @@ class CombinedModel:
             species,
             neighbor,
             segment_id=segment_id,
+            box=box,
         )
 
     def compute_total_energy(
@@ -453,6 +461,7 @@ class CombinedModel:
         species: jax.Array,
         neighbor: Optional[Any] = None,
         segment_id: Optional[jax.Array] = None,
+        box: Optional[jax.Array] = None,
     ) -> jax.Array:
         """
         Compute total energy (alias for compute_energy for compatibility).
@@ -463,7 +472,7 @@ class CombinedModel:
         Args:
         """
         return self.compute_energy(
-            params, R, mask, species, neighbor, segment_id=segment_id
+            params, R, mask, species, neighbor, segment_id=segment_id, box=box
         )
 
     def compute_al_features(
@@ -527,7 +536,8 @@ class CombinedModel:
         R: jax.Array,
         mask: jax.Array,
         species: jax.Array,
-        neighbor: Optional[Any] = None
+        neighbor: Optional[Any] = None,
+        box: Optional[jax.Array] = None
     ) -> EnergyComponents:
         """
         Compute energy breakdown for analysis.
@@ -554,7 +564,7 @@ class CombinedModel:
             support_alpha = jnp.asarray(1.0)
         else:
             E_ml, E_ml_raw_scaled, support_alpha = self._support_gated_ml_energy(
-                params['ml'], R, mask, species, neighbor, None
+                params['ml'], R, mask, species, neighbor, None, box
             )
 
         components = {
@@ -627,7 +637,8 @@ class CombinedModel:
         params: Dict[str, Any],
         R: jax.Array,
         mask: jax.Array,
-        species: jax.Array
+        species: jax.Array,
+        box: Optional[jax.Array] = None
     ) -> ForceComponents:
         """
         Compute force breakdown via autodiff.
@@ -651,7 +662,7 @@ class CombinedModel:
         """
         if self.use_priors:
             def all_energies(R_):
-                comps = self.compute_components(params, R_, mask, species)
+                comps = self.compute_components(params, R_, mask, species, box=box)
                 return (
                     comps["E_total"],
                     comps["E_ml"],
@@ -695,7 +706,7 @@ class CombinedModel:
             }
         else:
             def all_energies(R_):
-                comps = self.compute_components(params, R_, mask, species)
+                comps = self.compute_components(params, R_, mask, species, box=box)
                 return comps["E_total"], comps["E_ml"]
 
             _, vjp_fn = jax.vjp(all_energies, R)
@@ -721,11 +732,12 @@ class CombinedModel:
             mask = kwargs["mask"]
             species = kwargs["species"]
             segment_id = kwargs.get("segment_id")
+            box = kwargs.get("box")
 
             species = jnp.where(mask > 0, species, 0).astype(jnp.int32)
 
             E = self.compute_energy(
-                params, R, mask, species, neighbor=neighbor, segment_id=segment_id
+                params, R, mask, species, neighbor=neighbor, segment_id=segment_id, box=box
             )
             return E
 
@@ -752,7 +764,6 @@ class CombinedModel:
         **kwargs,
     ) -> jax.Array:
         """Chemtrain quantity overriding its default energy-gradient force."""
-        del kwargs
         if mask is None or species is None:
             raise ValueError("Direct-force quantity requires mask and species.")
         species = jnp.where(mask > 0, species, 0).astype(jnp.int32)
@@ -763,6 +774,7 @@ class CombinedModel:
             species,
             neighbor=neighbor,
             segment_id=segment_id,
+            box=kwargs.get("box"),
         )
 
     def dsm_energy_fn_template(self, params: Dict[str, Any]):
@@ -781,6 +793,7 @@ class CombinedModel:
             mask = kwargs["mask"]
             species = kwargs["species"]
             segment_id = kwargs.get("segment_id")
+            box = kwargs.get("box")
 
             species = jnp.where(mask > 0, species, 0).astype(jnp.int32)
             E_ml_raw = self.ml_model.compute_energy(
@@ -790,6 +803,7 @@ class CombinedModel:
                 species,
                 neighbor,
                 segment_id=segment_id,
+                box=box,
             )
             E_ml = self.ml_energy_scale * E_ml_raw
 

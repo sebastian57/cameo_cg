@@ -33,6 +33,7 @@ from data.loader import DatasetLoader
 from data.preprocessor import CoordinatePreprocessor
 from export.exporter import ModelExporter
 from models.combined_model import CombinedModel
+from training.basin_energy_monitor import build_basin_energy_monitor
 from training.optimizers import create_optimizer_from_config
 from training.path_utils import repo_root_from_file, resolve_from_config_or_repo
 from training.relative_entropy import (
@@ -373,6 +374,9 @@ def run_relative_entropy(config_file: str, resume: str | None = None):
             species=np.asarray(initial_states["species"]),
         )
         training_logger.info("[RE] Configured initial states: %s", selection_path)
+    basin_energy_monitor = build_basin_energy_monitor(
+        config, model, default_output_dir=output_dir
+    )
     trainer = RelativeEntropyTrainer(
         params=params,
         reference_data=reference_data,
@@ -383,6 +387,7 @@ def run_relative_entropy(config_file: str, resume: str | None = None):
         seed=config.get_seed(),
         checkpoint_dir=output_dir / "checkpoints",
         initial_states=initial_states,
+        basin_energy_monitor=basin_energy_monitor,
     )
 
     if resume:

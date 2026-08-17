@@ -73,7 +73,7 @@ def evaluate_single_frame(
     logging.info(f"\n[Evaluating frame {frame_idx}]")
 
     # Compute metrics
-    metrics = evaluator.evaluate_frame(R, F_ref, mask, species)
+    metrics = evaluator.evaluate_frame(R, F_ref, mask, species, box=dataset.get("box", None)[frame_idx] if "box" in dataset else None)
 
     # Print results
     logging.info("\nMetrics:")
@@ -159,7 +159,7 @@ def evaluate_dataset(
         mask = dataset["mask"][i]
         species = dataset["species"][i]
 
-        metrics = evaluator.evaluate_frame(R, F_ref, mask, species)
+        metrics = evaluator.evaluate_frame(R, F_ref, mask, species, box=dataset.get("box", None)[i] if "box" in dataset else None)
         all_metrics.append(metrics)
 
         if (i + 1) % 10 == 0:
@@ -256,7 +256,7 @@ def main():
     # Load dataset (same preprocessing as training)
     max_frames = config.get_max_frames()
     seed = config.get_seed()
-    loader = DatasetLoader(str(data_path_obj), max_frames=max_frames, seed=seed)
+    loader = DatasetLoader(str(data_path_obj), max_frames=max_frames, seed=seed, dynamic_box=config.dynamic_box_enabled())
 
     N_max = loader.N_max
     species0 = loader.species[0]
@@ -271,12 +271,19 @@ def main():
         park_multiplier=park_mult
     )
 
-    extent, R_shift = preprocessor.compute_box_extent(loader.R, loader.mask)
-
     dataset = loader.get_all()
-    dataset["R"] = preprocessor.center_and_park(dataset["R"], dataset["mask"], extent, R_shift)
-
-    box = extent
+    if config.use_pbc_enabled():
+        frame_boxes = np.asarray(loader.box_per_frame if loader.box_per_frame is not None else loader.box, dtype=np.float32)
+        box = np.asarray(np.max(frame_boxes, axis=0) if frame_boxes.ndim == 2 else frame_boxes, dtype=np.float32)
+        box_min = np.min(frame_boxes, axis=0).astype(np.float32) if frame_boxes.ndim == 2 else None
+        dataset["R"] = np.mod(dataset["R"], frame_boxes[:, None, :] if frame_boxes.ndim == 2 else frame_boxes[None, None, :]).astype(np.float32)
+        if frame_boxes.ndim == 2:
+            dataset["box"] = frame_boxes
+    else:
+        extent, R_shift = preprocessor.compute_box_extent(loader.R, loader.mask)
+        dataset["R"] = preprocessor.center_and_park(dataset["R"], dataset["mask"], extent, R_shift)
+        box = extent
+        box_min = None
     data_logger.info(f"Loaded {len(dataset['R'])} frames")
     data_logger.info(f"Box: {np.asarray(box)}")
 
@@ -291,6 +298,7 @@ def main():
         config=config,
         R0=R0,
         box=box,
+        box_min=box_min,
         species=species0,
         N_max=N_max,
         id_to_aa=loader.id_to_aa,

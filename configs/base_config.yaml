@@ -63,6 +63,7 @@ data:
   tile_rebuild_each_epoch: false
   tile_drop_incomplete: false
   tile_train_only: true
+  dynamic_box: false                         # true = preserve/use a box for every frame (requires model.pbc)
   # Static neighbor graphs (tiled mode only). Builds each tile's connectivity
   # once, per molecular segment, and reuses it instead of running a JAX-MD
   # neighbor update per sample. Rejects DSM / noised-residual / relative-entropy

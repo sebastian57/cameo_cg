@@ -16,6 +16,7 @@ from jax_md_mod import custom_partition
 
 from .base_model import BaseMLModel, register_ml_model, resolve_compute_dtype
 from .neighborlist_utils import resolve_neighbor_list_format, compute_avg_num_neighbors
+from .dynamic_neighborlist import dynamic_neighbor_list
 from utils.logging import model_logger
 
 # Keep module-level alias so allegro_cueq_model.py import still works
@@ -77,6 +78,7 @@ class AllegroModel(BaseMLModel):
         N_max: int,
         n_species_override: Optional[int] = None,
         init_mask: Optional[jax.Array] = None,
+        box_min: Optional[jax.Array] = None,
     ):
         """
         Initialize Allegro model.
@@ -106,6 +108,7 @@ class AllegroModel(BaseMLModel):
             config.get_neighbor_list_format()
         )
         self._neighbor_disable_cell_list = bool(config.neighbor_disable_cell_list_enabled())
+        self._dynamic_box = bool(config.dynamic_box_enabled())
 
         self.allegro_config = dict(config.get_allegro_config())
         self._neighbor_capacity_multiplier = float(
@@ -127,8 +130,13 @@ class AllegroModel(BaseMLModel):
         # Setup JAX-MD displacement and neighbor list
         safe_box = jnp.asarray(box, dtype=self.compute_dtype)
         if config.use_pbc_enabled():
+            displacement_box = (
+                jnp.asarray(box_min, dtype=self.compute_dtype)
+                if self._dynamic_box and box_min is not None
+                else safe_box
+            )
             self.displacement, self.shift = space.periodic_general(
-                safe_box, fractional_coordinates=False
+                displacement_box, fractional_coordinates=False
             )
             self._pbc = True
             model_logger.info(
@@ -138,16 +146,30 @@ class AllegroModel(BaseMLModel):
             self.displacement, self.shift = space.free()
             self._pbc = False
 
-        self.nneigh_fn = custom_partition.masked_neighbor_list(
-            self.displacement,
-            box=safe_box,
-            r_cutoff=self.cutoff,
-            dr_threshold=self.dr_threshold,
-            capacity_multiplier=self._neighbor_capacity_multiplier,
-            fractional_coordinates=False,
-            disable_cell_list=self._neighbor_disable_cell_list,
-            format=self.neighbor_list_format,
-        )
+        if self._dynamic_box:
+            if not self._pbc:
+                raise ValueError("data.dynamic_box=true requires periodic Allegro mode")
+            self.nneigh_fn = dynamic_neighbor_list(
+                self.displacement,
+                box=safe_box,
+                box_min=box_min,
+                r_cutoff=self.cutoff,
+                dr_threshold=self.dr_threshold,
+                capacity_multiplier=self._neighbor_capacity_multiplier,
+                disable_cell_list=self._neighbor_disable_cell_list,
+                format=self.neighbor_list_format,
+            )
+        else:
+            self.nneigh_fn = custom_partition.masked_neighbor_list(
+                self.displacement,
+                box=safe_box,
+                r_cutoff=self.cutoff,
+                dr_threshold=self.dr_threshold,
+                capacity_multiplier=self._neighbor_capacity_multiplier,
+                fractional_coordinates=False,
+                disable_cell_list=self._neighbor_disable_cell_list,
+                format=self.neighbor_list_format,
+            )
         model_logger.info(
             f"Neighbor list format: {self.neighbor_list_format_name} "
             f"(disable_cell_list={self._neighbor_disable_cell_list})"
@@ -166,10 +188,14 @@ class AllegroModel(BaseMLModel):
         self._neighbor_extra_capacity = int(
             self.allegro_config.pop("neighbor_extra_capacity", 10)
         )
+        init_box_kwargs = {}
+        if self._dynamic_box and box_min is not None:
+            init_box_kwargs["box"] = jnp.asarray(box_min, dtype=self.compute_dtype)
         self.nbrs_init = self.nneigh_fn.allocate(
             R0_safe,
             extra_capacity=self._neighbor_extra_capacity,
             mask=init_valid_mask,
+            **init_box_kwargs,
         )
         self._log_initial_neighbor_debug(self.nbrs_init, R0_safe)
 
@@ -306,6 +332,9 @@ class AllegroModel(BaseMLModel):
         )
         return jnp.where(padded_mask[:, None], safe_positions, R)
 
+    def _dynamic_box_kwargs(self, box):
+        return {"box": box} if self._dynamic_box and box is not None else {}
+
     def initialize_params(self, rng_key: jax.random.PRNGKey) -> Any:
         """
         Initialize Allegro model parameters.
@@ -319,7 +348,7 @@ class AllegroModel(BaseMLModel):
         params = self.init_allegro(rng_key, self._R0, self.nbrs_init, self._species0)
         return params
 
-    def get_neighborlist(self, R: jax.Array, nbrs: Optional[Any] = None) -> Any:
+    def get_neighborlist(self, R: jax.Array, nbrs: Optional[Any] = None, box: Optional[jax.Array] = None) -> Any:
         """
         Get or update neighbor list for coordinates.
 
@@ -337,7 +366,7 @@ class AllegroModel(BaseMLModel):
         target_dtype = getattr(ref_position, "dtype", self.compute_dtype)
         valid_mask = jnp.ones((int(jnp.asarray(R).shape[0]),), dtype=jnp.bool_)
         nbrs = self.nneigh_fn.update(
-            jnp.asarray(R, dtype=target_dtype), nbrs, mask=valid_mask
+            jnp.asarray(R, dtype=target_dtype), nbrs, mask=valid_mask, **self._dynamic_box_kwargs(box)
         )
         return nbrs
 
@@ -349,6 +378,7 @@ class AllegroModel(BaseMLModel):
         species: jax.Array,
         neighbor: Optional[Any] = None,
         segment_id: Optional[jax.Array] = None,
+        box: Optional[jax.Array] = None,
     ) -> jax.Array:
         """
         Compute Allegro energy for given coordinates.
@@ -382,6 +412,7 @@ class AllegroModel(BaseMLModel):
                 jnp.asarray(R_masked, dtype=target_dtype),
                 base_nbrs,
                 mask=valid_mask.astype(jnp.bool_),
+                **self._dynamic_box_kwargs(box),
             )
         else:
             nbr_error = getattr(neighbor, "error", None)
@@ -395,6 +426,7 @@ class AllegroModel(BaseMLModel):
                     jnp.asarray(R_masked, dtype=target_dtype),
                     neighbor,
                     mask=valid_mask.astype(jnp.bool_),
+                    **self._dynamic_box_kwargs(box),
                 )
 
         nbrs = custom_partition.mask_neighbor_list(
@@ -441,7 +473,9 @@ class AllegroModel(BaseMLModel):
 
         # Compute energy
         E_allegro = self._apply_allegro_for_training(
-            params, R_model, nbrs, species_masked, mask=valid_mask.astype(jnp.bool_)
+            params, R_model, nbrs, species_masked,
+            mask=valid_mask.astype(jnp.bool_),
+            **self._dynamic_box_kwargs(box),
         )
         # Keep scalar losses/reductions in float32 for numerical stability.
         return jnp.asarray(E_allegro, dtype=jnp.float32)

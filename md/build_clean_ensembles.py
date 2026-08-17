@@ -33,27 +33,50 @@ warnings.filterwarnings("ignore")
 def build(run_dir: Path, out: Path, mapping_name: str, max_bond: float,
           equil_frac: float) -> None:
     m = get_mapping(mapping_name)
-    chunks, per_rep = [], []
+    chunks, records = [], []
     for f in sorted(run_dir.glob("*rep??.npz")):
-        R = np.load(f)["R"].astype(np.float64)
+        with np.load(f, allow_pickle=False) as data:
+            R = np.asarray(data["R"], dtype=np.float64)
         bl = np.stack([np.linalg.norm(R[:, i] - R[:, j], axis=-1) for i, j in m.bonds], axis=1)
         bad = ~np.isfinite(bl).all(axis=1) | (bl.max(axis=1) > max_bond)
-        cut = int(np.argmax(bad)) if bad.any() else len(R)
+        dissociated = bool(bad.any())
+        cut = int(np.argmax(bad)) if dissociated else len(R)
         start = int(equil_frac * cut)
-        if cut - start > 0:
+        kept = cut - start
+        if kept > 0:
             chunks.append(R[start:cut].astype(np.float32))
-        per_rep.append((f.name.split("_rep")[-1][:2], cut - start, len(R), bad.mean() * 100))
+            records.append({
+                "replica_id": f.name.split("_rep")[-1][:2],
+                "source_file": f.name,
+                "raw_frames": len(R),
+                "equil_start_frame": start,
+                "cut_frame": cut,
+                "kept_frames": kept,
+                "dissociated": dissociated,
+            })
     if not chunks:
         raise SystemExit(f"{run_dir}: no clean frames")
     allR = np.concatenate(chunks)
     out.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(out, R=allR,
-                        species=np.tile(np.arange(m.n_beads, dtype=np.int32), (len(allR), 1)))
-    total = sum(t for _, _, t, _ in per_rep)
-    n_diss = sum(1 for _, _, _, d in per_rep if d > 0)
+    np.savez_compressed(
+        out,
+        R=allR,
+        species=np.tile(np.arange(m.n_beads, dtype=np.int32), (len(allR), 1)),
+        source_replica_ids=np.asarray([row["replica_id"] for row in records]),
+        source_files=np.asarray([row["source_file"] for row in records]),
+        raw_frames=np.asarray([row["raw_frames"] for row in records], dtype=np.int64),
+        equil_start_frames=np.asarray(
+            [row["equil_start_frame"] for row in records], dtype=np.int64
+        ),
+        cut_frames=np.asarray([row["cut_frame"] for row in records], dtype=np.int64),
+        kept_frames=np.asarray([row["kept_frames"] for row in records], dtype=np.int64),
+        dissociated=np.asarray([row["dissociated"] for row in records], dtype=np.bool_),
+    )
+    total = sum(row["raw_frames"] for row in records)
+    n_diss = sum(row["dissociated"] for row in records)
     print(f"{out.stem:26s} {len(allR):7d} of {total:7d} frames "
           f"({100*len(allR)/total:5.1f}%), {len(allR)*0.2/1000:6.2f} ns, "
-          f"{n_diss}/{len(per_rep)} replicas dissociated")
+          f"{n_diss}/{len(records)} replicas dissociated")
 
 
 def main() -> None:

@@ -33,6 +33,7 @@ from jax_md_mod import custom_partition
 from .base_model import BaseMLModel, register_ml_model, resolve_compute_dtype
 from .allegro_model import _resolve_mlp_activation
 from .neighborlist_utils import resolve_neighbor_list_format, compute_avg_num_neighbors
+from .dynamic_neighborlist import dynamic_neighbor_list
 from training.edge_distance_gate import EdgeDistanceGateBank, edge_distance_gate_config
 from utils.logging import model_logger
 
@@ -102,6 +103,7 @@ class AllegroModelCuEq(BaseMLModel):
         N_max: int,
         n_species_override: Optional[int] = None,
         init_mask: Optional[jax.Array] = None,
+        box_min: Optional[jax.Array] = None,
     ):
         """
         Initialize AllegroModelCuEq.
@@ -126,6 +128,7 @@ class AllegroModelCuEq(BaseMLModel):
             config.get_neighbor_list_format()
         )
         self._neighbor_disable_cell_list = bool(config.neighbor_disable_cell_list_enabled())
+        self._dynamic_box = bool(config.dynamic_box_enabled())
 
         self.allegro_config = dict(config.get_allegro_config())
         self._neighbor_capacity_multiplier = float(
@@ -199,8 +202,13 @@ class AllegroModelCuEq(BaseMLModel):
 
         safe_box = jnp.asarray(box, dtype=self.compute_dtype)
         if config.use_pbc_enabled():
+            displacement_box = (
+                jnp.asarray(box_min, dtype=self.compute_dtype)
+                if self._dynamic_box and box_min is not None
+                else safe_box
+            )
             self.displacement, self.shift = space.periodic_general(
-                safe_box, fractional_coordinates=False
+                displacement_box, fractional_coordinates=False
             )
             self._pbc = True
             model_logger.info(
@@ -210,16 +218,30 @@ class AllegroModelCuEq(BaseMLModel):
             self.displacement, self.shift = space.free()
             self._pbc = False
 
-        self.nneigh_fn = custom_partition.masked_neighbor_list(
-            self.displacement,
-            box=safe_box,
-            r_cutoff=self.cutoff,
-            dr_threshold=self.dr_threshold,
-            capacity_multiplier=self._neighbor_capacity_multiplier,
-            fractional_coordinates=False,
-            disable_cell_list=self._neighbor_disable_cell_list,
-            format=self.neighbor_list_format,
-        )
+        if self._dynamic_box:
+            if not self._pbc:
+                raise ValueError("data.dynamic_box=true requires periodic cuEq Allegro mode")
+            self.nneigh_fn = dynamic_neighbor_list(
+                self.displacement,
+                box=safe_box,
+                box_min=box_min,
+                r_cutoff=self.cutoff,
+                dr_threshold=self.dr_threshold,
+                capacity_multiplier=self._neighbor_capacity_multiplier,
+                disable_cell_list=self._neighbor_disable_cell_list,
+                format=self.neighbor_list_format,
+            )
+        else:
+            self.nneigh_fn = custom_partition.masked_neighbor_list(
+                self.displacement,
+                box=safe_box,
+                r_cutoff=self.cutoff,
+                dr_threshold=self.dr_threshold,
+                capacity_multiplier=self._neighbor_capacity_multiplier,
+                fractional_coordinates=False,
+                disable_cell_list=self._neighbor_disable_cell_list,
+                format=self.neighbor_list_format,
+            )
         model_logger.info(
             f"  neighbor format = {self.neighbor_list_format_name} "
             f"(disable_cell_list={self._neighbor_disable_cell_list}, "
@@ -238,10 +260,14 @@ class AllegroModelCuEq(BaseMLModel):
         self._neighbor_extra_capacity = int(
             self.allegro_config.pop("neighbor_extra_capacity", 10)
         )
+        init_box_kwargs = {}
+        if self._dynamic_box and box_min is not None:
+            init_box_kwargs["box"] = jnp.asarray(box_min, dtype=self.compute_dtype)
         self.nbrs_init = self.nneigh_fn.allocate(
             R0_safe,
             extra_capacity=self._neighbor_extra_capacity,
             mask=init_valid_mask,
+            **init_box_kwargs,
         )
         model_logger.info(
             f"  neighbor extra_capacity = {self._neighbor_extra_capacity}"
@@ -557,11 +583,14 @@ class AllegroModelCuEq(BaseMLModel):
     #  Public interface (identical to AllegroModel)                          #
     # ---------------------------------------------------------------------- #
 
+    def _dynamic_box_kwargs(self, box):
+        return {"box": box} if self._dynamic_box and box is not None else {}
+
     def initialize_params(self, rng_key: jax.random.PRNGKey) -> Any:
         """Initialize cuEq Allegro parameters."""
         return self.init_allegro(rng_key, self._R0, self.nbrs_init, self._species0)
 
-    def get_neighborlist(self, R: jax.Array, nbrs: Optional[Any] = None) -> Any:
+    def get_neighborlist(self, R: jax.Array, nbrs: Optional[Any] = None, box: Optional[jax.Array] = None) -> Any:
         """Get or update neighbor list for coordinates."""
         if nbrs is None:
             nbrs = self.nbrs_init
@@ -572,6 +601,7 @@ class AllegroModelCuEq(BaseMLModel):
             jnp.asarray(R, dtype=target_dtype),
             nbrs,
             mask=valid_mask,
+            **self._dynamic_box_kwargs(box),
         )
 
     def _compute_energy_with_apply(
@@ -583,6 +613,7 @@ class AllegroModelCuEq(BaseMLModel):
         species: jax.Array,
         neighbor: Optional[Any] = None,
         segment_id: Optional[jax.Array] = None,
+        box: Optional[jax.Array] = None,
     ) -> jax.Array:
         """Compute cuEq Allegro energy for given coordinates."""
         valid_mask = mask > 0
@@ -597,6 +628,7 @@ class AllegroModelCuEq(BaseMLModel):
                 jnp.asarray(R_masked, dtype=target_dtype),
                 base_nbrs,
                 mask=valid_mask.astype(jnp.bool_),
+                **self._dynamic_box_kwargs(box),
             )
         else:
             nbr_error = getattr(neighbor, "error", None)
@@ -609,6 +641,7 @@ class AllegroModelCuEq(BaseMLModel):
                     jnp.asarray(R_masked, dtype=target_dtype),
                     neighbor,
                     mask=valid_mask.astype(jnp.bool_),
+                    **self._dynamic_box_kwargs(box),
                 )
 
         nbrs = custom_partition.mask_neighbor_list(
@@ -631,6 +664,7 @@ class AllegroModelCuEq(BaseMLModel):
         E = apply_fn(
             params, R_model, nbrs, species_masked,
             mask=valid_mask.astype(jnp.bool_),
+            **self._dynamic_box_kwargs(box),
         )
         return jnp.asarray(E, dtype=jnp.float32)
 
@@ -643,6 +677,7 @@ class AllegroModelCuEq(BaseMLModel):
         species: jax.Array,
         neighbor: Optional[Any] = None,
         segment_id: Optional[jax.Array] = None,
+        box: Optional[jax.Array] = None,
     ) -> jax.Array:
         """Compute per-atom energies with a custom apply_fn for export."""
         valid_mask = mask > 0
@@ -657,6 +692,7 @@ class AllegroModelCuEq(BaseMLModel):
                 jnp.asarray(R_masked, dtype=target_dtype),
                 base_nbrs,
                 mask=valid_mask.astype(jnp.bool_),
+                **self._dynamic_box_kwargs(box),
             )
         else:
             nbr_error = getattr(neighbor, "error", None)
@@ -669,6 +705,7 @@ class AllegroModelCuEq(BaseMLModel):
                     jnp.asarray(R_masked, dtype=target_dtype),
                     neighbor,
                     mask=valid_mask.astype(jnp.bool_),
+                    **self._dynamic_box_kwargs(box),
                 )
 
         nbrs = custom_partition.mask_neighbor_list(
@@ -688,6 +725,7 @@ class AllegroModelCuEq(BaseMLModel):
             nbrs,
             species_masked,
             mask=valid_mask.astype(jnp.bool_),
+            **self._dynamic_box_kwargs(box),
         )
         return jnp.asarray(E, dtype=jnp.float32)
 
@@ -699,6 +737,7 @@ class AllegroModelCuEq(BaseMLModel):
         species: jax.Array,
         neighbor: Optional[Any] = None,
         segment_id: Optional[jax.Array] = None,
+        box: Optional[jax.Array] = None,
     ) -> jax.Array:
         """Compute cuEq Allegro energy for given coordinates."""
         if self.output_mode != "energy":
@@ -711,6 +750,7 @@ class AllegroModelCuEq(BaseMLModel):
             species,
             neighbor,
             segment_id=segment_id,
+            box=box,
         )
 
     def compute_direct_force(
@@ -721,6 +761,7 @@ class AllegroModelCuEq(BaseMLModel):
         species: jax.Array,
         neighbor: Optional[Any] = None,
         segment_id: Optional[jax.Array] = None,
+        box: Optional[jax.Array] = None,
     ) -> jax.Array:
         """Compute central direct forces without differentiating an energy."""
         if self.output_mode != "direct_force":
@@ -736,6 +777,7 @@ class AllegroModelCuEq(BaseMLModel):
                 jnp.asarray(R_model, dtype=target_dtype),
                 base_nbrs,
                 mask=valid_mask,
+                **self._dynamic_box_kwargs(box),
             )
         else:
             nbrs = neighbor
@@ -756,6 +798,7 @@ class AllegroModelCuEq(BaseMLModel):
             nbrs,
             species_masked,
             mask=valid_mask,
+            **self._dynamic_box_kwargs(box),
         )
         return jnp.asarray(forces, dtype=jnp.float32) * valid_mask[:, None]
 
@@ -767,6 +810,7 @@ class AllegroModelCuEq(BaseMLModel):
         species: jax.Array,
         neighbor: Optional[Any] = None,
         segment_id: Optional[jax.Array] = None,
+        box: Optional[jax.Array] = None,
     ) -> jax.Array:
         """Compute per-atom cuEq Allegro energies for segment-level gating."""
         if self.output_mode != "energy":
@@ -779,6 +823,7 @@ class AllegroModelCuEq(BaseMLModel):
             species,
             neighbor,
             segment_id=segment_id,
+            box=box,
         )
 
     def compute_al_features(
@@ -789,6 +834,7 @@ class AllegroModelCuEq(BaseMLModel):
         species: jax.Array,
         neighbor: Optional[Any] = None,
         segment_id: Optional[jax.Array] = None,
+        box: Optional[jax.Array] = None,
     ) -> dict[str, jax.Array]:
         """Return final invariant edge features for active-learning scoring."""
         if self.apply_allegro_al_features is None:
@@ -808,6 +854,7 @@ class AllegroModelCuEq(BaseMLModel):
                 jnp.asarray(R_base, dtype=target_dtype),
                 base_nbrs,
                 mask=valid_mask.astype(jnp.bool_),
+                **self._dynamic_box_kwargs(box),
             )
         else:
             nbr_error = getattr(neighbor, "error", None)
@@ -820,6 +867,7 @@ class AllegroModelCuEq(BaseMLModel):
                     jnp.asarray(R_base, dtype=target_dtype),
                     neighbor,
                     mask=valid_mask.astype(jnp.bool_),
+                    **self._dynamic_box_kwargs(box),
                 )
 
         nbrs = custom_partition.mask_neighbor_list(
@@ -835,6 +883,7 @@ class AllegroModelCuEq(BaseMLModel):
             nbrs,
             species_masked,
             mask=valid_mask.astype(jnp.bool_),
+            **self._dynamic_box_kwargs(box),
         )
 
     @property

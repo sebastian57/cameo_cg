@@ -40,6 +40,13 @@ class ConfigManager:
         missing = [s for s in required_sections if s not in self._config]
         if missing:
             raise ValueError(f"Missing required config sections: {missing}")
+        if self.dynamic_box_enabled():
+            if not bool(self.get("model", "pbc", default=False)):
+                raise ValueError("data.dynamic_box=true requires model.pbc=true.")
+            if not self.get_ml_model_type().lower().startswith("allegro"):
+                raise ValueError(
+                    "data.dynamic_box=true currently supports Allegro backends only."
+                )
         output_mode = self.get_model_output_mode()
         if output_mode == "direct_force":
             if self.get_ml_model_type() != "allegro_cueq_fast":
@@ -71,6 +78,11 @@ class ConfigManager:
                 ),
                 "training.safety.enabled": bool(
                     self.get("training", "safety", "enabled", default=False)
+                ),
+                "training.basin_energy_monitor.enabled": bool(
+                    self.get(
+                        "training", "basin_energy_monitor", "enabled", default=False
+                    )
                 ),
             }
             active = [name for name, enabled in incompatible.items() if enabled]
@@ -144,6 +156,13 @@ class ConfigManager:
 
     def get_max_frames(self) -> Optional[int]:
         return self.get("data", "max_frames", default=None)
+
+    def dynamic_box_enabled(self) -> bool:
+        """Whether PBC boxes are supplied per frame and rebuilt dynamically."""
+        value = self.get("data", "dynamic_box", default=False)
+        if isinstance(value, dict):
+            return bool(value.get("enabled", False))
+        return bool(value)
 
     def get_batch_mode(self) -> str:
         """
@@ -653,6 +672,12 @@ class ConfigManager:
 
     def get_gammas(self) -> Dict[str, float]:
         return self.get("training", "gammas", default={"F": 1.0, "U": 0.0})
+
+    def get_basin_energy_monitor_config(self) -> Dict[str, Any]:
+        """Return normalized independent basin-energy diagnostic settings."""
+        from training.basin_energy_monitor import parse_basin_energy_monitor_config
+
+        return parse_basin_energy_monitor_config(self)
 
     def get_force_loss_normalization(self) -> str:
         raw = str(

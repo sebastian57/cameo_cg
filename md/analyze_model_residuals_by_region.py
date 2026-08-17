@@ -156,16 +156,53 @@ def main() -> None:
               f"(larger = pulls harder into alphaL)")
         rows[label]["dU"] = dU
 
+        # ---- BINDING GATE ------------------------------------------------------------
+        # Allegro's energy goes to 0 as the beads separate (per-atom contributions vanish
+        # with no neighbours). So <U_ML> on BOUND reference frames IS the binding energy
+        # relative to dissociation, and its SIGN decides whether the molecule is bound at
+        # all. <U_ML> > 0 means flying apart is thermodynamically DOWNHILL and MD will
+        # dissociate no matter how small the timestep.
+        #
+        # Measured 2026-08-15 -- <U_ML> tracks the MD's step-0 PE almost exactly:
+        #     ref50k_mf  11.37 -> 16.84     dhh300k 26.58 -> 28.81
+        #     mfonly33k  33.64 -> 34.15     all three dissociated 8/8 at BOTH 2 fs and 1 fs
+        # Every stable model in the project's history has step-0 PE in -773..-17.8; the only
+        # historical positive-PE model (alphaLboost_msam500, +22.7) is the one that loses
+        # replicas to dissociation. Force accuracy does NOT protect against this: dhh300k
+        # had a perfectly normal alphaL force RMS of 12.76 and still dissociated, because
+        # binding is set by the integral of the force out to separation -- a region with no
+        # training data, which force matching never constrains.
+        u_bound = float(U.mean())
+        rows[label]["U_bound"] = u_bound
+        if u_bound > 0:
+            print(f"  !! BINDING GATE FAILED: <U_ML> = {u_bound:+.2f} kcal/mol > 0 on bound "
+                  f"reference frames.\n"
+                  f"     The dissociated state (U=0) is LOWER. MD will fall apart; a smaller "
+                  f"dt will not help.\n"
+                  f"     DO NOT SPEND GPU TIME ON MD FOR THIS MODEL.")
+        else:
+            print(f"  binding gate OK: <U_ML> = {u_bound:+.2f} kcal/mol "
+                  f"(bound state is {-u_bound:.1f} below dissociation)")
+
     print("\n" + "=" * 96)
     print("SUMMARY -- ranked by alphaL force BIAS (the criterion for 'forces right in this "
           "basin',\nindependent of whether the ensemble weight is right)\n")
-    print(f"{'model':30s} {'bias aL':>9s} {'bias b':>8s} {'bias aR':>8s} {'bias tr':>8s} "
-          f"{'RMS aL':>8s} {'dU(aL-b)':>9s}")
+    print(f"{'model':26s} {'bias aL':>9s} {'bias b':>8s} {'bias aR':>8s} {'bias tr':>8s} "
+          f"{'RMS aL':>8s} {'dU(aL-b)':>9s} {'<U_ML>':>9s} {'BOUND?':>8s}")
     for k, v in sorted(rows.items(), key=lambda kv: kv[1].get("bias", {}).get("alphaL", 9e9)):
         b = v.get("bias", {})
-        print(f"{k:30s} {b.get('alphaL',float('nan')):9.3f} {b.get('beta',float('nan')):8.3f} "
+        ub = v.get("U_bound", float("nan"))
+        print(f"{k:26s} {b.get('alphaL',float('nan')):9.3f} {b.get('beta',float('nan')):8.3f} "
               f"{b.get('alphaR',float('nan')):8.3f} {b.get('alphaL_corridor',float('nan')):8.3f} "
-              f"{v['res'][region=='alphaL'].mean():8.2f} {v['dU']:+9.2f}")
+              f"{v['res'][region=='alphaL'].mean():8.2f} {v['dU']:+9.2f} {ub:+9.2f} "
+              f"{'no -- WILL DISSOCIATE' if ub > 0 else 'yes':>8s}")
+
+    failed = [k for k, v in rows.items() if v.get("U_bound", -1) > 0]
+    if failed:
+        print(f"\n!! BINDING GATE FAILED for: {', '.join(failed)}")
+        print("   <U_ML> > 0 means the dissociated state is lower in energy than the bound "
+              "one.\n   These models cannot run MD at any timestep. Check this BEFORE "
+              "submitting MD.")
 
     a.out.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(a.out, phi=phi, psi=psi, region=region.astype(str),

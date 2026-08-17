@@ -179,13 +179,22 @@ def _build_case_native(case_dir: Path, replica: int, cfg: Dict[str, Any]) -> Non
 
     metad = None
     if "tica_metad" in terms:
+        from .plumed_native import padded_bounds
         t = terms["tica_metad"]
+        # GRID_MIN/GRID_MAX are NOT optional in production. Without a grid, METAD sums over
+        # every deposited hill at every step, so the cost grows LINEARLY with run length:
+        # at PACE=500 a 20 ps test carries 40 hills (invisible) but a 1 ns campaign carries
+        # 2,000 and a 10 ns one 20,000. The throughput test cannot see this; the production
+        # run pays for it. Same padded bounds as the EXTERNAL grid so the two agree on where
+        # the sampled region ends.
+        g_lo, g_hi = padded_bounds(bias)
         metad = dict(height=float(t.get("height", 0.15)),
                      sigma=tuple(t.get("sigma", (0.15, 0.09))),
                      pace=int(t.get("pace", 500)),
                      bias_factor=float(t.get("bias_factor", 8.0)),
                      temperature=float(t.get("temperature", 298.0)),
                      equilibrate_steps=int(t.get("equilibrate_steps", 0)),
+                     grid_min=tuple(g_lo), grid_max=tuple(g_hi),
                      dt_ps=_mdp_dt_ps(Path(cfg["mdp"])))
 
     (case_dir / "plumed.dat").write_text(

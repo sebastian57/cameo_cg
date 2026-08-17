@@ -53,31 +53,40 @@ def _resolve_key(data, canonical: str, aliases: list[str], source: str = "") -> 
     )
 
 
-def _resolve_box(raw_box: np.ndarray) -> np.ndarray:
-    """Collapse any box representation to an orthorhombic (3,) vector.
+def _resolve_box(
+    raw_box: np.ndarray,
+    *,
+    per_frame: bool = False,
+    n_frames: Optional[int] = None,
+) -> np.ndarray:
+    """Normalize supported box representations to orthorhombic vectors.
 
-    Accepted shapes:
-      (3,)        — already a diagonal box vector
-      (3, 3)      — full box matrix; extract diagonal
-      (N_frames, 3)   — per-frame orthorhombic; use first frame (NVT assumption)
-      (N_frames, 3, 3) — per-frame triclinic; extract diagonal of first frame
+    Accepted shapes are ``(3,)``, ``(3, 3)``, ``(N_frames, 3)``, and
+    ``(N_frames, 3, 3)``.  With ``per_frame=True`` the result is always
+    frame-aligned; static boxes are broadcast when ``n_frames`` is supplied.
     """
     raw_box = np.asarray(raw_box, dtype=np.float32)
     if raw_box.ndim == 1 and raw_box.shape == (3,):
+        if per_frame and n_frames is not None:
+            return np.broadcast_to(raw_box, (int(n_frames), 3)).copy()
         return raw_box
     if raw_box.ndim == 2 and raw_box.shape == (3, 3):
-        return np.diag(raw_box)
+        vector = np.diag(raw_box)
+        if per_frame and n_frames is not None:
+            return np.broadcast_to(vector, (int(n_frames), 3)).copy()
+        return vector
     if raw_box.ndim == 2 and raw_box.shape[1] == 3:
-        return raw_box[0]              # (N_frames, 3) — first frame
+        return raw_box if per_frame else raw_box[0]
     if raw_box.ndim == 3 and raw_box.shape[1:] == (3, 3):
-        return np.diag(raw_box[0])     # (N_frames, 3, 3) — diagonal of first frame
+        vectors = np.diagonal(raw_box, axis1=1, axis2=2)
+        return vectors if per_frame else vectors[0]
     raise ValueError(
         f"Unrecognised box shape {raw_box.shape}. "
         "Expected (3,), (3,3), (N,3), or (N,3,3)."
     )
 
 
-def load_npz(path: PathLike) -> Dict[str, Any]:
+def load_npz(path: PathLike, *, dynamic_box: bool = False) -> Dict[str, Any]:
     """
     Load dataset from NPZ file.
 
@@ -155,13 +164,22 @@ def load_npz(path: PathLike) -> Dict[str, Any]:
                 arrays.append(d["species"] if "species" in d else np.zeros(d[rk].shape[:2], dtype=np.int32))
             return np.concatenate(arrays, axis=0)
 
-        # Box: use first dataset that has a box key; assume all share the same box (NVT).
+        # Preserve the legacy first-frame box and optionally concatenate frame boxes.
         box_value = None
-        for d in datasets:
+        box_frames = []
+        for d, rk in zip(datasets, r_keys):
             box_key = next((k for k in _BOX_ALIASES if k in d), None)
-            if box_key is not None:
-                box_value = _resolve_box(d[box_key])
-                break
+            if box_key is None:
+                if dynamic_box:
+                    raise ValueError("dynamic_box=true requires a box key in every NPZ file")
+                continue
+            raw_box = d[box_key]
+            if box_value is None:
+                box_value = _resolve_box(raw_box)
+            if dynamic_box:
+                box_frames.append(_resolve_box(raw_box, per_frame=True, n_frames=d[rk].shape[0]))
+        if dynamic_box:
+            box_frames = np.concatenate(box_frames, axis=0)
 
         result = {
             "R": np.concatenate([d[rk] for d, rk in zip(datasets, r_keys)], axis=0).astype(np.float32),
@@ -175,6 +193,7 @@ def load_npz(path: PathLike) -> Dict[str, Any]:
             "N_max":   int(datasets[0]["N_max"][0]) if "N_max" in datasets[0] else datasets[0][r_keys[0]].shape[1],
             "aa_to_id": datasets[0]["aa_to_id"].item() if "aa_to_id" in datasets[0] else None,
             "box": box_value,
+            **({"box_per_frame": box_frames.astype(np.float32)} if dynamic_box else {}),
         }
 
         for key in _OPTIONAL_FRAME_ALIGNED_KEYS:
@@ -209,9 +228,16 @@ def load_npz(path: PathLike) -> Dict[str, Any]:
     if isinstance(result["N_max"], np.ndarray):
         result["N_max"] = int(result["N_max"][0])
 
-    # Box: optional, required when model.pbc=true. Collapse to (3,) orthorhombic vector.
+    # Box: optional, required when model.pbc=true. Keep a legacy reference box
+    # and, when requested, a frame-aligned orthorhombic array.
     box_key = next((k for k in _BOX_ALIASES if k in data), None)
     result["box"] = _resolve_box(data[box_key]) if box_key is not None else None
+    if dynamic_box:
+        if box_key is None:
+            raise ValueError("dynamic_box=true requires a box/cell/lattice key in the NPZ dataset")
+        result["box_per_frame"] = _resolve_box(
+            data[box_key], per_frame=True, n_frames=data[r_key].shape[0]
+        ).astype(np.float32)
 
     return result
 
@@ -887,7 +913,7 @@ class DatasetLoader:
         >>> print(f"Loaded {loader.n_frames} frames, {loader.n_atoms} atoms")
     """
 
-    def __init__(self, npz_path: PathLike, max_frames: Optional[int] = None, seed: int = 42):
+    def __init__(self, npz_path: PathLike, max_frames: Optional[int] = None, seed: int = 42, dynamic_box: bool = False):
         """
         Initialize dataset loader.
 
@@ -898,9 +924,10 @@ class DatasetLoader:
         """
         self.npz_path = as_path(npz_path)
         self.seed = seed
+        self.dynamic_box = bool(dynamic_box)
 
         # Load raw data
-        raw_data = load_npz(npz_path)
+        raw_data = load_npz(npz_path, dynamic_box=self.dynamic_box)
 
         # Shuffle frames if max_frames is specified
         n_total = raw_data["R"].shape[0]
@@ -954,6 +981,13 @@ class DatasetLoader:
         # Box: shape (3,) orthorhombic vector, or None if not in dataset.
         # Required when model.pbc=true.
         self.box = raw_data.get("box", None)
+        raw_box_frames = raw_data.get("box_per_frame")
+        self.box_per_frame = (
+            np.asarray(raw_box_frames[indices], dtype=np.float32)
+            if raw_box_frames is not None else None
+        )
+        if self.dynamic_box and self.box_per_frame is None:
+            raise ValueError("dynamic_box=true requires per-frame box data")
 
         # Species mapping
         if raw_data["aa_to_id"] is not None:
@@ -992,12 +1026,15 @@ class DatasetLoader:
         Returns:
             Dictionary with R, F, mask, species for the frame
         """
-        return {
+        frame = {
             "R": self.R[idx],
             "F": self.F[idx],
             "mask": self.mask[idx],
             "species": self.species[idx],
         }
+        if self.box_per_frame is not None:
+            frame["box"] = self.box_per_frame[idx]
+        return frame
 
     def get_batch(self, start: int, end: int) -> Tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
         """
@@ -1026,6 +1063,8 @@ class DatasetLoader:
             "species": self.species,
             "source_name": self.source_name,
         }
+        if self.box_per_frame is not None:
+            data["box"] = self.box_per_frame
         data.update(getattr(self, "extra_fields", {}))
         return data
 
@@ -1054,6 +1093,9 @@ class DatasetLoader:
         train_loader.mask = self.mask[:n_train]
         train_loader.species = self.species[:n_train]
         train_loader.source_name = self.source_name[:n_train]
+        train_loader.dynamic_box = self.dynamic_box
+        train_loader.box = self.box
+        train_loader.box_per_frame = self.box_per_frame[:n_train] if self.box_per_frame is not None else None
         train_loader.extra_fields = {}
         for key, value in getattr(self, "extra_fields", {}).items():
             sliced = value[:n_train]
@@ -1075,6 +1117,9 @@ class DatasetLoader:
         val_loader.mask = self.mask[n_train:]
         val_loader.species = self.species[n_train:]
         val_loader.source_name = self.source_name[n_train:]
+        val_loader.dynamic_box = self.dynamic_box
+        val_loader.box = self.box
+        val_loader.box_per_frame = self.box_per_frame[n_train:] if self.box_per_frame is not None else None
         val_loader.extra_fields = {}
         for key, value in getattr(self, "extra_fields", {}).items():
             sliced = value[n_train:]
@@ -1131,6 +1176,7 @@ class BucketedDatasetLoader:
         bucket_dir_or_paths,
         max_frames: Optional[int] = None,
         seed: int = 42,
+        dynamic_box: bool = False,
     ):
         """
         Args:
@@ -1154,7 +1200,7 @@ class BucketedDatasetLoader:
         # Build (N_max, DatasetLoader) pairs sorted by N_max
         self._buckets = []
         for p in npz_paths:
-            dl = DatasetLoader(str(p), max_frames=max_frames, seed=seed)
+            dl = DatasetLoader(str(p), max_frames=max_frames, seed=seed, dynamic_box=dynamic_box)
             self._buckets.append((dl.N_max, dl))
 
         self._buckets.sort(key=lambda x: x[0])

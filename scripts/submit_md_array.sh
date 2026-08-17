@@ -112,11 +112,37 @@ if [[ -n "${SLURM_ARRAY_TASK_ID+x}" ]]; then
     export XLA_PYTHON_CLIENT_PREALLOCATE=true
     export XLA_PYTHON_CLIENT_MEM_FRACTION=0.80
 
+    # ── Concurrent-import protection ─────────────────────────────────────────
+    # 2026-08-12: 4 of 16 array tasks launched in the same second died ~17 s in with
+    #   ModuleNotFoundError: No module named 'jaxlib.mlir._mlir_libs._stablehlo'
+    # The module is present on disk and imports fine single-process; 12 of the 16 tasks
+    # succeeded from the same venv at the same instant. It is a transient lookup failure
+    # from N processes walking the same import tree on the shared filesystem at once.
+    #
+    # Two mitigations, both cheap:
+    #  * do NOT write .pyc -- 16 tasks racing to (re)write __pycache__ inside a shared
+    #    venv is the most likely way an importer sees a momentarily absent module;
+    #  * stagger task starts so the import storms do not coincide.
+    export PYTHONDONTWRITEBYTECODE=1
+    STAGGER=$(( (SLURM_ARRAY_TASK_ID % 16) * ${MD_IMPORT_STAGGER_S:-7} ))
+    if (( STAGGER > 0 )); then
+        echo "staggering start by ${STAGGER}s (concurrent-import protection)"
+        sleep "${STAGGER}"
+    fi
+
     source "${PROJECT_ROOT}/runs/registry_hook.sh"
     run_registry_start md "${MD_CONFIG}"
     run_registry_install_exit_trap
 
-    "${PYTHON_BIN}" scripts/run_md.py "${MD_CONFIG}" "${SLURM_JOB_ID}" --replica "${SLURM_ARRAY_TASK_ID}"
+    # One retry: the failure above is transient, and losing a replica costs ~45 min of
+    # GPU time plus a hole in the ensemble. Only import-time failures are worth retrying;
+    # a dissociating trajectory would fail the same way twice, just slower.
+    if ! "${PYTHON_BIN}" scripts/run_md.py "${MD_CONFIG}" "${SLURM_JOB_ID}" --replica "${SLURM_ARRAY_TASK_ID}"; then
+        rc=$?
+        echo "replica ${SLURM_ARRAY_TASK_ID} exited ${rc}; retrying once after 30 s" >&2
+        sleep 30
+        "${PYTHON_BIN}" scripts/run_md.py "${MD_CONFIG}" "${SLURM_JOB_ID}" --replica "${SLURM_ARRAY_TASK_ID}"
+    fi
 else
     # ── First invocation: re-submit self as an array job ────────────────────
     sbatch "${SBATCH_ARGS[@]}" "${BASH_SOURCE[0]}" "${CONFIG}"

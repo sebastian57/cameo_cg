@@ -161,6 +161,7 @@ class MDRunner:
                     species,
                     neighbor=neighbor,
                     segment_id=kwargs.get("segment_id"),
+                    box=kwargs.get("box"),
                 )
 
             dynamics_fn = force_fn

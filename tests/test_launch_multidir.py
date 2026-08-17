@@ -64,11 +64,16 @@ class GroupScriptTests(unittest.TestCase):
         base.update(kw)
         return multidir_group_script(**base)
 
-    def test_uses_gmx_mpi_not_the_thread_mpi_binary(self):
-        """`gmx` is thread-MPI here and silently cannot do -multidir; `gmx_mpi` can."""
+    def test_biased_phase_uses_gmx_mpi_not_the_thread_mpi_binary(self):
+        """`gmx` is thread-MPI here and silently cannot do -multidir; `gmx_mpi` can.
+
+        Scoped to the BIASED phase only: the rerun deliberately uses plain `gmx`, because
+        `-rerun` does not support multi-simulation at all (see GromacsMultidirConstraintTests).
+        """
         script = self._script()
-        self.assertIn("gmx_mpi mdrun -multidir", script)
-        self.assertNotRegex(script, r"(?<!_mpi)\bgmx mdrun")
+        biased = script[script.index("2. biased production"):script.index("3. bias-free")]
+        self.assertIn("gmx_mpi mdrun -multidir", biased)
+        self.assertNotRegex(biased, r"(?<!_mpi)\bgmx mdrun")
 
     def test_grompp_runs_for_every_replica_before_any_mdrun(self):
         script = self._script()
@@ -129,12 +134,15 @@ class SubmitScriptTests(unittest.TestCase):
         self.assertEqual(ranks, 6)
         self.assertLessEqual(ranks * cpus, 288)
 
-    def test_paths_are_absolute_because_srun_runs_from_an_arbitrary_cwd(self):
+    def test_paths_are_absolute_because_the_batch_job_runs_from_an_arbitrary_cwd(self):
         with tempfile.TemporaryDirectory() as tmp:
-            rel = Path(tmp).relative_to("/") if False else Path(tmp)
-            text = submit_script(campaign_dir=rel, groups=group_ranges(4, 2), job_name="x")
-        srun = [ln for ln in text.splitlines() if ln.startswith("srun")][0]
-        self.assertIn(str(Path(tmp).resolve()), srun)
+            text = submit_script(campaign_dir=Path(tmp), groups=group_ranges(4, 2),
+                                 job_name="x")
+        # the launch line is `bash <abs>/run_group_NNN.sh` -- it was `srun ...` until the
+        # nested-srun deadlock of 2026-08-12, so select it by content, not by command
+        launch = [ln for ln in text.splitlines()
+                  if "run_group_" in ln and not ln.lstrip().startswith("#")][0]
+        self.assertIn(str(Path(tmp).resolve()), launch)
 
     def test_array_spans_the_groups_not_the_replicas(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -193,7 +201,9 @@ class TopologyTests(unittest.TestCase):
             case_dirs=["replica_00", "replica_01"], structure_for=["/a.gro", "/b.gro"],
             topology="t", ntomp=16, ranks_per_replica=1, n_gpus=4)
         self.assertIn("srun -n 2 gmx_mpi mdrun -multidir", script)
-        self.assertIn("-gpu_id 0123", script)
+        # one GPU per rank: `-gpu_id 0123` with 2 ranks dies with "task assignment failed"
+        self.assertIn("-gpu_id 01", script)
+        self.assertNotIn("-gpu_id 0123", script)
 
 
 class CasesIntegrationTests(unittest.TestCase):
@@ -232,3 +242,101 @@ class CasesIntegrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NestedSrunRegressionTests(unittest.TestCase):
+    """Jobs 1324907-1324910 and 1324913 (2026-08-12) burned their whole walltime on
+    `srun: Job step creation temporarily disabled` and produced nothing. Cause: the batch
+    script wrapped the group script in an outer `srun`, whose step held the allocation, so
+    the group script's own `srun -n N gmx_mpi mdrun -multidir` could never start."""
+
+    def test_submit_script_does_not_wrap_the_group_script_in_srun(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            text = submit_script(campaign_dir=Path(tmp), groups=group_ranges(4, 2),
+                                 job_name="x")
+        launch = [ln for ln in text.splitlines()
+                  if "run_group_" in ln and not ln.lstrip().startswith("#")]
+        self.assertEqual(len(launch), 1, launch)
+        self.assertNotRegex(launch[0], r"^\s*srun\b",
+                            "outer srun around the group script deadlocks the inner one")
+        self.assertRegex(launch[0], r"^\s*bash\b")
+
+    def test_group_script_still_uses_srun_for_mdrun(self):
+        """The inner srun is the one that must survive -- it is what spans the ranks."""
+        script = multidir_group_script(case_dirs=["replica_00", "replica_01"],
+                                       structure_for=["/a.gro", "/b.gro"],
+                                       topology="t", ntomp=16)
+        self.assertIn("srun -n 2 gmx_mpi mdrun -multidir", script)
+
+
+class GromacsMultidirConstraintTests(unittest.TestCase):
+    """Three constraints learned by running (2026-08-13, jobs 1342172-1342186). All three
+    produced a job that consumed its allocation and wrote no usable output."""
+
+    def _script(self, n, **kw):
+        base = dict(case_dirs=[f"replica_{i:02d}" for i in range(n)],
+                    structure_for=[f"/s{i}.gro" for i in range(n)],
+                    topology="/t.top", ntomp=16, n_gpus=4)
+        base.update(kw)
+        return multidir_group_script(**base)
+
+    def test_single_replica_group_does_not_use_multidir(self):
+        """`-multidir` with one directory: 'The single simulation case is not supported'."""
+        s = self._script(1)
+        cmds = [ln for ln in s.splitlines()
+                if "mdrun" in ln and not ln.lstrip().startswith("#")]
+        self.assertTrue(cmds)
+        for ln in cmds:
+            self.assertNotIn("-multidir", ln, ln)
+        self.assertIn("gmx mdrun -deffnm biased", s)
+
+    def test_rerun_is_never_multidir(self):
+        """'Multiple simulations not supported by rerun' -- rerun.cpp:258. The biased mdrun
+        completes and reports Performance, THEN the job dies, so this is easy to miss."""
+        for n in (2, 4, 8):
+            s = self._script(n)
+            rerun_stmt = s[s.index("bias-free force rerun"):]
+            self.assertIn("-rerun biased.trr", rerun_stmt)
+            self.assertNotIn("-multidir", rerun_stmt, f"n={n}")
+            self.assertIn("gmx mdrun -s biased.tpr", rerun_stmt)
+
+    def test_rerun_runs_replicas_concurrently_and_checks_every_exit(self):
+        s = self._script(4)
+        tail = s[s.index("bias-free force rerun"):]
+        self.assertIn("pids+=($!)", tail)
+        self.assertIn('wait "$p" || fail=1', tail)
+        self.assertIn("CUDA_VISIBLE_DEVICES=$(( i % 4 ))", tail)
+
+    def test_gpu_id_never_lists_more_gpus_than_ranks(self):
+        """2 ranks against `-gpu_id 0123` dies with a bare 'task assignment failed'."""
+        import re
+        for n, expect in ((2, "01"), (4, "0123"), (8, "0123")):
+            m = re.search(r"-gpu_id (\d+)", self._script(n))
+            self.assertIsNotNone(m, f"n={n}")
+            self.assertEqual(m.group(1), expect, f"n={n}")
+
+
+class PlumedOutputNamingTests(unittest.TestCase):
+    """PLUMED suffixes every output with the replica index under -multidir (colvar.0.dat,
+    colvar.1.dat, ...). Downstream readers use the plain name -- build_harvest_campaign.py
+    opens `<case>/colvar.dat` literally -- so the index is stripped after the biased run.
+    Measured on job 1342295."""
+
+    def _script(self, n):
+        return multidir_group_script(
+            case_dirs=[f"case_{i:03d}" for i in range(n)],
+            structure_for=["seed.gro"] * n, topology="/t.top", ntomp=8, n_gpus=4)
+
+    def test_index_is_stripped_for_multi_replica_groups(self):
+        s = self._script(4)
+        self.assertIn("strip PLUMED's per-replica index", s)
+        self.assertIn('mv -f "$f"', s)
+        self.assertIn('mv -f "$d/HILLS.$i" "$d/HILLS"', s)
+        # must happen after the biased run and before anything reads the files
+        self.assertLess(s.index("gmx_mpi mdrun -multidir"), s.index("strip PLUMED"))
+
+    def test_no_rename_for_a_single_simulation(self):
+        """Without -multidir PLUMED writes the plain name; renaming would be wrong."""
+        s = self._script(1)
+        self.assertNotIn('mv -f "$f"', s)
+        self.assertIn("does not suffix", s)

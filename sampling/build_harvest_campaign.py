@@ -165,14 +165,26 @@ def check_campaign(root: Path) -> int:
           f"psi_restrained={cam.get('psi_restrained')}  ({n_missing} case(s) without data)")
     print(f"\n{'commanded phi':>13} {'n':>4} {'achieved <phi>':>15} {'offset':>8} "
           f"{'sd(phi)':>8} {'<psi>':>8} {'sd(psi)':>8}")
+    # CIRCULAR statistics. phi/psi are angles: a linear mean of samples straddling +-180
+    # lands near 0 -- the opposite side of the circle -- and a linear offset then reports
+    # ~326 deg for a window that is actually 36 deg off. Both must go through the unit circle.
+    def cmean(x):
+        return float(np.degrees(np.arctan2(np.sin(np.radians(x)).mean(),
+                                           np.cos(np.radians(x)).mean())))
+
+    def csd(x):
+        r = np.hypot(np.sin(np.radians(x)).mean(), np.cos(np.radians(x)).mean())
+        return float(np.degrees(np.sqrt(-2.0 * np.log(max(r, 1e-12)))))
+
     worst = 0.0
     for c in sorted(by_centre):
         ph = np.concatenate([x[0] for x in by_centre[c]])
         ps = np.concatenate([x[1] for x in by_centre[c]])
-        off = ph.mean() - c
+        mphi = cmean(ph)
+        off = (mphi - c + 180.0) % 360.0 - 180.0
         worst = max(worst, abs(off))
-        print(f"{c:13.1f} {len(by_centre[c]):4d} {ph.mean():15.1f} {off:+8.1f} "
-              f"{ph.std():8.1f} {ps.mean():8.1f} {ps.std():8.1f}")
+        print(f"{c:13.1f} {len(by_centre[c]):4d} {mphi:15.1f} {off:+8.1f} "
+              f"{csd(ph):8.1f} {cmean(ps):8.1f} {csd(ps):8.1f}")
     print(f"\nworst |offset| = {worst:.1f} deg")
     if worst > 10.0:
         print("  !! FAIL: windows are sliding off their centres -- kappa_phi is too soft.\n"
@@ -210,13 +222,20 @@ def main() -> None:
                     help="kJ/mol/rad^2 on psi. DEFAULT 0 = psi UNRESTRAINED, which is what "
                          "you want when the goal is to reproduce psi's natural conditional "
                          "spread. Clamping phi already prevents escape")
+    ap.add_argument("--source-discard-ps", type=float, default=20.0,
+                    help="equilibration dropped per discovery replica before seed selection; "
+                         "`collect.py --coords-only` does not apply its own --discard-ps")
+    ap.add_argument("--centres-npz", type=Path, default=None,
+                    help="npz with `centres` (n,2) in DEGREES, overriding the regular grid. "
+                         "Use when the discovered occupancy is irregular, so that no window "
+                         "restrains the molecule into a region it never visits.")
     ap.add_argument("--psi-centres", type=int, default=1,
                     help="only used when --kappa-psi > 0: psi centres tiling the region")
     ap.add_argument("--ps-per-case", type=float, default=200.0)
     ap.add_argument("--output-ps", type=float, default=0.5,
                     help="frame spacing. tau(phi,psi) inside alphaL is 0.20 ps, so 0.5 ps "
                          "is still near-independent at 5x less data than the usual 0.1 ps")
-    ap.add_argument("--topology")
+    ap.add_argument("--topology", type=Path)
     ap.add_argument("--mdp", type=Path,
                     default=REPO / "sampling/campaigns/production_298K_dt1fs.mdp")
     ap.add_argument("--gmx")
@@ -243,20 +262,59 @@ def main() -> None:
 
     m = get_mapping(a.mapping)
     p0, p1, s0, s1 = (float(x) for x in a.region.split(":"))
-    R = np.load(a.frames_npz)["R"].astype(np.float64)
+    # Frames come from the PER-CASE `cg_coords.npz`, which carry exact `time_ps`. The old path
+    # read the concatenated array and reconstructed the time as `(loc + 200) * 0.1`, i.e. an
+    # assumed 0.1 ps stride and 20 ps discard. `collect.py --coords-only` does NOT apply
+    # `--discard-ps` (that gates the force path only), so that reconstruction selected frames
+    # 20 ps away from the ones chosen -- the same defect that put ~500 kcal/mol into the
+    # stage-3 restraint at step 0 (job 1367521). Never reconstruct a frame time.
+    reps = sorted(p for p in a.discovery_campaign.glob("replica_*") if p.is_dir())
+    if not reps:
+        raise SystemExit(f"no replica_* under {a.discovery_campaign}")
+    Rs, prov = [], []
+    for ri, rp in enumerate(reps):
+        f = rp / "cg_coords.npz"
+        if not f.exists():
+            raise SystemExit(f"{f} missing -- run `collect.py --coords-only` on the campaign")
+        z = np.load(f)
+        t = z["time_ps"].astype(np.float64)
+        keep = t >= (t[0] + a.source_discard_ps)
+        Rs.append(z["R"].astype(np.float64)[keep])
+        prov += [(ri, float(tt)) for tt in t[keep]]
+    R = np.concatenate(Rs)
+    print(f"{len(reps)} discovery replicas, {len(R)} frames after dropping "
+          f"{a.source_discard_ps} ps each")
     cv = lambda n: wrap_deg(dihedral_deg(R, m.cvs[n].bead_indices) + m.cvs[n].shift_deg)
     phi, psi = cv("phi"), cv("psi")
     inreg = np.flatnonzero((phi > p0) & (phi < p1) & (psi > s0) & (psi < s1))
     if len(inreg) < a.n_replicas:
         raise SystemExit(f"only {len(inreg)} frames in region, need {a.n_replicas}")
     rng = np.random.default_rng(a.seed)
-    pick = inreg[_farthest_point(phi[inreg], psi[inreg], a.n_replicas, rng)]
-    print(f"{len(inreg)} frames in region -> {len(pick)} farthest-point seeds")
+    explicit = (np.load(a.centres_npz)["centres"].astype(np.float64)
+                if a.centres_npz is not None else None)
+    if explicit is not None:
+        # Seed AT the centres, not by farthest point. Farthest-point tiles the region
+        # uniformly, but explicit centres follow the discovered occupancy, so forcing a 1-1
+        # match between the two left |seed - centre| at mean 38 / max 118 deg -- ~15 kcal/mol
+        # in the restraint at step 0. Picking each centre's nearest distinct frame instead
+        # makes the umbrella start where it means to sample.
+        d_all = np.hypot((phi[inreg][:, None] - explicit[None, :, 0] + 180) % 360 - 180,
+                         (psi[inreg][:, None] - explicit[None, :, 1] + 180) % 360 - 180)
+        taken, sel = set(), []
+        for j in np.argsort(d_all.min(0)):                  # tightest centres claim first
+            for i in np.argsort(d_all[:, j]):
+                if int(i) not in taken:
+                    taken.add(int(i)); sel.append((int(j), int(i))); break
+        sel.sort()                                          # by centre index: pick[k] <-> centre k
+        pick = inreg[[i for _, i in sel]]
+        seed_window = np.arange(len(sel))
+        print(f"{len(inreg)} frames in region -> {len(pick)} seeds at the explicit centres")
+    else:
+        pick = inreg[_farthest_point(phi[inreg], psi[inreg], a.n_replicas, rng)]
+        print(f"{len(inreg)} frames in region -> {len(pick)} farthest-point seeds")
     print(f"  seed phi {phi[pick].min():.1f}..{phi[pick].max():.1f}, "
           f"psi {psi[pick].min():.1f}..{psi[pick].max():.1f}")
 
-    reps = sorted(p for p in a.discovery_campaign.glob("replica_*") if p.is_dir())
-    per = len(R) // len(reps)          # collected frames are replica-concatenated in order
     dt_fs = 1.0
     nsteps = int(a.ps_per_case * 1000 / dt_fs)
     nst_out = int(a.output_ps * 1000 / dt_fs)
@@ -286,6 +344,17 @@ def main() -> None:
         ss_grid = np.array([0.5 * (s0 + s1)])          # recorded only; no psi RESTRAINT emitted
     centres = [(float(c), float(s)) for c in cs for s in ss_grid]
 
+    # EXPLICIT CENTRES override the regular grid. A grid is right when the region is a filled
+    # box, but a DISCOVER stage returns an irregular occupancy: for the stage-1 flow+MetaD run
+    # only 61 of 144 30-deg cells carry 93% of the frames, and phi in [90,120] is empty. A
+    # 12x8 grid would spend ~40% of its windows restraining the molecule into vacuum, where the
+    # umbrella does no harvesting and only produces high-energy structures.
+    if explicit is not None:
+        centres = [(float(p), float(s)) for p, s in explicit]
+        cs = np.array([c[0] for c in centres])
+        ss_grid = np.array(sorted({c[1] for c in centres}))
+        print(f"explicit centres: {len(centres)} from {a.centres_npz}")
+
     # Overlap check: stiff windows are narrow, so a coarse grid leaves holes.
     sd_phi = np.degrees(np.sqrt(kT_kJ / a.kappa_phi))
     spacing = (cs[1] - cs[0]) if len(cs) > 1 else float(p1 - p0)
@@ -303,21 +372,30 @@ def main() -> None:
     # 48 deg mismatch is ~335 kJ/mol/rad) and wastes the equilibration window. Both seeds and
     # centres tile the same phi range, so rank-ordering both and pairing by rank is
     # near-optimal and keeps the windows exactly balanced.
-    order = np.argsort(phi[pick])
-    win_of_seed = np.empty(len(pick), dtype=int)
-    win_of_seed[order] = (np.arange(len(pick)) * len(centres)) // len(pick)
-    mism = np.abs(phi[pick] - np.array([centres[w][0] for w in win_of_seed]))
-    print(f"seed->window pairing: |phi_seed - phi_centre| mean {mism.mean():.1f} deg, "
-          f"max {mism.max():.1f} deg")
+    if explicit is not None:
+        # The seeds were SELECTED per centre above, so that assignment is already optimal --
+        # re-deriving it here (by rank order or by a fresh 1-1 matching) only throws it away.
+        win_of_seed = seed_window
+        C = np.array(centres)
+        mism = np.hypot((phi[pick] - C[win_of_seed, 0] + 180) % 360 - 180,
+                        (psi[pick] - C[win_of_seed, 1] + 180) % 360 - 180)
+        print(f"seed->window pairing (seeded at centres): |seed - centre| mean "
+              f"{mism.mean():.1f} deg, max {mism.max():.1f} deg")
+    else:
+        order = np.argsort(phi[pick])
+        win_of_seed = np.empty(len(pick), dtype=int)
+        win_of_seed[order] = (np.arange(len(pick)) * len(centres)) // len(pick)
+        mism = np.abs(phi[pick] - np.array([centres[w][0] for w in win_of_seed]))
+        print(f"seed->window pairing: |phi_seed - phi_centre| mean {mism.mean():.1f} deg, "
+              f"max {mism.max():.1f} deg")
 
     a.out.mkdir(parents=True, exist_ok=True)
     cases = []
     for i, fidx in enumerate(pick):
-        rep, loc = reps[int(fidx) // per], int(fidx) % per
+        ri, t_ps = prov[int(fidx)]
+        rep = reps[ri]
         d = a.out / f"case_{i:03d}"
         d.mkdir(parents=True, exist_ok=True)
-        # extract that AA frame; discovery frames were written every 0.1 ps after a 20 ps discard
-        t_ps = (loc + 200) * 0.1
         # GROMACS lives in the 2025 module stack and the venv in 2026; loading either
         # purges the other, so an absolute gmx path alone fails with rc=127. Same
         # bash -lc + module load wrapper collect.py uses.
@@ -351,7 +429,10 @@ def main() -> None:
             mdp_body + f"\ngen_vel                 = yes\ngen_temp                = 298\n"
                        f"gen_seed                = {a.seed + i}\ncontinuation            = no\n")
         rc = d / "run_case.sh"
-        rc.write_text(RUN_CASE.format(topology=a.topology, ntomp=a.ntomp, case=f"case_{i:03d}"))
+        # ABSOLUTE. Both launch modes cd into the case dir before grompp, so a relative
+        # topology resolves against the wrong cwd and grompp dies in 8 s with "does not exist".
+        rc.write_text(RUN_CASE.format(topology=str(a.topology.resolve()),
+                                      ntomp=a.ntomp, case=f"case_{i:03d}"))
         rc.chmod(0o755)
         cases.append({"case": d.name, "seed_frame": int(fidx), "replica": rep.name,
                       "phi": float(phi[fidx]), "psi": float(psi[fidx]),
@@ -366,6 +447,10 @@ def main() -> None:
         "psi_restrained": bool(a.kappa_psi > 0),
         "phi_window_sd_deg": float(sd_phi),
         "umbrella_centres": list(map(float, cs)),
+        # PAIRED (phi,psi). The two 1-D lists below are the outer product only when the
+        # centres came from the regular grid; explicit centres are scattered, and reading
+        # them back as a product loses which psi belongs to which phi.
+        "umbrella_centres_2d": [[float(p), float(s)] for p, s in centres],
         "umbrella_psi_centres": (list(map(float, ss_grid)) if a.kappa_psi > 0 else None),
         "ps_per_case": a.ps_per_case, "output_ps": a.output_ps, "dt_fs": dt_fs,
         "required_discard_ps": 20.0,
@@ -385,7 +470,7 @@ def main() -> None:
             script.write_text(multidir_group_script(
                 case_dirs=[f"case_{i:03d}" for i in members],
                 structure_for=["seed.gro"] * len(members),   # extracted per case at build time
-                topology=a.topology, ntomp=ntomp,
+                topology=str(a.topology.resolve()), ntomp=ntomp,
                 n_gpus=int(a.gpus_per_node), use_server=False))
             script.chmod(0o755)
         slurm.write_text(submit_script(campaign_dir=a.out, groups=groups,

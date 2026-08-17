@@ -47,7 +47,8 @@ class Evaluator:
         F_ref: jax.Array,
         mask: jax.Array,
         species: jax.Array,
-        neighbor: Optional[Any] = None
+        neighbor: Optional[Any] = None,
+        box: Optional[jax.Array] = None
     ) -> SingleFrameMetrics:
         """
         Evaluate model on a single frame.
@@ -72,13 +73,13 @@ class Evaluator:
         """
         # Compute energy components
         energy_components = self.model.compute_components(
-            self.params, R, mask, species, neighbor
+            self.params, R, mask, species, neighbor, box=box
         )
 
         # Compute forces via autodiff
         def energy_fn(R_):
             return self.model.compute_energy(
-                self.params, R_, mask, species, neighbor
+                self.params, R_, mask, species, neighbor, box=box
             )
 
         F_pred = -jax.grad(energy_fn)(R)
@@ -86,7 +87,7 @@ class Evaluator:
         # Compute force components if using priors
         if self.model.use_priors:
             force_components = self.model.compute_force_components(
-                self.params, R, mask, species
+                self.params, R, mask, species, box=box
             )
         else:
             force_components = {
@@ -122,7 +123,8 @@ class Evaluator:
         R_batch: jax.Array,
         F_batch: jax.Array,
         mask_batch: jax.Array,
-        species_batch: jax.Array
+        species_batch: jax.Array,
+        box_batch: Optional[jax.Array] = None
     ) -> BatchMetrics:
         """
         Evaluate model on a batch of frames.
@@ -144,8 +146,9 @@ class Evaluator:
         max_errors = []
 
         for i in range(n_frames):
+            frame_box = box_batch[i] if box_batch is not None else None
             result = self.evaluate_frame(
-                R_batch[i], F_batch[i], mask_batch[i], species_batch[i]
+                R_batch[i], F_batch[i], mask_batch[i], species_batch[i], box=frame_box
             )
             energies.append(result["energy"])
             force_rmses.append(result["force_rmse"])

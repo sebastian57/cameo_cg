@@ -328,3 +328,39 @@ class BiasBackendSelectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MetadWalkersTests(unittest.TestCase):
+    """Multiple walkers: N replicas share ONE growing bias instead of each filling from zero.
+
+    Without WALKERS_MPI a 64-replica discover run does 64x redundant filling and no replica
+    gets far, which defeats the whole wide-and-short strategy.
+    """
+
+    def _block(self, **kw):
+        from sampling.plumed_native import metad_block
+        base = dict(height=0.15, sigma=(0.15, 0.09), pace=500, bias_factor=8.0,
+                    temperature=298.0, equilibrate_steps=10000, dt_ps=0.001)
+        base.update(kw)
+        return metad_block(**base)
+
+    def test_walkers_mpi_absent_by_default(self):
+        self.assertNotIn("WALKERS_MPI", self._block())
+
+    def test_walkers_mpi_emitted_when_requested(self):
+        self.assertIn("WALKERS_MPI", self._block(walkers_mpi=True))
+
+    def test_no_walkers_dir_alongside_mpi(self):
+        """WALKERS_MPI shares hills over MPI; WALKERS_DIR is the file-based alternative and is
+        the only other compatible WALKERS_* option. Emitting both would be a contradiction."""
+        s = self._block(walkers_mpi=True)
+        self.assertNotIn("WALKERS_DIR", s)
+        self.assertNotIn("WALKERS_N", s)
+
+    def test_grid_is_still_emitted_with_walkers(self):
+        """Gridless METAD is O(N_hills) per step and grows without bound -- worst exactly in a
+        long discover run, which is what walkers are for."""
+        s = self._block(walkers_mpi=True, grid_min=(-3.5, -1.8), grid_max=(7.1, 1.8))
+        self.assertIn("GRID_MIN=", s)
+        self.assertIn("GRID_MAX=", s)
+        self.assertIn("CALC_RCT", s)

@@ -313,6 +313,7 @@ def attach_noised_residual_fields(
         F_sel = F_res_clean[dup_mask]
         mask_sel = mask[dup_mask]
         species_sel = species[dup_mask]
+        box_sel = np.asarray(split["box"][dup_mask], dtype=np.float32) if "box" in split else None
         n_sel = int(R_sel.shape[0])
 
         rng_l = np.random.RandomState(int(rng.randint(2**31)) + level_idx)
@@ -355,6 +356,7 @@ def attach_noised_residual_fields(
                 "F": F_stored,
                 "mask": mask_sel.copy(),
                 "species": species_sel.copy(),
+                **({"box": box_sel.copy()} if box_sel is not None else {}),
                 "force_loss_mask": np.asarray(
                     split.get("force_loss_mask", mask)[dup_mask], dtype=np.float32
                 ),
@@ -373,6 +375,7 @@ def attach_noised_residual_fields(
         "F": np.asarray(F_res_clean, dtype=np.float32),
         "mask": mask.copy(),
         "species": species.copy(),
+        **({"box": np.asarray(split["box"], dtype=np.float32)} if "box" in split else {}),
         "force_loss_mask": np.asarray(
             split.get("force_loss_mask", mask), dtype=np.float32
         ),
@@ -384,7 +387,10 @@ def attach_noised_residual_fields(
     all_blocks.insert(0, clean_block)
 
     merged: Dict[str, np.ndarray] = {}
-    for key in ("R", "F", "mask", "species", "force_loss_mask", "is_noised_frame", "noise_level_id"):
+    merge_keys = ["R", "F", "mask", "species", "force_loss_mask", "is_noised_frame", "noise_level_id"]
+    if "box" in clean_block:
+        merge_keys.append("box")
+    for key in merge_keys:
         merged[key] = np.concatenate([b[key] for b in all_blocks], axis=0)
     if "structure_ids" in clean_block:
         merged["structure_ids"] = np.concatenate([b["structure_ids"] for b in all_blocks], axis=0)

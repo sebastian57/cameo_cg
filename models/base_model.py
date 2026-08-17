@@ -96,6 +96,7 @@ class BaseMLModel(ABC):
         species: jax.Array,
         neighbor: Optional[Any] = None,
         segment_id: Optional[jax.Array] = None,
+        box: Optional[jax.Array] = None,
     ) -> jax.Array:
         """Compute scalar energy for coordinates *R*."""
         ...
@@ -108,11 +109,12 @@ class BaseMLModel(ABC):
         species: jax.Array,
         neighbor: Optional[Any] = None,
         segment_id: Optional[jax.Array] = None,
+        box: Optional[jax.Array] = None,
     ) -> Tuple[jax.Array, jax.Array]:
         """Compute energy and forces via ``-jax.grad(E)(R)``."""
         def energy_fn(R_):
             return self.compute_energy(
-                params, R_, mask, species, neighbor, segment_id=segment_id
+                params, R_, mask, species, neighbor, segment_id=segment_id, box=box
             )
         E = energy_fn(R)
         F = -jax.grad(energy_fn)(R)

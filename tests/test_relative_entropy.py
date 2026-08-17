@@ -914,6 +914,74 @@ class RelativeEntropyTrainerTests(unittest.TestCase):
         self.assertTrue(metrics["rejected"])
         np.testing.assert_allclose(trainer.params["ml"]["w"], jnp.array(2.0))
 
+class _BasinRecorder:
+    def __init__(self):
+        self.calls = []
+        self.finalized = 0
+
+    def should_record(self, step, *, final_step):
+        return step == 0 or step == final_step or step % 1 == 0
+
+    def record(self, params, **metadata):
+        self.calls.append(
+            {
+                **metadata,
+                "w": float(np.asarray(params["ml"]["w"])),
+            }
+        )
+
+    def finalize(self):
+        self.finalized += 1
+
+
+class RelativeEntropyBasinMonitorTests(unittest.TestCase):
+    def test_monitor_stride_records_off_stride_final(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trainer = RelativeEntropyResumeTests._make_trainer(tmpdir, iterations=5)
+            recorder = _BasinRecorder()
+            recorder.should_record = lambda step, *, final_step: (
+                step == 0 or step == final_step or step % 3 == 0
+            )
+            trainer.basin_energy_monitor = recorder
+            trainer.train()
+            self.assertEqual([row["step"] for row in recorder.calls], [0, 3, 5])
+
+
+    def test_monitor_records_initial_and_accepted_updated_params(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trainer = RelativeEntropyResumeTests._make_trainer(
+                tmpdir, iterations=1
+            )
+            recorder = _BasinRecorder()
+            trainer.basin_energy_monitor = recorder
+
+            trainer.train()
+
+            self.assertEqual([row["step"] for row in recorder.calls], [0, 1])
+            self.assertFalse(recorder.calls[1]["rejected"])
+            self.assertLess(recorder.calls[1]["w"], recorder.calls[0]["w"])
+            self.assertEqual(recorder.finalized, 1)
+
+    def test_monitor_marks_rejected_iteration_with_unchanged_params(self):
+        class UnstableSampler(_FakeSampler):
+            def run(self, R0, mask, species, rng_key):
+                out = super().run(R0, mask, species, rng_key)
+                out["diagnostics"]["has_nan_or_inf"] = True
+                return out
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trainer = RelativeEntropyResumeTests._make_trainer(
+                tmpdir, iterations=1
+            )
+            trainer.sampler = UnstableSampler()
+            recorder = _BasinRecorder()
+            trainer.basin_energy_monitor = recorder
+
+            trainer.train()
+
+            self.assertTrue(recorder.calls[1]["rejected"])
+            self.assertEqual(recorder.calls[1]["w"], recorder.calls[0]["w"])
+
 
 if __name__ == "__main__":
     unittest.main()

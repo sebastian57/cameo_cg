@@ -106,6 +106,7 @@ class MACEModel(BaseMLModel):
         species: jax.Array,
         neighbor: Optional[Any] = None,
         segment_id: Optional[jax.Array] = None,
+        box: Optional[jax.Array] = None,
     ) -> jax.Array:
         R_base = jnp.asarray(R, dtype=jnp.float32)
         mask_3d = mask[:, None]

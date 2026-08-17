@@ -76,6 +76,7 @@ def _make_export_model(
     id_to_aa,
     n_max: int,
     support_gate_bank=None,
+    box_min=None,
 ) -> CombinedModel:
     """Build the model variant that should be used for export/evaluation."""
     export_with_priors = config.export_combined_ml_priors_enabled()
@@ -107,6 +108,7 @@ def _make_export_model(
         config=export_config,
         R0=R0,
         box=box,
+        box_min=box_min,
         species=species0,
         N_max=n_max,
         id_to_aa=id_to_aa,
@@ -235,6 +237,18 @@ def _shuffle_dataset_for_split(dataset: dict, seed: int) -> dict:
 
 def _validate_tiled_mode_constraints(config: ConfigManager) -> None:
     """Validate currently supported constraints for tiled training mode."""
+    if config.dynamic_box_enabled():
+        if config.get_batch_mode() != "standard":
+            raise ValueError(
+                "data.dynamic_box=true currently requires data.batch_mode='standard'; "
+                "a packed tile cannot represent multiple independent frame boxes."
+            )
+        if config.get_static_neighbors_config()["enabled"]:
+            raise ValueError("data.dynamic_box=true is incompatible with static neighbor graphs.")
+        if not str(config.get_ml_model_type()).lower().startswith("allegro"):
+            raise ValueError("data.dynamic_box=true currently supports Allegro backends only.")
+        if safety_enabled(config):
+            raise ValueError("data.dynamic_box=true is incompatible with safety-frame mixing unless safety frames carry boxes.")
     if config.get_batch_mode() != "tiled":
         return
     if config.use_priors():
@@ -488,7 +502,12 @@ def _wrap_into_box(R: np.ndarray, box: np.ndarray) -> np.ndarray:
     dimension i.  Does not alter padded atom coordinates — callers should
     handle those via the mask as usual.
     """
-    return np.mod(R, box[None, None, :]).astype(np.float32)
+    box = np.asarray(box, dtype=np.float32)
+    if box.ndim == 1:
+        return np.mod(R, box[None, None, :]).astype(np.float32)
+    if box.ndim == 2 and box.shape[0] == R.shape[0] and box.shape[1] == 3:
+        return np.mod(R, box[:, None, :]).astype(np.float32)
+    raise ValueError(f"box must have shape (3,) or (n_frames, 3), got {box.shape}")
 
 
 def _estimate_avg_num_neighbors_pbc(
@@ -686,6 +705,7 @@ def _build_loader_kwargs(split: dict) -> dict:
             "R",
             "F",
             "mask",
+            "box",
             "species",
             "segment_id",
             "force_loss_mask",
@@ -772,6 +792,8 @@ def _build_validation_split(dataset: dict, start: int, stop: int) -> dict:
             else np.zeros_like(mask_slice, dtype=np.int32)
         ),
     }
+    if "box" in dataset:
+        val_split["box"] = np.asarray(dataset["box"][start:stop], dtype=np.float32)
     _copy_hvp_fields_from_dataset(val_split, dataset, start, stop)
     _copy_teacher_distillation_fields(val_split, dataset, start, stop)
     sample_ids = np.arange(start, stop, dtype=np.int32)
@@ -867,6 +889,8 @@ def _build_tiled_train_source(dataset: dict, n_train: int) -> dict:
         ),
         "structure_ids": np.arange(n_train, dtype=np.int32),
     }
+    if "box" in dataset:
+        train_source["box"] = np.asarray(dataset["box"][:n_train], dtype=np.float32)
     _copy_hvp_fields_from_dataset(train_source, dataset, 0, n_train)
     _copy_teacher_distillation_fields(train_source, dataset, 0, n_train)
     return train_source
@@ -1207,7 +1231,7 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
 
     max_frames = config.get_max_frames()
     seed = config.get_seed()
-    loader = DatasetLoader(str(data_path_obj), max_frames=max_frames, seed=seed)
+    loader = DatasetLoader(str(data_path_obj), max_frames=max_frames, seed=seed, dynamic_box=config.dynamic_box_enabled())
 
     N_max = loader.N_max
     species0 = loader.species[0]
@@ -1232,9 +1256,20 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
                 "model.pbc=true requires a 'box' array in the NPZ dataset "
                 "(keys tried: 'box', 'cell', 'lattice'). None found."
             )
-        box = jnp.asarray(loader.box, dtype=jnp.float32)
-        dataset["R"] = _wrap_into_box(dataset["R"], np.asarray(box))
-        data_logger.info(f"[PBC] Using dataset box: {jax.device_get(box)}")
+        if config.dynamic_box_enabled():
+            if loader.box_per_frame is None:
+                raise ValueError("data.dynamic_box=true requires frame-aligned boxes")
+            frame_boxes = np.asarray(loader.box_per_frame, dtype=np.float32)
+            box = jnp.asarray(np.max(frame_boxes, axis=0), dtype=jnp.float32)
+            box_min = np.min(frame_boxes, axis=0).astype(np.float32)
+            dataset["box"] = frame_boxes
+            dataset["R"] = _wrap_into_box(dataset["R"], frame_boxes)
+            data_logger.info("[PBC] Dynamic frame boxes enabled: min=%s max=%s", box_min, np.asarray(box))
+        else:
+            box = jnp.asarray(loader.box, dtype=jnp.float32)
+            box_min = None
+            dataset["R"] = _wrap_into_box(dataset["R"], np.asarray(box))
+            data_logger.info(f"[PBC] Using dataset box: {jax.device_get(box)}")
     else:
         preprocessor = CoordinatePreprocessor(
             cutoff=cutoff,
@@ -1244,6 +1279,7 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         extent, R_shift = preprocessor.compute_box_extent(loader.R, loader.mask)
         dataset["R"] = preprocessor.center_and_park(dataset["R"], dataset["mask"], extent, R_shift)
         box = extent
+        box_min = None
         data_logger.info(f"[Preprocessing] Computed box: {jax.device_get(box)}")
         data_logger.info(f"[Preprocessing] R_shift: {jax.device_get(R_shift)}")
 
@@ -1421,6 +1457,7 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         config=config,
         R0=R0,
         box=box,
+        box_min=box_min,
         species=species0,
         N_max=N_max,
         init_mask=init_mask0,
@@ -1586,6 +1623,7 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
             id_to_aa=loader.id_to_aa,
             n_max=model.N_max,
             support_gate_bank=support_gate_bank,
+            box_min=box_min,
         )
         exporter = ModelExporter.from_combined_model(
             model=export_model,
@@ -1699,7 +1737,7 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
     training_logger.info(f"[Config] Saved to: {config_path}")
 
     bucketed = BucketedDatasetLoader(bucket_dir, max_frames=config.get_max_frames(),
-                                     seed=config.get_seed())
+                                     seed=config.get_seed(), dynamic_box=config.dynamic_box_enabled())
     training_logger.info(bucketed.summary())
     global_n_species = max(int(np.max(dl.species)) + 1 for _, dl in bucketed.buckets)
     training_logger.info(f"Global species cardinality across buckets: {global_n_species}")
@@ -1731,15 +1769,25 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
                     f"model.pbc=true requires a 'box' array in bucket "
                     f"'{loader.npz_path.name}'. None found."
                 )
-            box = jnp.asarray(loader.box, dtype=jnp.float32)
-            dataset["R"] = _wrap_into_box(dataset["R"], np.asarray(box))
-            data_logger.info(f"[PBC][Bucket {bucket_idx}] Using dataset box: {jax.device_get(box)}")
+            if config.dynamic_box_enabled():
+                frame_boxes = np.asarray(loader.box_per_frame, dtype=np.float32)
+                box = jnp.asarray(np.max(frame_boxes, axis=0), dtype=jnp.float32)
+                box_min = np.min(frame_boxes, axis=0).astype(np.float32)
+                dataset["box"] = frame_boxes
+                dataset["R"] = _wrap_into_box(dataset["R"], frame_boxes)
+                data_logger.info("[PBC][Bucket %d] Dynamic boxes: min=%s max=%s", bucket_idx, box_min, np.asarray(box))
+            else:
+                box = jnp.asarray(loader.box, dtype=jnp.float32)
+                box_min = None
+                dataset["R"] = _wrap_into_box(dataset["R"], np.asarray(box))
+                data_logger.info(f"[PBC][Bucket {bucket_idx}] Using dataset box: {jax.device_get(box)}")
         else:
             extent, R_shift = preprocessor.compute_box_extent(loader.R, loader.mask)
             dataset["R"] = preprocessor.center_and_park(
                 dataset["R"], dataset["mask"], extent, R_shift
             )
             box = extent
+            box_min = None
 
         if config.pretrain_prior_enabled() and config.prior_residual_enabled():
             training_logger.warning(
@@ -1823,7 +1871,7 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
             model_n_max = int(n_max)
 
         model = CombinedModel(
-            config=config, R0=R0, box=box, species=species0, N_max=model_n_max,
+            config=config, R0=R0, box=box, box_min=box_min, species=species0, N_max=model_n_max,
             init_mask=init_mask0,
             n_species_override=global_n_species,
             id_to_aa=loader.id_to_aa,
@@ -1919,6 +1967,7 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
             id_to_aa=loader.id_to_aa,
             n_max=final_n_max,
             support_gate_bank=final_support_gate_bank,
+            box_min=box_min,
         )
         exporter = ModelExporter.from_combined_model(
             model=export_model, params=prev_params,
