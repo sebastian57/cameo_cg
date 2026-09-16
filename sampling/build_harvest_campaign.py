@@ -466,7 +466,7 @@ def main() -> None:
         groups = group_ranges(len(cases), int(a.replicas_per_job))
         ntomp = cpus_per_rank(max(len(g) for g in groups))
         for gi, members in enumerate(groups):
-            script = a.out / f"run_group_{gi:03d}.sh"
+            script = a.out / f"run_group_{gi:04d}.sh"
             script.write_text(multidir_group_script(
                 case_dirs=[f"case_{i:03d}" for i in members],
                 structure_for=["seed.gro"] * len(members),   # extracted per case at build time

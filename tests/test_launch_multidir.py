@@ -6,6 +6,7 @@ GROMACS needs a node, so throughput is measured separately.
 """
 from __future__ import annotations
 
+import os
 import re
 import tempfile
 import unittest
@@ -85,6 +86,13 @@ class GroupScriptTests(unittest.TestCase):
             self.assertLess(grompp.start(), first_mdrun,
                             "-multidir needs every .tpr built before mdrun starts")
 
+    def test_grompp_failures_are_propagated_after_parallel_wait(self):
+        script = self._script()
+        self.assertIn('grompp_pids=()', script)
+        self.assertIn('grompp_pids+=($!)', script)
+        self.assertIn('for p in "' + chr(36) + '{grompp_pids[@]}"; do wait "$p" || grompp_fail=1; done', script)
+        self.assertIn('echo "a grompp failed"', script)
+
     def test_bias_free_rerun_is_present_and_carries_no_plumed(self):
         """The rerun produces the training labels; a -plumed there would poison them."""
         script = self._script()
@@ -149,6 +157,52 @@ class SubmitScriptTests(unittest.TestCase):
             text = submit_script(campaign_dir=Path(tmp), groups=group_ranges(96, 8),
                                  job_name="x")
         self.assertIn("--array=0-11", text)   # 12 groups, not 96 replicas
+
+    def test_array_concurrency_limit_is_embedded_in_the_directive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            text = submit_script(campaign_dir=Path(tmp), groups=group_ranges(50_048, 64),
+                                 job_name="x", groups_per_task=8,
+                                 max_concurrent_tasks=6)
+        self.assertIn("#SBATCH --array=0-97%6", text)  # 782 groups, 8 tasks/group
+        self.assertNotIn("#SBATCH --array=0-781", text)
+
+
+class V51SetupTests(unittest.TestCase):
+    def test_defaults_keep_campaign_and_labels_on_project_filesystem(self):
+        from scripts.setup_v51_reference_md_campaign import (
+            DEFAULT_CAMPAIGN_ROOT,
+            DEFAULT_LABELS_ROOT,
+        )
+
+        self.assertEqual(DEFAULT_CAMPAIGN_ROOT,
+                         Path("/e/project1/cameo/schmidt36/cameo_cg/local_work/v51_campaigns"))
+        self.assertEqual(DEFAULT_LABELS_ROOT,
+                         Path("/e/project1/cameo/schmidt36/cameo_cg/local_work/v51_labels"))
+
+    def test_collector_block_reloads_python_runtime_after_gromacs(self):
+        from scripts.setup_v51_reference_md_campaign import render_collector_block
+
+        block = render_collector_block(Path("/campaign"), Path("/labels/shard.npz"), 0, 64)
+        self.assertIn("source \"/e/project1/cameo/schmidt36/cameo_cg/env_setup/load_modules_2026.sh\"", block)
+        self.assertIn("source \"/e/project1/cameo/schmidt36/venv_cameocg_jupiter2026/bin/activate\"", block)
+        self.assertIn("python -m sampling.collect_meanforce", block)
+        self.assertIn("(\ncd \"/e/project1/cameo/schmidt36/cameo_cg\"", block)
+
+    def test_v51_group_builder_resolves_relative_campaign_paths(self):
+        from scripts.setup_v51_reference_md_campaign import make_group_scripts
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as tmp:
+            campaign = Path(tmp) / "campaign"
+            campaign.mkdir()
+            relative_campaign = Path(os.path.relpath(campaign, Path.cwd()))
+            labels = Path(tmp) / "labels"
+            make_group_scripts(relative_campaign, labels, 2, Path("/tmp/topol.top"))
+            script = (campaign / "run_group_0000.sh").read_text()
+            submit = (campaign / "submit.slurm").read_text()
+
+        self.assertIn(f'grompp_one "{campaign.resolve()}/state_000000"', script)
+        self.assertIn(f'--campaign "{campaign.resolve()}"', script)
+        self.assertIn('export TMPDIR=/e/project1/cameo/schmidt36/cameo_cg/local_work/tmp', submit)
 
 
 class TopologyTests(unittest.TestCase):

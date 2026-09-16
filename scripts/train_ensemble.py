@@ -113,7 +113,7 @@ from data.preprocessor import CoordinatePreprocessor
 from models.combined_model import CombinedModel
 from training.trainer import Trainer
 from export.exporter import ModelExporter
-from analysis_tests.visualizer import LossPlotter
+from analysis.evaluation.visualizer import LossPlotter
 from utils.logging import data_logger, model_logger, training_logger, export_logger
 import logging
 

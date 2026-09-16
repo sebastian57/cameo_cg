@@ -31,6 +31,7 @@ from data.preprocessor import CoordinatePreprocessor
 from data_prep.noise_decoy_frames import add_noised_decoy_frames
 from models.combined_model import CombinedModel
 from training.prior_residual import apply_prior_force_residual_targets, pretrain_prior_for_residual
+from training import label_uncertainty as _label_unc
 from training.trainer import Trainer
 from training.dsm import add_dsm_noise_fields, dsm_enabled
 from training.safety_regularization import (
@@ -55,7 +56,7 @@ from training.support_gate import (
 from training.diagnostics import find_training_log, write_dataset_summary
 from training.path_utils import repo_root_from_file, resolve_from_config_or_repo
 from export.exporter import ModelExporter
-from analysis_tests.visualizer import LossPlotter
+from analysis.evaluation.visualizer import LossPlotter
 from utils.logging import data_logger, model_logger, training_logger, export_logger
 import logging
 
@@ -672,8 +673,41 @@ def _hvp_extra_per_atom_fields(split: dict) -> dict:
     }
 
 
-def _attach_batch_metadata(split: dict, sample_ids: np.ndarray) -> dict:
-    """Attach uniform profiling metadata to a training split."""
+def _label_uncertainty_extra_fields(split: dict) -> dict:
+    """Per-atom `sigma_label` so tiled packing preserves it.
+
+    Tiling packs ~170 structures into one 1024-bead tile and keeps only per-atom
+    fields, so a per-FRAME uncertainty is silently dropped (job 1503228). Expand
+    it to per-atom and hand it to `build_tiled_dataset(extra_per_atom_fields=...)`,
+    the same route the HVP fields use.
+    """
+    cfg = _label_unc.active()
+    if not _label_unc.is_enabled(cfg):
+        return {}
+    key = str(cfg.get("key", "sigma_label"))
+    if key not in split:
+        training_logger.error(
+            "[Train] label_uncertainty: '%s' MISSING from the pre-tiling split "
+            "(keys: %s). It must be copied in _build_tiled_train_source.",
+            key, sorted(split))
+        return {}
+    training_logger.info("[Train] label_uncertainty: carrying '%s' through tiling "
+                         "(%d structures)", key, np.asarray(split[key]).shape[0])
+    v = np.asarray(split[key], dtype=np.float32)
+    if v.ndim == 1:
+        v = np.repeat(v[:, None], np.asarray(split["mask"]).shape[1], axis=1)
+    return {key: v}
+
+
+def _attach_batch_metadata(split: dict, sample_ids: np.ndarray,
+                           apply_label_weighting: bool = False) -> dict:
+    """Attach uniform profiling metadata to a training split.
+
+    `apply_label_weighting` is set only on TRAINING splits. Validation stays
+    unweighted on purpose: `best_params` is `argmin(val_loss)`, so weighting the
+    validation loss would change the model-selection criterion AND make val_loss
+    incomparable between a weighted and an unweighted arm.
+    """
     annotated = dict(split)
     sample_ids = np.asarray(sample_ids, dtype=np.int32)
     n_items = int(sample_ids.shape[0])
@@ -682,6 +716,13 @@ def _attach_batch_metadata(split: dict, sample_ids: np.ndarray) -> dict:
 
     annotated.setdefault("force_loss_mask", np.asarray(annotated["mask"], dtype=np.float32))
     annotated.setdefault("force_loss_weights", _compute_force_loss_weights(annotated))
+    # Optional heteroscedastic weighting: modulate the weights just built by the
+    # per-label uncertainty carried in the dataset. Off unless configured; the
+    # loss path itself is unchanged (this only feeds the existing hook).
+    _lu = _label_unc.active()
+    if apply_label_weighting and _label_unc.is_enabled(_lu):
+        _base = np.asarray(annotated["force_loss_weights"], dtype=np.float32)
+        annotated["force_loss_weights"] = _label_unc.build_weights(annotated, _lu, _base)
     annotated.setdefault("n_valid", n_valid)
     annotated.setdefault("n_segments", np.ones((n_items,), dtype=np.int32))
     annotated.setdefault("meta_batch_item_id", sample_ids)
@@ -893,7 +934,24 @@ def _build_tiled_train_source(dataset: dict, n_train: int) -> dict:
         train_source["box"] = np.asarray(dataset["box"][:n_train], dtype=np.float32)
     _copy_hvp_fields_from_dataset(train_source, dataset, 0, n_train)
     _copy_teacher_distillation_fields(train_source, dataset, 0, n_train)
+    _copy_label_uncertainty_from_dataset(train_source, dataset, 0, n_train)
     return train_source
+
+
+def _copy_label_uncertainty_from_dataset(target: dict, dataset: dict,
+                                        start: int, stop: int) -> None:
+    """Carry the per-label uncertainty into an untiled split.
+
+    The split builders construct a FRESH dict with a fixed key set, so any
+    dataset field not copied here is silently gone before tiling (job 1503311).
+    Mirrors _copy_hvp_fields_from_dataset.
+    """
+    cfg = _label_unc.active()
+    if not _label_unc.is_enabled(cfg):
+        return
+    key = str(cfg.get("key", "sigma_label"))
+    if key in dataset:
+        target[key] = np.asarray(dataset[key][start:stop], dtype=np.float32)
 
 
 def _log_train_split_profile(train_split: dict, config: ConfigManager) -> None:
@@ -1017,11 +1075,13 @@ def _build_tiled_split_from_source(
         spatial_layout=config.get_tile_spatial_layout(),
         structure_gap=config.get_tile_structure_gap(),
         seed=seed,
-        extra_per_atom_fields=_hvp_extra_per_atom_fields(train_source),
+        extra_per_atom_fields={**_hvp_extra_per_atom_fields(train_source),
+                               **_label_uncertainty_extra_fields(train_source)},
         static_neighbors=config.get_static_neighbors_config(),
     )
     t_tile_build_end = time.perf_counter()
-    tiled = _attach_batch_metadata(tiled, np.arange(tiled["R"].shape[0], dtype=np.int32))
+    tiled = _attach_batch_metadata(tiled, np.arange(tiled["R"].shape[0], dtype=np.int32),
+                                   apply_label_weighting=True)
     t_tile_meta_end = time.perf_counter()
 
     if _WORLD_SIZE > 1:
@@ -1071,6 +1131,24 @@ def _build_tiled_split_from_source(
     )
     _log_train_split_profile(tiled, config)
     return tiled
+
+
+def _same_model_init_on_all_ranks(box, R0, species0, init_mask0):
+    """Multi-host SPMD needs the same compiled program on every process. The cell-list box and the
+    neighbour-buffer capacity (from R0) are derived from each rank's own tile shard, so 2-node runs
+    diverged and deadlocked at the first collective (BUGS/2026-09-07_multinode-training-never-reaches-epoch-1_open.md).
+    Use the elementwise-max box over ranks and rank 0's initial tile everywhere; no-op on one process."""
+    if jax.process_count() == 1:
+        return box, R0, species0, init_mask0
+    from jax.experimental import multihost_utils
+
+    if box is not None:
+        box = jnp.asarray(np.asarray(multihost_utils.process_allgather(np.asarray(box, np.float32))).max(axis=0))
+    R0, species0, init_mask0 = multihost_utils.broadcast_one_to_all(
+        (np.asarray(R0), np.asarray(species0), np.asarray(init_mask0))
+    )
+    logging.info("[Distributed] model init synchronised across ranks: box=%s", np.asarray(box) if box is not None else None)
+    return box, R0, species0, init_mask0
 
 
 def _cell_list_box_for_tiled_split(
@@ -1138,7 +1216,8 @@ def _build_train_split(
     """Build the training split and optionally tile it."""
     train_split = _build_tiled_train_source(dataset, n_train)
     if config.get_batch_mode() != "tiled":
-        train_split = _attach_batch_metadata(train_split, train_split["structure_ids"])
+        train_split = _attach_batch_metadata(train_split, train_split["structure_ids"],
+                                             apply_label_weighting=True)
         _log_train_split_profile(train_split, config)
         return train_split
 
@@ -1162,6 +1241,9 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     apply_numpy_dataloader_patch()
 
     config = ConfigManager(config_file)
+    _lu_cfg = _label_unc.configure(_label_unc.config_from(config))
+    if _label_unc.is_enabled(_lu_cfg):
+        training_logger.info("[Train] label_uncertainty ENABLED: %s", _lu_cfg)
     _validate_tiled_mode_constraints(config)
     _validate_prior_residual_mode_constraints(config)
     _validate_safety_regularization_constraints(config)
@@ -1329,7 +1411,7 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     logging.info("PREPARING TRAINING")
     logging.info("=" * 60)
 
-    split_seed = int(config.get_seed())
+    split_seed = int(config.get_split_seed())
     dataset, crossfit_n_train = apply_crossfit_split(config, dataset)
     if crossfit_n_train is None:
         dataset = _shuffle_dataset_for_split(dataset, seed=split_seed)
@@ -1452,6 +1534,7 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         species0 = loader.species[0]
         init_mask0 = dataset["mask"][0]
         N_max = int(loader.N_max)
+    box, R0, species0, init_mask0 = _same_model_init_on_all_ranks(box, R0, species0, init_mask0)
 
     model = CombinedModel(
         config=config,
@@ -1810,7 +1893,7 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
         )
         dataset = apply_force_label_mode(config, dataset)
 
-        split_seed = int(config.get_seed()) + int(bucket_idx)
+        split_seed = int(config.get_split_seed()) + int(bucket_idx)
         dataset = _shuffle_dataset_for_split(dataset, seed=split_seed)
 
         val_fraction = config.get_val_fraction()

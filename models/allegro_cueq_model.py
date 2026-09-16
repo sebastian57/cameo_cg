@@ -467,7 +467,17 @@ class AllegroModelCuEq(BaseMLModel):
                     ",".join(self.edge_distance_gate_bank.ala2_combined_components),
                 )
 
-        if ml_model_type == "allegro_cueq_fast":
+        self._uses_clean_backend = (
+            ml_model_type == "allegro_cueq_fast"
+            and self.output_mode == "energy"
+            and not self.edge_distance_gate_enabled
+        )
+        if self._uses_clean_backend:
+            from .allegro_cueq_fast_clean import (
+                allegro_neighborlist_pp,  # lazy cuequivariance import
+            )
+            model_logger.info("  backend         = allegro_cueq_fast_clean")
+        elif ml_model_type == "allegro_cueq_fast":
             from .allegro_cueq_fast_1103 import (
                 allegro_neighborlist_pp,  # lazy cuequivariance import
             )
@@ -522,7 +532,11 @@ class AllegroModelCuEq(BaseMLModel):
             )
         else:
             self.apply_allegro_per_atom = None
-        if ml_model_type == "allegro_cueq_fast" and self.output_mode == "energy":
+        if (
+            ml_model_type == "allegro_cueq_fast"
+            and self.output_mode == "energy"
+            and not self._uses_clean_backend
+        ):
             _, self.apply_allegro_al_features = allegro_neighborlist_pp(
                 displacement=self.displacement,
                 r_cutoff=self.cutoff,

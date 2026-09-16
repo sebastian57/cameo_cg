@@ -31,7 +31,7 @@ fi
 SCRIPT_DIR="${PROJECT_ROOT}/scripts"
 
 # Validate root so we never silently run from the wrong repo.
-if [[ ! -f "${SCRIPT_DIR}/slurm_env.sh" || ! -f "${PROJECT_ROOT}/analysis_tests/analyze_suite.py" ]]; then
+if [[ ! -f "${SCRIPT_DIR}/slurm_env.sh" || ! -f "${PROJECT_ROOT}/analysis/evaluation/analyze_suite.py" ]]; then
     echo "ERROR: PROJECT_ROOT is not a valid cameo_cg checkout: ${PROJECT_ROOT}" >&2
     echo "       Submit from cameo_cg root or set CAMEO_CG_PROJECT_ROOT explicitly." >&2
     exit 1
@@ -134,7 +134,7 @@ echo "Output dir:   ${ANALYSIS_DIR}"
 echo "Extra args:   ${EXTRA_ARGS[*]:-none}"
 echo "============================================================"
 
-"${PYTHON_BIN}" -u "${PROJECT_ROOT}/analysis_tests/analyze_suite.py" \
+"${PYTHON_BIN}" -u -m analysis.evaluation.analyze_suite \
     "${INPUT_DIR}" \
     --analysis-dir "${ANALYSIS_DIR}" \
     --devices-per-run 1 \

@@ -192,20 +192,36 @@ sbatch scripts/run_analysis.sh --input-dir local_work/outputs/RUN \
   --detailed-batch-size 8 --complete-eval-batch-size 4
 
 # Direct force check
-python analysis_tests/evaluate_forces.py PARAMS.pkl CONFIG.yaml --frames 50
+python -m analysis.evaluation.evaluate_forces PARAMS.pkl CONFIG.yaml --frames 50
 
 # Direct suite analysis in an allocated environment
-python analysis_tests/analyze_suite.py local_work/outputs/RUN \
+python -m analysis.evaluation.analyze_suite local_work/outputs/RUN \
   --detailed-force-eval
 ```
 
 Equivalence and regression diagnostics:
 
 ```bash
-python analysis_tests/check_tiled_equivalence.py --help
-python analysis_tests/check_static_neighbor_equivalence.py --help
-python analysis_tests/check_prior_residual_equivalence.py --help
+python tests/analysis/check_tiled_equivalence.py --help
+python tests/analysis/check_static_neighbor_equivalence.py --help
+python tests/analysis/check_prior_residual_equivalence.py --help
 python -m pytest -q tests
+
+# Canonical MD and sampling analysis (all inputs/outputs are explicit)
+python -m analysis.md.analyze_traj --help
+python -m analysis.md.projected_force_analysis --help
+python -m analysis.sampling.analyze_meanforce_dataset --help
+python -m analysis.sampling.error_map --help
+
+# Canonical latent diagnostics
+python -m analysis.latent.diagnosis --help
+python -m analysis.latent.sharpness --help
+python -m analysis.latent.ridge_identity --help
+
+# Canonical reference FES and stencil physics diagnostics
+python -m analysis.reference_fes.analyze_trajectory --help
+python -m analysis.physics.hessian_spectrum --help
+python -m analysis.physics.curvature_map --help
 ```
 
 ## MLIR export

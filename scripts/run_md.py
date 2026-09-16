@@ -52,6 +52,7 @@ from data.loader import DatasetLoader
 from data.preprocessor import CoordinatePreprocessor
 from models.combined_model import CombinedModel
 from md.runner import MDRunner
+from md.runner_vmap import BatchedMDRunner
 from md.bias import BiasedEnergyModel, build_bias
 from md.units import to_akma
 from md.dump import write_lammps_dump
@@ -483,6 +484,31 @@ def main(config_file: str, job_id: str = None, replica_idx: int = None) -> None:
         f"Replicas: running {len(replicas_to_run)} of {n_replicas}  "
         f"(base_seed={base_seed}, indices={replicas_to_run})"
     )
+
+    # ------------------------------------------------------------------
+    # 6b. Batched route: vmap over replicas, scan over steps.
+    #     One process, one compile, one dispatch stream for ALL replicas.
+    #     Measured 11.3x more force-evals/s at R=64 than the per-process route.
+    # ------------------------------------------------------------------
+    if bool(md_cfg.get("batched", False)):
+        if replica_idx is not None:
+            raise ValueError(
+                "batched: true runs every replica in one process; drop --replica "
+                "(and use one task per job, not a SLURM array).")
+        if sampling_bias is not None:
+            md_logger.warning(
+                "Batched route: bias IS active in the dynamics (model is wrapped), "
+                "but per-frame bias_cv_deg/bias_energy/PE_ml columns are NOT written.")
+        brunner = BatchedMDRunner(model, params, md_cfg)
+        res = brunner.run(
+            R0=(R0_frames[0] if len(frame_indices) == 1 else np.asarray(R0_frames)),
+            mask=mask_frames[0], species=species_frames[0],
+            base_seed=base_seed, n_replicas=n_replicas,
+            out_stem=base_output_path, frame_indices=frame_indices,
+        )
+        md_logger.info(f"Batched MD wrote {len(res['files'])} files, "
+                       f"{res['n_frames']} frames each.")
+        return
 
     # ------------------------------------------------------------------
     # 7. Build MDRunner once — JIT is compiled on the first replica and

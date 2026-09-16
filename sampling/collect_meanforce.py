@@ -43,6 +43,41 @@ import numpy as np
 KJ_NM_TO_KCAL_A = 1.0 / 41.84
 
 
+_TRAJECTORY_ARTIFACTS = (
+    "unbiased_forces.trr", "biased.trr", "unbiased_forces.xtc", "biased.xtc",
+    "whole.trr", "whole.xtc", "aa_coords.xvg", "aa_forces.xvg",
+)
+
+
+def cleanup_state_trajectories(state_dir: Path) -> int:
+    """Remove collector-consumed trajectories from one accepted state safely.
+
+    Only known artifacts directly below ``state_dir`` are considered.  Symlinks are
+    validated against the state directory before anything is removed; this prevents a
+    malformed ``unbiased_forces.trr`` link from deleting data elsewhere.  The returned
+    byte count counts each underlying file once, so the usual unbiased symlink is not
+    double-counted.
+    """
+    root = Path(state_dir).resolve()
+    if not root.is_dir():
+        raise ValueError(f"state directory does not exist: {state_dir}")
+    paths = [root / name for name in _TRAJECTORY_ARTIFACTS
+             if (root / name).is_symlink() or (root / name).exists()]
+    resolved = []
+    for path in paths:
+        target = path.resolve(strict=False)
+        try:
+            target.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"refusing trajectory outside state directory: {path}") from exc
+        if target not in resolved:
+            resolved.append(target)
+    removed_bytes = sum(target.stat().st_size for target in resolved if target.exists())
+    for path in paths:
+        path.unlink()
+    return int(removed_bytes)
+
+
 def integrated_act(x: np.ndarray, c_max: int = 200) -> float:
     """Integrated autocorrelation time in frames, via the initial-positive-sequence rule.
 
@@ -152,10 +187,23 @@ def main() -> None:
     ap.add_argument("--state-stop", type=int, default=None)
     ap.add_argument("--jobs", type=int, default=1,
                     help="parallel worker processes over states")
+    ap.add_argument("--cleanup", action="store_true",
+                    help="after validating labels, remove accepted state trajectories only")
     ap.add_argument("--max-drift", type=float, default=0.5,
                     help="reject a state whose mean bead position sits further than this "
                          "(Angstrom) from its restraint target -- the restraint did not hold")
     a = ap.parse_args()
+    if a.jobs > 1:
+        # `--jobs` was DECLARED BUT NEVER USED. A job sized on the assumption that it worked
+        # ran ~0.4 s/state x 213,568 states serially and was killed at its 2 h walltime having
+        # done ~8%. A flag that silently does nothing is worse than no flag.
+        # Shard instead -- --state-start/--state-stop slice POSITIONALLY and merge cleanly:
+        #   64 shards, 8 concurrent per node x 8 nodes -> 213,568 states in ~9 min.
+        # See BUGS/2026-08-18_serial-login-node-metadata-walk_solved.md.
+        raise SystemExit(
+            "--jobs is not implemented (this tool is serial). Shard with "
+            "--state-start/--state-stop across SLURM array tasks and merge the npz files; "
+            "see /e/scratch/cameo/schmidt36/claude-tmp/collect_shard.slurm for a template.")
 
     # Reuse collect.py's readers verbatim. NOT mdtraj: it exposes no TRR force block
     # (`Trajectory` has no `.forces` at all), and `W` is (n_beads, 22) -- the solute only --
@@ -287,6 +335,20 @@ def main() -> None:
                         SE=SE_out.astype(np.float32), n_eff=NEFF_out.astype(np.float32),
                         drift=DRIFT_out.astype(np.float32), sd=SD_out.astype(np.float32),
                         state=np.asarray(keep, np.int32))
+    # Verify the shard can be reopened and has exactly the rows selected above before any
+    # trajectory is removed.  Rejected and unprocessed states are deliberately untouched.
+    with np.load(out) as check:
+        if not np.array_equal(check["state"], np.asarray(keep, np.int32)):
+            raise RuntimeError("label shard verification failed before cleanup")
+
+    cleanup_bytes = 0
+    cleanup_states = 0
+    if a.cleanup:
+        state_by_index = {int(sd.name.split("_")[1]): sd for sd in states}
+        for k in keep:
+            cleanup_bytes += cleanup_state_trajectories(state_by_index[k])
+            cleanup_states += 1
+
     summary = dict(
         n_states_kept=len(keep), n_states_rejected=len(rejected),
         rejected=rejected[:20],
@@ -298,6 +360,9 @@ def main() -> None:
         naive_SE_if_frames_were_independent=float(np.median(SE_out) *
                                                   np.sqrt(np.median(NEFF_out) / len(Fb))),
         restraint_width_A=width,
+        cleanup_enabled=bool(a.cleanup),
+        n_states_cleaned=cleanup_states,
+        cleanup_bytes=cleanup_bytes,
     )
     (Path(out).with_suffix(".summary.json")).write_text(json.dumps(summary, indent=1))
 

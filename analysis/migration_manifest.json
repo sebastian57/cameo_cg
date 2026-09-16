@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "created": "2026-08-25",
+  "canonical_root": "cameo_cg/analysis",
+  "test_root": "cameo_cg/tests/analysis",
+  "entries": [
+    {
+      "source": "analysis_tests/*.py",
+      "target": "analysis/evaluation/",
+      "class": "canonical",
+      "status": "completed"
+    },
+    {
+      "source": "analysis_tests/test_*.py",
+      "target": "tests/analysis/",
+      "class": "test",
+      "status": "completed"
+    },
+    {
+      "source": "analysis_tests/check_*equivalence.py",
+      "target": "tests/analysis/",
+      "class": "test",
+      "status": "completed"
+    },
+    {
+      "source": "md/analyze_*.py",
+      "target": "analysis/md/",
+      "class": "canonical",
+      "status": "completed"
+    },
+    {
+      "source": "md/projected_force_analysis.py",
+      "target": "analysis/md/",
+      "class": "canonical",
+      "status": "completed"
+    },
+    {
+      "source": "sampling/analyze_*.py",
+      "target": "analysis/sampling/",
+      "class": "canonical",
+      "status": "completed"
+    },
+    {
+      "source": "sampling/{error_map,gradient_recovery_error,leverage_scores,neyman_allocation,connectivity_gate,tpt_paths}.py",
+      "target": "analysis/sampling/",
+      "class": "canonical",
+      "status": "completed"
+    },
+    {
+      "source": "SAMPLING/latent_ensemble_diagnosis/*.py",
+      "target": "analysis/latent/",
+      "class": "external-port",
+      "status": "completed"
+    },
+    {
+      "source": "SAMPLING/md_less_energy_landscape/*.py",
+      "target": "analysis/landscapes/",
+      "class": "external-port",
+      "status": "completed"
+    },
+    {
+      "source": "charron_fes_analysis/*.py",
+      "target": "analysis/physics/reference_fes/",
+      "class": "external-port",
+      "status": "completed"
+    },
+    {
+      "source": "SAMPLING/{hessian_spectrum,curvature_map,stencil_dataset_maps,meanforce_fes}/*.py",
+      "target": "analysis/physics/",
+      "class": "external-port",
+      "status": "completed"
+    },
+    {
+      "source": "SAMPLING/{model_curvature,delta_screen}/*.py",
+      "target": "analysis/physics/",
+      "class": "external-port",
+      "status": "inventory-only",
+      "note": "Requires model/checkpoint table redesign before safe port."
+    },
+    {
+      "source": "SAMPLING/{tica_regional_weighting,umbrella_phi}/*.py",
+      "target": "analysis/physics/",
+      "class": "external-port",
+      "status": "inventory-only",
+      "note": "Retain external source until campaign-specific inputs are parameterized."
+    },
+    {
+      "source": "local_extrapolation_training/{offline_gate_eval,plotting}.py and nn_extrapolation_tests/*metrics*/plotting.py",
+      "target": "analysis/legacy/extrapolation/",
+      "class": "historical",
+      "status": "inventory-only",
+      "note": "Depends on external legacy package; do not duplicate until dependency boundary is chosen."
+    },
+    {
+      "source": "SAMPLING/ala2_direct_force_teacher/*analyze*.py",
+      "target": "analysis/legacy/teacher_bias/",
+      "class": "historical",
+      "status": "inventory-only",
+      "note": "Campaign-specific figures; requires explicit dataset/model table port."
+    },
+    {
+      "source": "SAMPLING/ala2_fivebead_gap_umbrella/analyze.py",
+      "target": "analysis/legacy/umbrella/",
+      "class": "historical",
+      "status": "inventory-only",
+      "note": "Legacy five-bead umbrella campaign analysis."
+    },
+    {
+      "source": "SAMPLING/ala2_mlcg_teacher_bias/analyze_*.py and evaluate_force_generalization.py",
+      "target": "analysis/legacy/teacher_bias/",
+      "class": "historical",
+      "status": "inventory-only",
+      "note": "Campaign-specific teacher-bias comparison suite."
+    },
+    {
+      "source": "SAMPLING/ramachandran_resampling.py",
+      "target": "analysis/legacy/sampling/",
+      "class": "historical",
+      "status": "inventory-only",
+      "note": "Legacy resampling analysis; no canonical input/output contract yet."
+    }
+  ]
+}

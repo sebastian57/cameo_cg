@@ -188,11 +188,11 @@ def main() -> None:
 
         ntomp = cpus_per_rank(a.n_replicas)
         groups = group_ranges(a.n_replicas, a.n_replicas)
-        (root / "run_group_000.sh").write_text(multidir_group_script(
+        (root / "run_group_0000.sh").write_text(multidir_group_script(
             case_dirs=[f"replica_{k:02d}" for k in range(a.n_replicas)],
             structure_for=[str(starts[k % len(starts)]) for k in range(a.n_replicas)],
             topology=a.topology, ntomp=ntomp, n_gpus=4, use_server=False, mps=True))
-        (root / "run_group_000.sh").chmod(0o755)
+        (root / "run_group_0000.sh").chmod(0o755)
         (root / "submit.slurm").write_text(submit_script(
             campaign_dir=root, groups=groups, job_name=f"p3_{arm}", hours=a.wall_hours))
         print(f"{arm:8s}: {a.n_replicas} replicas"

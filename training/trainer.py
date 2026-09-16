@@ -5,6 +5,7 @@ Orchestrates training of combined Prior + ML models using chemtrain.
 Supports multi-stage training, prior pre-training, and checkpointing.
 """
 
+import dataclasses
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -27,6 +28,11 @@ from .basin_energy_monitor import build_basin_energy_monitor
 from .msam import shmap_msam_update_fn
 from .dsm import add_dsm_noise_fields, dsm_config, dsm_enabled, dsm_error, make_dsm_quantity
 from .hvp_matching import hvp_config, hvp_error, make_hvp_quantity
+from .calibration_loss import (
+    build_calibration_panel,
+    calibration_config,
+    make_calibration_penalty,
+)
 from .safety_regularization import (
     SAFETY_FIELD_KEYS,
     make_safety_quantities,
@@ -76,6 +82,71 @@ def valid_component_mse(predictions, targets, weights=None):
     numerator = jnp.sum(squared_differences * weights)
     denominator = jnp.maximum(jnp.sum(weights), 1.0)
     return numerator / denominator
+
+
+def _evaluate_train_only_convergence(chemtrain_trainer, *args, **kwargs):
+    """Record and print epoch training losses when no validation split exists.
+
+    Chemtrain's standard convergence task assumes that every training target also
+    has a validation target. That assumption is false for val_fraction=0.0:
+    CAMEO intentionally does not register a validation loader in that case. Keep
+    the useful train-side bookkeeping and progress output, without evaluating a
+    second pass or invoking validation-based early stopping.
+    """
+    del args, kwargs
+    batches_per_epoch = chemtrain_trainer._batches_per_epoch["training"]
+    if batches_per_epoch <= 0:
+        raise ValueError(
+            "Cannot evaluate train-only convergence with no training batches"
+        )
+
+    mean_train_loss = sum(
+        chemtrain_trainer.train_batch_losses[-batches_per_epoch:]
+    ) / batches_per_epoch
+    chemtrain_trainer.train_losses.append(mean_train_loss)
+    duration = chemtrain_trainer.update_times[chemtrain_trainer._epoch]
+
+    gradient_history = getattr(chemtrain_trainer, "gradient_norm_history", [])
+    gradient_norm = gradient_history[-1] if gradient_history else "N.A."
+    log_str = (
+        "[Epoch {}]:\n"
+        "\tAverage train loss: {:.5f}\n"
+        "\tAverage val loss: not evaluated (no held-out split)\n"
+        "\tGradient norm: {}\n"
+        "\tElapsed time = {:.3f} min\n"
+        "\tPer-target losses:\n"
+    ).format(
+        chemtrain_trainer._epoch,
+        mean_train_loss,
+        gradient_norm,
+        duration,
+    )
+
+    for key, target_losses in chemtrain_trainer.train_target_losses.items():
+        target_values = target_losses[-batches_per_epoch:]
+        target_train_loss = (
+            sum(target_values) / batches_per_epoch if target_values else "N.A."
+        )
+        log_str += (
+            "\t\t{} | train loss: {} | val loss: N.A.\n"
+        ).format(key, target_train_loss)
+
+    print(log_str)
+
+
+def _install_train_only_convergence_task(chemtrain_trainer):
+    """Replace Chemtrain's validation-dependent convergence task for train-only runs."""
+    post_epoch_tasks = chemtrain_trainer._tasks.setdefault("post_epoch", [])
+    chemtrain_trainer._tasks["post_epoch"] = [
+        task
+        for task in post_epoch_tasks
+        if not (
+            getattr(task, "__self__", None) is chemtrain_trainer
+            and getattr(task, "__name__", None) == "_evaluate_convergence"
+        )
+    ]
+    if _evaluate_train_only_convergence not in chemtrain_trainer._tasks["post_epoch"]:
+        chemtrain_trainer.add_task("post_epoch", _evaluate_train_only_convergence)
 
 
 class Trainer:
@@ -152,6 +223,14 @@ class Trainer:
         if self._hvp_cfg["enabled"]:
             self.gammas = dict(self.gammas)
             self.gammas.setdefault("HVP", float(self._hvp_cfg["lambda"]))
+        self._cal_cfg = calibration_config(config)
+        self._cal_penalty = None
+        if self._cal_cfg["enabled"]:
+            if self._direct_force_mode:
+                raise ValueError(
+                    "training.calibration requires a scalar energy; "
+                    "incompatible with output_mode: direct_force."
+                )
         self._safety_cfg = safety_config(config)
         if self._safety_cfg["enabled"]:
             self.gammas = dict(self.gammas)
@@ -1690,6 +1769,9 @@ class Trainer:
             fns["DSM"] = dsm_error
         if self._hvp_cfg["enabled"]:
             fns["HVP"] = hvp_error
+        # NB: L_cal is NOT a target/error-fn — chemtrain asserts every additional
+        # target key exists as an observation column, and no per-frame "CAL"
+        # column exists. It is wired as the ForceMatching penalty_fn instead.
         if self._safety_cfg["enabled"]:
             fns.update(safety_error_fns(self.config))
         if teacher_distillation_enabled(self.config):
@@ -1749,6 +1831,183 @@ class Trainer:
             # force-only model and avoids all coordinate derivatives.
             targets["F"] = self.model.direct_force_quantity
         return targets or None
+
+    def _build_penalty_fn(self):
+        """Select the chemtrain `penalty_fn(params)`: calibration, bias penalty, or none.
+
+        Both write to the same single slot, so enabling both is rejected rather than silently
+        dropping one.
+        """
+        from training.bias_penalty import bias_penalty_enabled, bias_penalty_config
+        from training.path_penalty import path_penalty_enabled, path_penalty_config
+        cal = bool(self._cal_cfg["enabled"])
+        bias = bias_penalty_enabled(self.config)
+        path = path_penalty_enabled(self.config)
+        if cal + bias + path > 1:
+            raise ValueError(
+                "training.calibration, training.bias_penalty and training.path_penalty all set "
+                "penalty_fn; enable only one."
+            )
+        if cal:
+            return self._build_calibration_penalty()
+        if bias:
+            return self._build_bias_penalty(bias_penalty_config(self.config))
+        if path:
+            return self._build_path_penalty(path_penalty_config(self.config))
+        return None
+
+    def _build_path_penalty(self, cfg):
+        """Point-PMF energy-difference penalty on a FIXED panel (DESIGN/TARGETED_BASIN_PATHS.md).
+
+        Each 6-bead panel structure is evaluated on its own with an explicit full intra-structure
+        edge list (static_neighbor_list, vmapped): no per-structure nneigh_fn.allocate, so no
+        per-capacity recompilation (DESIGN/FORCE_BIAS_AND_ENSEMBLE_LOSSES.md, job 1701260).
+        """
+        import jax as _jax
+        import jax.numpy as _jnp
+        from jax_md_mod.custom_partition import static_neighbor_list
+        from training.path_penalty import full_graph_edges, load_path_panel, make_path_penalty
+
+        panel = load_path_panel(cfg["panel_path"])
+        edges = _jnp.asarray(full_graph_edges(panel["R"].shape[1]))
+        neighbors = _jax.vmap(lambda r: static_neighbor_list(edges, r, max_occupancy=edges.shape[1]))(
+            _jnp.asarray(panel["R"], dtype=_jnp.float32))
+        training_logger.info(
+            "[PathPenalty] lambda=%g  panel=%s  structures=%d  pairs=%d (train %d)",
+            cfg["lambda"], cfg["panel_path"], len(panel["R"]), len(panel["pairs"]), int(panel["train"].sum()))
+        return make_path_penalty(energy_of=self.model.compute_energy, panel=panel,
+                                 lam=cfg["lambda"], neighbors=neighbors)
+
+    def _build_bias_penalty(self, cfg):
+        """Systematic-force-bias penalty on a FIXED panel of mean-force labels.
+
+        The panel is evaluated every step, independent of the minibatch, because a minibatch
+        carries only 1-4 mean-force labels per Ramachandran bin -- far below the ~12 needed to
+        resolve the bias (DESIGN/FORCE_BIAS_AND_ENSEMBLE_LOSSES.md).
+        """
+        import jax as _jax
+        import jax.numpy as _jnp
+        from jax_md_mod.custom_partition import static_neighbor_list
+        from training.bias_penalty import build_bias_panel, make_bias_penalty
+
+        panel, holdout = build_bias_panel(
+            cfg["label_paths"], bin_deg=cfg["bin_deg"], per_bin=cfg["per_bin"],
+            min_per_bin=cfg["min_per_bin"], holdout_frac=cfg["holdout_frac"],
+            seed=cfg["seed"], mapping=cfg["mapping"])
+        training_logger.info(
+            "[BiasPenalty] lambda=%g  panel=%d labels / %d bins (counts %d..%d)  "
+            "holdout=%d  bin_deg=%g",
+            cfg["lambda"], len(panel.R), panel.n_bins, int(panel.counts.min()),
+            int(panel.counts.max()), len(holdout.R), cfg["bin_deg"])
+
+        # TILED panel: ~170 structures packed per 1024-bead tile, exactly as the training
+        # loader packs the dataset. Untiled the panel cost 0.60 ms/structure against the batch's
+        # 0.15 ms -- 4x worse purely from evaluating 6-bead systems one at a time (149.8 s/epoch
+        # vs a 52.96 s baseline, job 1701281).
+        #
+        # Connectivity is an explicit BLOCK-DIAGONAL edge list in JAX-MD Sparse (2, E) layout, so
+        # structures within a tile cannot interact whatever their geometry. One `static_neighbor_list`
+        # per tile, not per structure: the per-structure `nneigh_fn.allocate` loop compiled
+        # `cell_list_candidate_fn`/`prune_neighbor_list_sparse` at a different capacity every time
+        # and produced 4,476 XLA compilations without reaching epoch 1 (job 1701260).
+        from training.bias_penalty import tile_panel, make_tiled_bias_penalty
+
+        tiled = tile_panel(panel, target_beads=int(cfg.get("target_beads", 1024)))
+        n_tiles, B = tiled.R.shape[0], tiled.R.shape[1]
+        n_edges = tiled.edges.shape[2]
+        neighbors = _jax.vmap(
+            lambda e, r: static_neighbor_list(e, r, max_occupancy=n_edges)
+        )(_jnp.asarray(tiled.edges), _jnp.asarray(tiled.R, dtype=_jnp.float32))
+        training_logger.info(
+            "[BiasPenalty] tiled panel: %d tiles x %d beads (%d structures/tile), "
+            "%d block-diagonal edges/tile", n_tiles, B, tiled.seg_bin.shape[1], n_edges)
+
+        self._bias_panel, self._bias_holdout = panel, holdout
+        # Shard the panel across the mesh: without this each device evaluates the whole panel
+        # (penalty_fn depends only on the REPLICATED params) and pmean averages 4 identical values.
+        import jax as _j
+        # GLOBAL device count, not local: chemtrain builds `Mesh(jax.devices(), ...)`
+        # (max_likelihood.py:253), so `lax.axis_index('batch')` ranges over ALL devices. Passing
+        # the LOCAL count on 2 nodes made devices 4-7 request dynamic_slice starts past the end of
+        # an 8-tile array; dynamic_slice CLAMPS instead of erroring, so those devices silently
+        # re-read the last window and psum double-counted it. Invisible on one node.
+        n_dev = _j.device_count()
+        return make_tiled_bias_penalty(energy_of=self.model.compute_energy, tiled=tiled,
+                                       lam=float(cfg["lambda"]), neighbors=neighbors,
+                                       # ForceMatching is constructed with disable_shmap=False,
+                                       # so shmap is always on when there is >1 device.
+                                       axis_name=("batch" if n_dev > 1 else None),
+                                       n_devices=n_dev)
+
+    def _build_calibration_penalty(self):
+        """Fixed basin-panel L_cal penalty_fn(params) (built once, reused)."""
+        if self._cal_penalty is not None:
+            return self._cal_penalty
+        cfg = self._cal_cfg
+        if not cfg["dataset_path"]:
+            raise ValueError(
+                "training.calibration.enabled requires "
+                "training.calibration.dataset_path."
+            )
+        panel = build_calibration_panel(
+            cfg["dataset_path"],
+            frames_per_basin=cfg["frames_per_basin"],
+            seed=cfg["seed"],
+            mapping_name=cfg["mapping"],
+        )
+        training_logger.info(
+            "[Calibration] L_cal active (penalty_fn): lambda=%g, frames_per_basin=%d, "
+            "populations=%s, pairs targets=%s",
+            cfg["lambda"], cfg["frames_per_basin"],
+            np.round(panel.populations, 4).tolist(),
+            np.round(panel.dF_ref, 3).tolist(),
+        )
+        # Per-frame neighbor lists allocated ONCE here, outside jit: the training
+        # model's own buffers are sized for the tiled batch (e.g. 1024 beads), so
+        # per-frame compute_energy calls must not rebuild neighbors internally.
+        # Raw allocations carry frame-dependent cell-list closures (non-uniform
+        # pytree treedefs -> cannot be stacked), so each is normalized through
+        # static_neighbor_list: an error=None Sparse shell over a common padded
+        # idx capacity, identical to the data.static_neighbors convention.
+        import jax as _jax
+        import jax.numpy as _jnp
+        from jax_md_mod.custom_partition import static_neighbor_list
+
+        n_atoms = int(panel.R.shape[1])
+        raw = [
+            self.model.nneigh_fn.allocate(
+                _jnp.asarray(panel.R[i], dtype=_jnp.float32),
+                mask=_jnp.asarray(panel.mask[i] > 0),
+            )
+            for i in range(len(panel.R))
+        ]
+        e_cap = max(int(_jnp.asarray(nb.idx).shape[1]) for nb in raw)
+        nb_lists = []
+        for i, nb in enumerate(raw):
+            idx = _jnp.asarray(nb.idx)
+            pad = e_cap - idx.shape[1]
+            if pad:
+                idx = _jnp.pad(idx, ((0, 0), (0, pad)),
+                               constant_values=n_atoms)  # sentinel N
+            nb_lists.append(static_neighbor_list(
+                idx,
+                _jnp.asarray(nb.reference_position, dtype=_jnp.float32),
+                max_occupancy=e_cap,
+            ))
+        neighbors = _jax.tree.map(lambda *xs: _jnp.stack(xs), *nb_lists)
+
+        self._cal_penalty = make_calibration_penalty(
+            energy_of=self.model.compute_energy,
+            R=panel.R,
+            mask=panel.mask,
+            species=panel.species,
+            basin_ids=panel.basin_ids,
+            kT=cfg["kT"],
+            populations=panel.populations,
+            lam=float(cfg["lambda"]),
+            neighbors=neighbors,
+        )
+        return self._cal_penalty
 
     def _loader_reference_data(self, loader: Any) -> Dict[str, Any]:
         """Extract loader arrays while preserving auxiliary batch metadata."""
@@ -2128,6 +2387,7 @@ class Trainer:
             error_fns=self._force_matching_error_fns(),
             weights_keys=self._force_matching_weights_keys(),
             additional_targets=self._force_matching_additional_targets(),
+            penalty_fn=self._build_penalty_fn(),
             checkpoint_path=str(self.checkpoint_path),
             batch_per_device=self.batch_per_device,
             batch_cache=self.batch_cache,
@@ -2198,18 +2458,47 @@ class Trainer:
         # This ensures the LR schedule continues from where it left off instead of
         # restarting from step 0, which would cause the LR to jump to its initial value.
         if self._resume_opt_state is not None:
+            # NOT optional. Losing the optimizer state silently restarts the LR schedule from
+            # step 0, so a resumed run does a fresh warmup and never anneals -- it produces a
+            # plausible-looking model at a mid-decay learning rate. This was a warning until
+            # 2026-08-21 and cost 4 h of misleading compute (BUGS/2026-08-21). Any failure here
+            # now raises: a crashed resume is recoverable, a silently wrong schedule is not.
+            #
+            # chemtrain's TrainerState is a frozen `chex.dataclass` (chemtrain/util.py), which
+            # exposes `.replace()`. The previous code assumed a NamedTuple `._replace()`.
             try:
                 restored_opt_state = jax.tree_util.tree_map(jnp.asarray, self._resume_opt_state)
-                # TrainerState is a NamedTuple; use _replace to create an updated copy
-                trainer.state = trainer.state._replace(opt_state=restored_opt_state)
-                training_logger.info("Restored optimizer state from checkpoint (LR schedule continues)")
+                st = trainer.state
+                if hasattr(st, "replace"):                    # chex.dataclass / flax.struct
+                    trainer.state = st.replace(opt_state=restored_opt_state)
+                elif hasattr(st, "_replace"):                 # NamedTuple
+                    trainer.state = st._replace(opt_state=restored_opt_state)
+                elif dataclasses.is_dataclass(st):            # plain dataclass
+                    trainer.state = dataclasses.replace(st, opt_state=restored_opt_state)
+                else:
+                    raise TypeError(
+                        f"cannot update opt_state on {type(st).__name__}: no replace/_replace "
+                        f"and not a dataclass")
             except Exception as e:
-                training_logger.warning(
-                    f"Could not restore optimizer state: {e}. "
-                    "LR schedule will restart from step 0."
-                )
-            finally:
-                self._resume_opt_state = None  # Only restore once per resume
+                raise RuntimeError(
+                    f"Failed to restore optimizer state on resume: {e!r}. Refusing to continue "
+                    f"-- training would silently restart the LR schedule from step 0 and never "
+                    f"anneal. Fix the restore path or start a fresh run instead of resuming."
+                ) from e
+
+            # Verify it took effect: optax carries a step counter in the opt_state pytree, and
+            # a successful resume must show a non-zero count.
+            counts = [int(x) for x in jax.tree_util.tree_leaves(trainer.state.opt_state)
+                      if getattr(x, "ndim", None) == 0 and jnp.issubdtype(x.dtype, jnp.integer)]
+            step = max(counts) if counts else 0
+            if step <= 0:
+                raise RuntimeError(
+                    f"Optimizer state restored but its step counter is {step}; the LR schedule "
+                    f"would restart from the beginning. Refusing to continue.")
+            training_logger.info(
+                f"Restored optimizer state from checkpoint: LR schedule continues from "
+                f"step {step}")
+            self._resume_opt_state = None  # Only restore once per resume
 
         # Attach per-batch timing profiler if requested (non-invasive monkey-patch).
         # Must be done BEFORE trainer.train() so it intercepts from step 0.
@@ -2225,6 +2514,9 @@ class Trainer:
                 n_warmup=self._batch_profiler_warmup,
                 n_samples=self._batch_profiler_samples,
             )
+
+        if not self._has_holdout_validation:
+            _install_train_only_convergence_task(trainer)
 
         # Train with periodic checkpointing
         stage_start_time = time.perf_counter()

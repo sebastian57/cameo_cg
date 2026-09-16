@@ -61,9 +61,24 @@ def main() -> None:
     ap.add_argument("--mdp", type=Path, required=True)
     ap.add_argument("--outdir", type=Path, required=True)
     ap.add_argument("--mapping", default="ala2_backbone_cb_6")
-    ap.add_argument("--ps-per-state", type=float, default=11.0,
-                    help="v2 used 11 ps (55 frames at 0.2 ps); tau = 1 frame under freezing")
-    ap.add_argument("--output-ps", type=float, default=0.2)
+    # p99 BASELINE (set 2026-08-18 from 203,568 measured states). Sizing:
+    #   tau_F  = 46.8 fs   (n_eff 85.4 over 4 ps production -- NOT the 32.5 fs from a single
+    #                       state's ACF; average over many states before sizing a protocol)
+    #   sigma  = 37.48     (p99 of the per-state 18-vector force fluctuation)
+    #   target = 4.875     (p99 of the per-state label error SE, i.e. accept the noise the
+    #                       worst 1% already had, for everyone)
+    #   n_eff  = (sigma/target)^2 = 59  ->  production = 59 * 46.8 fs = 2.8 ps
+    # Total 3.8 ps = 1.0 ps equilibration + 2.8 ps production, vs 5.0 ps before: 24% cheaper.
+    # ADAPTIVE per-state lengths were measured and REJECTED: sigma p90/p10 is only 1.20, so
+    # the whole spread is worth 27.6% before the two-pass overhead and the constraint that a
+    # stencil's 25 points must share one length. Shortening the FIXED length beats it.
+    ap.add_argument("--ps-per-state", type=float, default=3.8,
+                    help="1.0 ps equilibration + 2.8 ps production (p99 baseline)")
+    ap.add_argument("--output-ps", type=float, default=0.032,
+                    help="~tau_F (46.8 fs); 0.2 ps threw away ~6x the available statistics")
+    ap.add_argument("--discard-ps", type=float, default=1.0,
+                    help="equilibration to drop AT COLLECTION; no transient was resolvable "
+                         "across 4 states at 0/0.5/1/2 ps, so this is insurance (>20x tau)")
     ap.add_argument("--pbc-margin", type=float, default=6.0)
     ap.add_argument("--conformation-tol", type=float, default=0.05)
     ap.add_argument("--nodes", type=int, default=3)
@@ -211,6 +226,18 @@ def main() -> None:
                              float(vl[i + 2][36:44])] for i in bead_atoms0]) * 10.0
             devs.append(float(np.abs(chk - tgt).max()))
 
+    # The anchor-seed pre-pass writes 5-DIGIT dirs (state_{slot:05d}, one seed.gro each) that
+    # are consumed by the expansion above and never needed again. Left behind they cost 20,000
+    # inodes AND -- worse -- they match the `state_*` glob that collect_meanforce uses to build
+    # its position list, silently inflating it by 10,000 entries. That desynchronised a sharded
+    # collection on 2026-08-18 and lost 10,000 already-simulated states from the output.
+    import shutil as _sh
+    _n_anchor_dirs = 0
+    for _d in a.outdir.glob("state_?????"):
+        if _d.is_dir() and len(_d.name) == len("state_") + 5:
+            _sh.rmtree(_d, ignore_errors=True); _n_anchor_dirs += 1
+    _log(f"[cleanup] removed {_n_anchor_dirs} anchor-seed dirs (5-digit); they inflate the "
+         f"state_* glob and cost inodes")
     _log(f"[expand] {written} state dirs written in {time.time()-t0:.0f} s")
     _log(f"[verify] max |written bead position - intended target| = {max(devs):.4f} A "
          f"(gro precision is 1e-3 nm = 0.01 A)")

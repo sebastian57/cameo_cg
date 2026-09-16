@@ -1,10 +1,5 @@
-"""Analysis, evaluation, and visualization utilities."""
+"""Deprecated compatibility namespace for analysis.evaluation."""
+from analysis.evaluation.evaluator import Evaluator
+from analysis.evaluation.visualizer import ForceAnalyzer, LossPlotter
 
-from .evaluator import Evaluator
-from .visualizer import LossPlotter, ForceAnalyzer
-
-__all__ = [
-    "Evaluator",
-    "LossPlotter",
-    "ForceAnalyzer",
-]
+__all__ = ["Evaluator", "LossPlotter", "ForceAnalyzer"]

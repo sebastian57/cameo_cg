@@ -145,6 +145,12 @@ class ConfigManager:
     def get_seed(self) -> int:
         return self.get("seed", default=42)
 
+    def get_split_seed(self) -> int:
+        """Seed for the train/val shuffle. Defaults to the init seed so existing
+        configs are unchanged; set training.split_seed to vary the split while
+        pinning weight-init seed (seed-variance methodology requirement)."""
+        return int(self.get("split_seed", default=self.get_seed()))
+
     def get_model_context(self) -> str:
         return self.get("model_context", default="allegro_cg_protein")
 
