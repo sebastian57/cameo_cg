@@ -17,6 +17,7 @@ Covers, per the code review's minimum list:
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -370,8 +371,10 @@ def test_server_connect_timeout_is_fatal(tmp_path):
 
 
 # ---------------------------------------------------------------- tica_metad
-TICA_ARTIFACT = ("/e/project1/cameo/schmidt36/SAMPLING/tica_regional_weighting/results/"
-                 "ala2_bb6_reference/smooth_reference_bias_lambda0p25.npz")
+TICA_ARTIFACT = os.environ.get(
+    "CAMEO_TICA_TEST_ARTIFACT",
+    str(REPO / "local_work" / "reference" / "smooth_reference_bias_lambda0p25.npz"),
+)
 _have_tica = Path(TICA_ARTIFACT).exists()
 metad_only = pytest.mark.skipif(not _have_tica, reason="TICA artifact not available")
 

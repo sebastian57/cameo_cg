@@ -93,32 +93,33 @@ export MODEL_TYPE_CANON
 SELECTED_VENV_SOURCE="CAMEO_ACTIVE_VENV"
 if [[ -n "${CAMEO_ACTIVE_VENV:-}" ]]; then
     SELECTED_VENV="${CAMEO_ACTIVE_VENV}"
+    SELECTED_ACTIVATE="${SELECTED_VENV}/bin/activate"
 elif [[ "${MODEL_TYPE_CANON}" == allegro_cueq* ]]; then
     SELECTED_VENV_SOURCE="CAMEO_CUEQ_VENV"
     SELECTED_VENV="${CAMEO_CUEQ_VENV:-}"
+    SELECTED_ACTIVATE="${SELECTED_VENV}/bin/activate"
 else
     SELECTED_VENV_SOURCE="CAMEO_STANDARD_VENV"
     SELECTED_VENV="${CAMEO_STANDARD_VENV:-}"
+    SELECTED_ACTIVATE="${CAMEO_STANDARD_ACTIVATE:-${SELECTED_VENV}/bin/activate}"
 fi
 
 if [[ -z "${SELECTED_VENV:-}" ]]; then
     echo "Python Venv not set at ${SELECTED_VENV_SOURCE}" >&2
     return 1 2>/dev/null || exit 1
 fi
-
-if [[ ! -d "${SELECTED_VENV}" || ! -f "${SELECTED_VENV}/bin/activate" ]]; then
-    echo "Python Venv not set at ${SELECTED_VENV}" >&2
+if [[ ! -d "${SELECTED_VENV}" || ! -f "${SELECTED_ACTIVATE}" ]]; then
+    echo "Python environment invalid: venv=${SELECTED_VENV}, activate=${SELECTED_ACTIVATE}" >&2
     return 1 2>/dev/null || exit 1
 fi
 
 SELECTED_VENV_NAME="$(basename "${SELECTED_VENV}")"
-export SELECTED_VENV
+export SELECTED_VENV SELECTED_ACTIVATE
 
-# ---------------------------------------------------------------------------
-# Load modules and activate environment
-# ---------------------------------------------------------------------------
+# Load the repository defaults, then source the selected activation entry point.
+# The standard wrapper may intentionally replace the module stack.
 source "${PROJECT_ROOT}/env_setup/load_modules_2026.sh"
-source "${SELECTED_VENV}/bin/activate"
+source "${SELECTED_ACTIVATE}"
 PYTHON_BIN="$(command -v python)"
 if [[ -z "${PYTHON_BIN}" ]]; then
     echo "ERROR: No python found after activating ${SELECTED_VENV_NAME}" >&2

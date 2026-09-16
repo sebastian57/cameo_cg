@@ -110,6 +110,7 @@ inspect runs.
   absolute paths in shared configs.
 - `CAMEO_CG_PROJECT_ROOT` locates this checkout.
 - `CAMEO_STANDARD_VENV` and `CAMEO_CUEQ_VENV` select the normal environments.
+- `CAMEO_STANDARD_ACTIVATE` is the standard environment entry point; source it instead of `bin/activate`.
 - `CAMEO_ACTIVE_VENV` overrides selection for one shell/job.
 - `CAMEO_MD_PROJECT_ROOT` identifies the optional separate MD workspace.
 - `CAMEO_LAMMPS_BUILD_DIR` identifies the local LAMMPS build.

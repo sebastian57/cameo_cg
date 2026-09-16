@@ -84,7 +84,12 @@ rm -f "$SOCKET"
 
 # ---- 1. bias server (one per replica) --------------------------------------
 source {repo}/env_setup/load_modules_2026.sh
-source {repo}/../venv_cameocg_jupiter2026/bin/activate
+VENV_DIR="${CAMEO_ACTIVE_VENV:-${CAMEO_CUEQ_VENV:-}}"
+if [[ -z "$VENV_DIR" || ! -f "$VENV_DIR/bin/activate" ]]; then
+    echo "ERROR: Set CAMEO_CUEQ_VENV (or CAMEO_ACTIVE_VENV) to a valid venv." >&2
+    exit 1
+fi
+source "$VENV_DIR/bin/activate"
 export JAX_PLATFORMS=cpu          # teacher runs beside GROMACS on CPU
 cd {repo}
 python -m sampling.server --config "$HERE/server.yaml" --socket "$SOCKET" \\

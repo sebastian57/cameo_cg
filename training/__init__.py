@@ -1,5 +1,9 @@
 """Training infrastructure for force matching."""
 
+from utils.jax_setup import apply_jax_compat_shims
+
+apply_jax_compat_shims()
+
 from .optimizers import (
     create_optimizer,
     create_optimizer_from_config,

@@ -23,9 +23,14 @@ ENSEMBLE_SPEC="$3"
 OUTPUT="$4"
 BATCH_SIZE="${5:-128}"
 
-source "${PROJECT_ROOT}/../load_modules_2026.sh"
-source "${PROJECT_ROOT}/../venv_cameocg_jupiter2026/bin/activate"
-source "${PROJECT_ROOT}/../set_lammps_paths_2026.sh"
+source "${PROJECT_ROOT}/env_setup/load_modules_2026.sh"
+VENV_DIR="${CAMEO_ACTIVE_VENV:-${CAMEO_CUEQ_VENV:-}}"
+if [[ -z "${VENV_DIR}" || ! -f "${VENV_DIR}/bin/activate" ]]; then
+    echo "ERROR: Set CAMEO_CUEQ_VENV (or CAMEO_ACTIVE_VENV) to a valid venv." >&2
+    exit 1
+fi
+source "${VENV_DIR}/bin/activate"
+source "${PROJECT_ROOT}/env_setup/set_lammps_paths_2026.sh"
 
 mkdir -p "${PROJECT_ROOT}/slurm"
 cd "${PROJECT_ROOT}"

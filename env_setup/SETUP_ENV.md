@@ -87,11 +87,12 @@ Add one managed block to `~/.bashrc` (change the prefix for another checkout):
 
 ```bash
 # >>> cameo_cg env >>>
-export CAMEO_LAMMPS_BUILD_DIR=/e/project1/cameo/schmidt36/lammps/build
-export CAMEO_CG_PROJECT_ROOT=/e/project1/cameo/schmidt36/cameo_cg
-export CAMEO_CUEQ_VENV=/e/project1/cameo/schmidt36/venv_cameocg_jupiter2026
-export CAMEO_STANDARD_VENV=/e/project1/cameo/schmidt36/venv_cameocg_jupiter2026
-export CAMEO_MD_PROJECT_ROOT=/e/project1/cameo/schmidt36/cameo_md
+export CAMEO_CG_PROJECT_ROOT=/path/to/cameo_cg
+export CAMEO_CUEQ_VENV=/path/to/cueq_env
+export CAMEO_STANDARD_VENV=/path/to/standard_env/venv
+export CAMEO_STANDARD_ACTIVATE=/path/to/standard_env/activate.sh
+export CAMEO_MD_PROJECT_ROOT=/path/to/cameo_md
+# Optional: set CAMEO_LAMMPS_BUILD_DIR only after a local build exists.
 export PATH="$HOME/.local/bin:$PATH"
 # <<< cameo_cg env <<<
 ```
@@ -99,19 +100,25 @@ export PATH="$HOME/.local/bin:$PATH"
 Reload with `source ~/.bashrc`. To update or migrate the managed block, run:
 
 ```bash
-bash scripts/configure_user_env.sh
+bash scripts/configure_user_env.sh \
+  --project-root /path/to/cameo_cg \
+  --cueq-venv /path/to/cueq_env \
+  --standard-venv /path/to/standard_env/venv \
+  --standard-activate /path/to/standard_env/activate.sh \
+  --md-project-root /path/to/cameo_md
 ```
 
 `CAMEO_ACTIVE_VENV` is an optional per-command override. Otherwise,
 `scripts/slurm_env.sh` selects `CAMEO_CUEQ_VENV` for `allegro_cueq*` configs
-and `CAMEO_STANDARD_VENV` for other models. JAX-MD configs point to a training
-config; the helper resolves it before selecting the venv.
+and `CAMEO_STANDARD_VENV` plus `CAMEO_STANDARD_ACTIVATE` for other models. The
+standard environment is entered through the wrapper so its module setup is
+applied. JAX-MD configs point to a training config; the helper resolves it
+before selecting the venv.
 
 ## 5. Verify imports and accelerator discovery
 
 ```bash
-source env_setup/load_modules_2026.sh
-source "$CAMEO_STANDARD_VENV/bin/activate"
+source "$CAMEO_STANDARD_ACTIVATE"
 python - <<'PY'
 import jax, jax_md, chemtrain, chemutils, aggforce
 import flax, optax, e3nn_jax, cuequivariance

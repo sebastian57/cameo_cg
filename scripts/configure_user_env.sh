@@ -5,7 +5,8 @@
 #   source scripts/configure_user_env.sh \
 #       --project-root /path/to/cameo_cg \
 #       --cueq-venv /path/to/env_cueq \
-#       --standard-venv /path/to/env_standard
+#       --standard-venv /path/to/env_standard \
+#       --standard-activate /path/to/venv_wrapper/activate.sh
 #
 #   source scripts/configure_user_env.sh \
 #       --active-venv /path/to/env_cueq
@@ -25,7 +26,9 @@ DEFAULT_PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 PROJECT_ROOT_VALUE="${DEFAULT_PROJECT_ROOT}"
 CUEQ_VENV_VALUE=""
 STANDARD_VENV_VALUE=""
+STANDARD_ACTIVATE_VALUE=""
 ACTIVE_VENV_VALUE=""
+MD_PROJECT_ROOT_VALUE=""
 LAMMPS_BUILD_DIR_VALUE=""
 LMP_BIN_VALUE=""
 SHOW_ONLY=0
@@ -39,7 +42,9 @@ Options:
   --project-root PATH       Set CAMEO_CG_PROJECT_ROOT (default: this checkout)
   --cueq-venv PATH          Set CAMEO_CUEQ_VENV
   --standard-venv PATH      Set CAMEO_STANDARD_VENV
+  --standard-activate PATH  Set CAMEO_STANDARD_ACTIVATE wrapper script
   --active-venv PATH        Set CAMEO_ACTIVE_VENV
+  --md-project-root PATH     Set CAMEO_MD_PROJECT_ROOT
   --lammps-build-dir PATH   Set CAMEO_LAMMPS_BUILD_DIR
   --lmp-bin PATH            Set CAMEO_LMP_BIN
   --bashrc PATH             Write to a different shell rc file
@@ -58,34 +63,49 @@ quote_shell() {
 }
 
 build_block() {
-    local block="${START_MARK}"
-    block+=$'\n'
-    block+="# Managed by ${SCRIPT_PATH}"
-    block+=$'\n'
-    block+="export CAMEO_CG_PROJECT_ROOT=$(quote_shell "${PROJECT_ROOT_VALUE}")"
-    block+=$'\n'
+    local block=""
+    append_line() { printf -v block "%s%s\n" "${block}" "$1"; }
+
+    append_line "${START_MARK}"
+    append_line "# Managed by ${SCRIPT_PATH}"
+    append_line "export CAMEO_CG_PROJECT_ROOT=$(quote_shell "${PROJECT_ROOT_VALUE}")"
     if [[ -n "${CUEQ_VENV_VALUE}" ]]; then
-        block+="export CAMEO_CUEQ_VENV=$(quote_shell "${CUEQ_VENV_VALUE}")"
-        block+=$'\n'
+        append_line "export CAMEO_CUEQ_VENV=$(quote_shell "${CUEQ_VENV_VALUE}")"
+    else
+        append_line "unset CAMEO_CUEQ_VENV"
     fi
     if [[ -n "${STANDARD_VENV_VALUE}" ]]; then
-        block+="export CAMEO_STANDARD_VENV=$(quote_shell "${STANDARD_VENV_VALUE}")"
-        block+=$'\n'
+        append_line "export CAMEO_STANDARD_VENV=$(quote_shell "${STANDARD_VENV_VALUE}")"
+    else
+        append_line "unset CAMEO_STANDARD_VENV"
+    fi
+    if [[ -n "${STANDARD_ACTIVATE_VALUE}" ]]; then
+        append_line "export CAMEO_STANDARD_ACTIVATE=$(quote_shell "${STANDARD_ACTIVATE_VALUE}")"
+    else
+        append_line "unset CAMEO_STANDARD_ACTIVATE"
     fi
     if [[ -n "${ACTIVE_VENV_VALUE}" ]]; then
-        block+="export CAMEO_ACTIVE_VENV=$(quote_shell "${ACTIVE_VENV_VALUE}")"
-        block+=$'\n'
+        append_line "export CAMEO_ACTIVE_VENV=$(quote_shell "${ACTIVE_VENV_VALUE}")"
+    else
+        append_line "unset CAMEO_ACTIVE_VENV"
+    fi
+    if [[ -n "${MD_PROJECT_ROOT_VALUE}" ]]; then
+        append_line "export CAMEO_MD_PROJECT_ROOT=$(quote_shell "${MD_PROJECT_ROOT_VALUE}")"
+    else
+        append_line "unset CAMEO_MD_PROJECT_ROOT"
     fi
     if [[ -n "${LAMMPS_BUILD_DIR_VALUE}" ]]; then
-        block+="export CAMEO_LAMMPS_BUILD_DIR=$(quote_shell "${LAMMPS_BUILD_DIR_VALUE}")"
-        block+=$'\n'
+        append_line "export CAMEO_LAMMPS_BUILD_DIR=$(quote_shell "${LAMMPS_BUILD_DIR_VALUE}")"
+    else
+        append_line "unset CAMEO_LAMMPS_BUILD_DIR"
     fi
     if [[ -n "${LMP_BIN_VALUE}" ]]; then
-        block+="export CAMEO_LMP_BIN=$(quote_shell "${LMP_BIN_VALUE}")"
-        block+=$'\n'
+        append_line "export CAMEO_LMP_BIN=$(quote_shell "${LMP_BIN_VALUE}")"
+    else
+        append_line "unset CAMEO_LMP_BIN"
     fi
-    block+="${END_MARK}"
-    printf '%s\n' "${block}"
+    append_line "${END_MARK}"
+    printf "%s" "${block}"
 }
 
 show_block() {
@@ -114,8 +134,16 @@ while [[ $# -gt 0 ]]; do
             STANDARD_VENV_VALUE="$2"
             shift 2
             ;;
+        --standard-activate)
+            STANDARD_ACTIVATE_VALUE="$2"
+            shift 2
+            ;;
         --active-venv)
             ACTIVE_VENV_VALUE="$2"
+            shift 2
+            ;;
+        --md-project-root)
+            MD_PROJECT_ROOT_VALUE="$2"
             shift 2
             ;;
         --lammps-build-dir)
@@ -176,11 +204,15 @@ awk \
 
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
     # shellcheck source=/dev/null
+    set +u
     source "${BASHRC_PATH}"
+    set -u
     echo "Updated ${BASHRC_PATH} and reloaded it into the current shell."
 else
     # shellcheck source=/dev/null
+    set +u
     source "${BASHRC_PATH}"
+    set -u
     echo "Updated ${BASHRC_PATH}."
     echo "Run 'source ${BASHRC_PATH}' in your shell, or invoke this script with 'source', to refresh the current session."
 fi
