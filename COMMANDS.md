@@ -18,10 +18,9 @@ Choose a configuration by its canonical role:
 ```bash
 source ~/.bashrc
 cd "$CAMEO_CG_PROJECT_ROOT"
-source env_setup/load_modules_2026.sh
-source "$CAMEO_STANDARD_VENV/bin/activate"
+source "$CAMEO_STANDARD_ACTIVATE"
 python -c "import jax; print(jax.__version__, jax.__file__, jax.devices())"
-bash scripts/configure_user_env.sh
+bash scripts/configure_user_env.sh --show
 ```
 
 Override environment selection for one submission:

@@ -18,11 +18,13 @@ fi
 
 if [[ -n "${CAMEO_ACTIVE_VENV:-}" ]]; then
   VENV_DIR="${CAMEO_ACTIVE_VENV}"
+  ACTIVATE_SCRIPT="${VENV_DIR}/bin/activate"
 else
   VENV_DIR="${CAMEO_STANDARD_VENV:-}"
+  ACTIVATE_SCRIPT="${CAMEO_STANDARD_ACTIVATE:-${VENV_DIR}/bin/activate}"
 fi
-if [[ -z "${VENV_DIR}" ]]; then
-  echo "ERROR: Set CAMEO_STANDARD_VENV (or CAMEO_ACTIVE_VENV) before submitting." >&2
+if [[ -z "${VENV_DIR}" || ! -f "${ACTIVATE_SCRIPT}" ]]; then
+  echo "ERROR: Configure a valid standard venv and activation script." >&2
   exit 1
 fi
 
@@ -73,9 +75,8 @@ LOG_FILE="${OUT_DIR}/slurm-pipeline-${SLURM_JOB_ID:-local}.out"
 exec > >(tee -a "${LOG_FILE}") 2>&1
 
 cd "${PROJECT_ROOT}"
-
 source "${PROJECT_ROOT}/env_setup/load_modules_2026.sh"
-source "${VENV_DIR}/bin/activate"
+source "${ACTIVATE_SCRIPT}"
 PYTHON_BIN="$(command -v python)"
 if [[ -z "${PYTHON_BIN}" ]]; then
   echo "ERROR: No python found after activating ${VENV_DIR}." >&2

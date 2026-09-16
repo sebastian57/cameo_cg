@@ -27,6 +27,10 @@ def test_configure_user_env_migrates_legacy_block(tmp_path: Path):
             "/new/cueq",
             "--standard-venv",
             "/new/standard",
+            "--standard-activate",
+            "/new/activate.sh",
+            "--md-project-root",
+            "/new/md",
         ],
         cwd=PROJECT_ROOT,
         capture_output=True,
@@ -41,3 +45,8 @@ def test_configure_user_env_migrates_legacy_block(tmp_path: Path):
     assert "export CAMEO_CG_PROJECT_ROOT=/new/repo" in updated
     assert "export CAMEO_CUEQ_VENV=/new/cueq" in updated
     assert "export CAMEO_STANDARD_VENV=/new/standard" in updated
+    assert "export CAMEO_STANDARD_ACTIVATE=/new/activate.sh" in updated
+    assert "export CAMEO_MD_PROJECT_ROOT=/new/md" in updated
+    assert "unset CAMEO_ACTIVE_VENV" in updated
+    assert "unset CAMEO_LAMMPS_BUILD_DIR" in updated
+    assert "unset CAMEO_LMP_BIN" in updated
