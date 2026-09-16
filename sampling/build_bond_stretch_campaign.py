@@ -162,7 +162,7 @@ def build(out_dir: Path, structure: str, topology: str, mdp_template: Path,
         groups = group_ranges(len(cases), int(replicas_per_job))
         ntomp = cpus_per_rank(max(len(g) for g in groups))
         for gi, members in enumerate(groups):
-            script = out_dir / f"run_group_{gi:03d}.sh"
+            script = out_dir / f"run_group_{gi:04d}.sh"
             script.write_text(multidir_group_script(
                 case_dirs=[cases[i]["case"] for i in members],
                 structure_for=[structure] * len(members),

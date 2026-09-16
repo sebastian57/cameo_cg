@@ -97,7 +97,8 @@ inspect runs.
 | `training/` | Force matching, mSAM, REM, optimizers, batching/tiling |
 | `md/`, `md_setup/` | JAX-MD runtime/analysis and simulation documentation |
 | `sampling/` | TICA, teacher, inversion biases and GROMACS campaigns |
-| `analysis_tests/` | Model/run evaluation and plots |
+| `analysis/` | Canonical model, MD, sampling, latent, physics, and reference-FES analysis |
+| `tests/analysis/` | Analysis validators and regression tests |
 | `export/` | MLIR export and re-export |
 | `scripts/` | Slurm launchers and top-level automation |
 | `runs/` | Lightweight run registry; generated state is ignored |

@@ -26,6 +26,9 @@ _OPTIONAL_FRAME_ALIGNED_KEYS = (
     "teacher_cg_forces", "teacher_force_mask",
     "TeacherFeature", "TeacherForce", "teacher_force_std", "teacher_force_count",
     "RawForce",
+    # Per-label uncertainty for optional heteroscedastic force weighting
+    # (training.label_uncertainty). Frame-aligned; float32 like the rest.
+    "sigma_label",
 )
 
 

@@ -12,7 +12,6 @@ import csv
 import json
 import os
 import pickle
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, Mapping, Optional
@@ -572,9 +571,6 @@ def _resolve(path: str | Path, root: Path) -> Path:
 
 
 def _load_model(training_config_path: Path, params_path: Path, dataset_path: Path, R0: np.ndarray, mask0: np.ndarray, species0: np.ndarray):
-    repo = Path(__file__).resolve().parents[1]
-    if str(repo) not in sys.path:
-        sys.path.insert(0, str(repo))
     from utils.jax_setup import apply_jax_compat_shims
     apply_jax_compat_shims()
     from config.manager import ConfigManager
@@ -680,9 +676,6 @@ def _edge_table(edge_outputs: list[dict[str, np.ndarray]], batch: OODBatch) -> d
 
 
 def _center_descriptor(R: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    repo = Path(__file__).resolve().parents[1]
-    if str(repo) not in sys.path:
-        sys.path.insert(0, str(repo))
     from models.local_extrapolation_gate import build_jax_geometric_bio_descriptor
     descs = []
     for b in range(R.shape[0]):
@@ -977,12 +970,17 @@ def build_parser() -> argparse.ArgumentParser:
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description="Offline Allegro edge-manifold diagnostic runner.")
     parser.add_argument("--project-root", type=Path, default=root)
-    parser.add_argument("--dataset", type=Path, default=root / "data_prep/datasets/dataset_2605_5pro_320_aggforce_1bead_mlonly/combined_dataset.npz")
-    parser.add_argument("--training-config", type=Path, default=root / "local_work/outputs/20260609_5pro_aggforce_fm_residual_smaller_tiles/config_runtime_670425.yaml")
-    parser.add_argument("--params", type=Path, default=root / "local_work/outputs/20260609_5pro_aggforce_fm_residual_smaller_tiles/checkpoints/epoch00090.pkl")
-    parser.add_argument("--output-root", type=Path, default=root / "local_work/edge_manifold_diagnostics")
-    parser.add_argument("--run-name", default="20260611_5pro_epoch90_edge_latent_diagnostics")
-    parser.add_argument("--radial-artifact", type=Path, default=root / "local_work/edge_distance_gate_artifacts/20260610_5pro_epoch50_pairdist_type_edge_gate_falloff5pct.npz")
+    parser.add_argument("--dataset", type=Path, required=True,
+                        help="evaluation dataset NPZ")
+    parser.add_argument("--training-config", type=Path, required=True,
+                        help="training config YAML")
+    parser.add_argument("--params", type=Path, required=True,
+                        help="checkpoint/parameter pickle")
+    parser.add_argument("--output-root", type=Path, required=True,
+                        help="directory for this diagnostic bundle")
+    parser.add_argument("--run-name", default="edge_manifold_diagnostics")
+    parser.add_argument("--radial-artifact", type=Path, required=True,
+                        help="precomputed radial artifact NPZ")
     parser.add_argument("--max-frames", type=int, default=None)
     parser.add_argument("--max-train-frames", type=int, default=128)
     parser.add_argument("--max-eval-frames", type=int, default=32)

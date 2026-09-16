@@ -116,17 +116,20 @@ def tica_cv_block(bias: SmoothTICABias, mapping: CGMapping, prefix: str = "tic")
     """
     proj = bias.projection
     atoms = mapping.aa_atom_indices_1based
-    lines = [f"# TICA CVs: {len(proj.pairs)} pair distances -> {proj.coefficients.shape[1]} TICs",
-             "# z = (d - mean) @ coefficients   == COMBINE(COEFFICIENTS, PARAMETERS, POWERS=1)"]
+    lines = [
+        f"# TICA CVs: {len(proj.pairs)} pair distances -> {proj.coefficients.shape[1]} TICs",
+        "# z = (d - mean) @ coefficients   == COMBINE(COEFFICIENTS, PARAMETERS, POWERS=1)",
+    ]
     for k, (i, j) in enumerate(proj.pairs):
         lines.append(f"d{k}: DISTANCE ATOMS={atoms[int(i)]},{atoms[int(j)]}")
     args = ",".join(f"d{k}" for k in range(len(proj.pairs)))
     for t in range(proj.coefficients.shape[1]):
         lines.append(
-            f"{prefix}{t + 1}: COMBINE ARG={args} "
-            f"COEFFICIENTS={_fmt(proj.coefficients[:, t])} "
-            f"PARAMETERS={_fmt(proj.mean)} "
-            f"POWERS={_fmt(np.ones(len(proj.pairs)), places=1)} PERIODIC=NO"
+            f"{prefix}{t + 1}: COMBINE ARG={args}"
+            f" COEFFICIENTS={_fmt(proj.coefficients[:, t])}"
+            f" PARAMETERS={_fmt(proj.mean)}"
+            f" POWERS={_fmt(np.ones(len(proj.pairs)), places=1)}"
+            f" PERIODIC=NO"
         )
     return "\n".join(lines) + "\n"
 
@@ -142,17 +145,17 @@ def walls_block(bias: SmoothTICABias, prefix: str = "tic", label: str = "twall")
     kappa = 0.5 * np.asarray(bias.wall_k_kcal_mol, dtype=float)
     args = ",".join(f"{prefix}{t + 1}" for t in range(len(lo)))
     return (
-        f"# walls: PLUMED has no 1/2 in KAPPA, Python does -> KAPPA = 0.5 * wall_k\n"
+        "# walls: PLUMED has no 1/2 in KAPPA, Python does -> KAPPA = 0.5 * wall_k\n"
         f"{label}_lo: LOWER_WALLS ARG={args} AT={_fmt(lo)} KAPPA={_fmt(kappa)}\n"
         f"{label}_hi: UPPER_WALLS ARG={args} AT={_fmt(hi)} KAPPA={_fmt(kappa)}\n"
     )
 
 
 def metad_block(prefix: str = "tic", *, height: float, sigma: Sequence[float], pace: int,
-                bias_factor: float, temperature: float, equilibrate_steps: int,
-                dt_ps: float, grid_min: Sequence[float] | None = None,
-                grid_max: Sequence[float] | None = None, walkers_mpi: bool = False,
-                label: str = "metad") -> str:
+                bias_factor: float, temperature: float, equilibrate_steps: int, dt_ps: float,
+                grid_min: Sequence[float] | None = None,
+                grid_max: Sequence[float] | None = None,
+                walkers_mpi: bool = False, label: str = "metad") -> str:
     """Well-tempered MetaD on the TICA CVs.
 
     Two differences from the Python term, both intentional:
@@ -166,29 +169,21 @@ def metad_block(prefix: str = "tic", *, height: float, sigma: Sequence[float], p
     wide-and-short discovery, see the comment at the emission site.
     """
     args = ",".join(f"{prefix}{t + 1}" for t in range(len(sigma)))
-    line = (f"{label}: METAD ARG={args} HEIGHT={height:.10g} SIGMA={_fmt(sigma)} "
-            f"PACE={int(pace)} BIASFACTOR={bias_factor:.10g} TEMP={temperature:.10g} "
-            f"FILE=HILLS")
+    line = (f"{label}: METAD ARG={args} HEIGHT={height:.10g} SIGMA={_fmt(sigma)}"
+            f" PACE={int(pace)} BIASFACTOR={bias_factor:.10g} TEMP={temperature:.10g}"
+            f" FILE=HILLS")
     if walkers_mpi:
-        # MULTIPLE WALKERS. Without this, N replicas each build their OWN hill history from
-        # zero: 64 replicas give 64x redundant filling and no replica gets far, which defeats
-        # the whole "short but wide" discovery strategy. With it they share ONE growing bias.
-        #
-        # WALKERS_MPI shares hills over the MPI communicator, NOT through a shared directory
-        # (WALKERS_DIR is the file-based alternative and is the only compatible WALKERS_*
-        # option -- checked against the deployed 2.9.3 kernel's own manual). `-multidir`
-        # already sets up the multi-replica communicator, so nothing else is needed.
         line += " WALKERS_MPI"
     if equilibrate_steps > 0:
         line += f" UPDATE_FROM={equilibrate_steps * dt_ps:.10g}"
     if grid_min is not None and grid_max is not None:
-        line += (f" GRID_MIN={_fmt(grid_min)} GRID_MAX={_fmt(grid_max)}"
-                 f" CALC_RCT")
-    return (f"# well-tempered MetaD; UPDATE_FROM is ps, = equilibrate_steps * dt\n{line}\n")
+        line += f" GRID_MIN={_fmt(grid_min)} GRID_MAX={_fmt(grid_max)} CALC_RCT"
+    return f"# well-tempered MetaD; UPDATE_FROM is ps, = equilibrate_steps * dt\n{line}\n"
 
 
-def write_external_grid(bias: SmoothTICABias, path: Path, *, n_points: Sequence[int] = (401, 401),
-                        pad: float = 0.15, pad_sigma: float = 4.0, label: str = "treg",
+def write_external_grid(bias: SmoothTICABias, path: Path, *,
+                        n_points: Sequence[int] = (401, 401), pad: float = 0.15,
+                        pad_sigma: float = 4.0, label: str = "treg",
                         prefix: str = "tic") -> tuple[np.ndarray, np.ndarray]:
     """Tabulate the static tica_regional field for PLUMED's EXTERNAL action.
 
@@ -233,8 +228,7 @@ def write_external_grid(bias: SmoothTICABias, path: Path, *, n_points: Sequence[
     span = hi - lo
     bias = _without_walls(bias)
 
-    # keep the ORIGINAL spacing (from n_points over the fraction-padded range) as the range
-    # grows, instead of stretching the same number of points over a wider window
+    # hold SPACING fixed as the padded range grows, so resolution does not silently degrade
     base_span = span * (1.0 + 2.0 * pad)
     spacing = base_span / (np.asarray(n_points, dtype=float) - 1.0)
     counts = np.maximum(np.ceil((hi_p - lo_p) / spacing).astype(int) + 1, 3)
@@ -244,25 +238,12 @@ def write_external_grid(bias: SmoothTICABias, path: Path, *, n_points: Sequence[
     path.parent.mkdir(parents=True, exist_ok=True)
     names = [f"{prefix}1", f"{prefix}2"]
     with path.open("w") as fh:
-        # The value column MUST be named "<action label>.bias" -- PLUMED looks the grid column
-        # up by the label of the EXTERNAL action, not by a fixed name, and aborts otherwise.
-        fh.write(f"#! FIELDS {names[0]} {names[1]} {label}.bias "
-                 f"der_{names[0]} der_{names[1]}\n")
+        fh.write(f"#! FIELDS {names[0]} {names[1]} {label}.bias der_{names[0]} der_{names[1]}\n")
         for a in range(2):
-            # nbins MUST come from the ACTUAL axis length, not the requested n_points: the
-            # padding below grows the axes, and a stale nbins makes PLUMED reinterpret the
-            # whole grid on the wrong stride (silently, as a plausible-looking wrong field).
             fh.write(f"#! SET min_{names[a]} {lo_p[a]:.10g}\n")
             fh.write(f"#! SET max_{names[a]} {hi_p[a]:.10g}\n")
             fh.write(f"#! SET nbins_{names[a]} {len(axes[a]) - 1}\n")
             fh.write(f"#! SET periodic_{names[a]} false\n")
-        # PLUMED grids vary the FIRST field fastest, so tic1 is the inner loop.
-        # Evaluated one ROW at a time rather than point-by-point: the scalar path is
-        # O(n_points^2 * n_centres) Python-level calls (585 centres here) and a 1201^2 grid
-        # did not finish in two minutes. Row-chunking keeps peak memory at
-        # n_points x n_centres while giving numpy the whole row.
-        # Zero-weight KDE centres make log(w) = -inf, which logsumexp handles correctly; the
-        # numpy warning is noise, not a problem.
         with np.errstate(divide="ignore"):
             for y in axes[1]:
                 energy, grad = _row_energy_gradient(bias, axes[0], float(y))
@@ -284,12 +265,11 @@ def _row_energy_gradient(bias: SmoothTICABias, xs: np.ndarray, y: float):
     h = np.asarray(bias.bandwidth, dtype=float)
 
     def log_density(weights):
-        # (n_x, n_centres, 2)
         delta = z[:, None, :] - bias.centers[None, :, :]
         expo = np.log(weights)[None, :] - 0.5 * np.sum((delta / h) ** 2, axis=2)
         ld = logsumexp(expo, axis=1)
         resp = np.exp(expo - ld[:, None])
-        grad = np.sum(resp[:, :, None] * (-delta / h**2), axis=1)
+        grad = np.sum(resp[:, :, None] * (-delta / h ** 2), axis=1)
         return ld, grad
 
     attractor = getattr(bias, "attractor_weights", None)
@@ -308,15 +288,14 @@ def _row_energy_gradient(bias: SmoothTICABias, xs: np.ndarray, y: float):
         lower, upper = bias.bounds[axis]
         val = z[:, axis]
         d = np.where(val < lower, val - lower, np.where(val > upper, val - upper, 0.0))
-        energy = energy + 0.5 * bias.wall_k_kcal_mol[axis] * d**2
+        energy = energy + 0.5 * bias.wall_k_kcal_mol[axis] * d ** 2
         gradient[:, axis] += bias.wall_k_kcal_mol[axis] * d
     return energy, gradient
 
 
 def external_block(grid_path: Path, prefix: str = "tic", label: str = "treg") -> str:
-    # `label:` already names the action -- adding LABEL= as well is a parse error.
     args = f"{prefix}1,{prefix}2"
-    return (f"# static tica_regional field, tabulated from tica_energy_gradient\n"
+    return ("# static tica_regional field, tabulated from tica_energy_gradient\n"
             f"{label}: EXTERNAL ARG={args} FILE={grid_path}\n")
 
 
@@ -354,7 +333,8 @@ class PlumedNativeBias:
         return "".join(parts)
 
 
-def write_grid_from_fn(fn, path: Path, lo, hi, *, n_points=(401, 401), label: str = "treg",
+def write_grid_from_fn(fn, path: Path, lo, hi, *, n_points=(401, 401),
+                       label: str = "treg",
                        prefix: str = "tic") -> tuple[np.ndarray, np.ndarray]:
     """Tabulate ANY `z -> (V, grad V)` callable as a PLUMED EXTERNAL grid.
 
@@ -379,8 +359,7 @@ def write_grid_from_fn(fn, path: Path, lo, hi, *, n_points=(401, 401), label: st
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as fh:
-        fh.write(f"#! FIELDS {names[0]} {names[1]} {label}.bias "
-                 f"der_{names[0]} der_{names[1]}\n")
+        fh.write(f"#! FIELDS {names[0]} {names[1]} {label}.bias der_{names[0]} der_{names[1]}\n")
         for a in range(2):
             fh.write(f"#! SET min_{names[a]} {axes[a][0]:.10g}\n")
             fh.write(f"#! SET max_{names[a]} {axes[a][-1]:.10g}\n")
@@ -390,5 +369,6 @@ def write_grid_from_fn(fn, path: Path, lo, hi, *, n_points=(401, 401), label: st
             row = np.stack([axes[0], np.full(len(axes[0]), float(y))], -1)
             V, dV = fn(row)
             for i, x in enumerate(axes[0]):
-                fh.write(f"{x:.10g} {y:.10g} {V[i]:.10g} {dV[i, 0]:.10g} {dV[i, 1]:.10g}\n")
+                fh.write(f"{x:.10g} {y:.10g} {V[i]:.10g} "
+                         f"{dV[i, 0]:.10g} {dV[i, 1]:.10g}\n")
     return axes[0], axes[1]

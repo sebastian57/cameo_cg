@@ -406,7 +406,7 @@ def _write_multidir_scripts(out: Path, cfg: Dict[str, Any], n: int, backend: str
     ntomp = cpus_per_rank(max(len(g) for g in groups), node_cpus)
 
     for gi, members in enumerate(groups):
-        script = out / f"run_group_{gi:03d}.sh"
+        script = out / f"run_group_{gi:04d}.sh"
         script.write_text(multidir_group_script(
             case_dirs=[f"replica_{r:02d}" for r in members],
             structure_for=[_resolve_structure(cfg, r) for r in members],

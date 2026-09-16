@@ -477,7 +477,7 @@ def main() -> None:
     groups = group_ranges(len(case_dirs), a.replicas_per_job)
     ntomp = cpus_per_rank(max(len(g) for g in groups))
     for gi, members in enumerate(groups):
-        sh = a.outdir / f"run_group_{gi:03d}.sh"
+        sh = a.outdir / f"run_group_{gi:04d}.sh"
         sh.write_text(multidir_group_script(
             index=("../beads.ndx" if a.freeze else None), plumed=not a.freeze,
             case_dirs=[case_dirs[i] for i in members],
