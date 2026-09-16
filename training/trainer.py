@@ -1868,15 +1868,20 @@ class Trainer:
         from jax_md_mod.custom_partition import static_neighbor_list
         from training.path_penalty import full_graph_edges, load_path_panel, make_path_penalty
 
-        panel = load_path_panel(cfg["panel_path"])
-        edges = _jnp.asarray(full_graph_edges(panel["R"].shape[1]))
-        neighbors = _jax.vmap(lambda r: static_neighbor_list(edges, r, max_occupancy=edges.shape[1]))(
-            _jnp.asarray(panel["R"], dtype=_jnp.float32))
-        training_logger.info(
-            "[PathPenalty] lambda=%g  panel=%s  structures=%d  pairs=%d (train %d)",
-            cfg["lambda"], cfg["panel_path"], len(panel["R"]), len(panel["pairs"]), int(panel["train"].sum()))
-        return make_path_penalty(energy_of=self.model.compute_energy, panel=panel,
-                                 lam=cfg["lambda"], neighbors=neighbors)
+        def build(path, lam):
+            panel = load_path_panel(path)
+            edges = _jnp.asarray(full_graph_edges(panel["R"].shape[1]))
+            neighbors = _jax.vmap(lambda r: static_neighbor_list(edges, r, max_occupancy=edges.shape[1]))(
+                _jnp.asarray(panel["R"], dtype=_jnp.float32))
+            kind = "profile" if "profile_target" in panel else ("basin_fep" if "U_old" in panel else "pairs")
+            training_logger.info("[PathPenalty] %s  lambda=%g  panel=%s  structures=%d", kind, lam, path, len(panel["R"]))
+            return make_path_penalty(energy_of=self.model.compute_energy, panel=panel, lam=lam, neighbors=neighbors)
+
+        terms = [build(p, lam) for p, lam in ((cfg["panel_path"], cfg["lambda"]),
+                                               (cfg["profile_panel_path"], cfg["profile_lambda"])) if p]
+        if not terms:
+            raise ValueError("training.path_penalty enabled without panel_path or profile_panel_path")
+        return terms[0] if len(terms) == 1 else (lambda params: terms[0](params) + terms[1](params))
 
     def _build_bias_penalty(self, cfg):
         """Systematic-force-bias penalty on a FIXED panel of mean-force labels.

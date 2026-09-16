@@ -9,6 +9,10 @@ between and within basins that set basin free energies (basin FEP: Delta F_AA = 
 
 WHAT.  mode "pairs": L = lambda * mean_{train pairs} ((U(x_j) - U(x_i) - dA_ij) / sigma_ij)^2,
 sigma_ij = sqrt(se_ij^2 + sigma_floor^2) (floor set when the panel is built).
+       mode "profile" (panel carries profile_*): L = lambda * mean_{train legs} r^T M r / n with
+r_k = [U(x_k) - U(x_0)] - [A(x_k) - A(x_0)] along each AA path leg (nodes k >= 1), M = (Sigma + sigma_f^2 I)^-1 from the
+path-integral covariance, n = number of nodes. Constrains the integrated PMF profile (barrier shape), which force matching
+leaves nearly unconstrained (LESSONS L77-L80); tracker 2026-09-16 P1: 1.35-1.91 kcal/mol barrier deficit on the phi~0 legs.
        mode "basin_fep" (panel carries U_old + basin): L = lambda * mean_q ((S_Bq - S_Aq - c_q) / sigma_q)^2 with
 S_b = -kT ln <exp(-(U - U_old)/kT)>_{panel frames in b} = exact FEP basin free-energy shift of the model being trained
 relative to the model that generated the frames, and c_q the AA-path correction Delta F_AA - Delta F_old (basin FEP of
@@ -34,13 +38,22 @@ def path_penalty_enabled(config) -> bool:
 def path_penalty_config(config) -> Dict[str, Any]:
     cfg = config.get("training", "path_penalty", default={}) or {}
     return {"enabled": bool(cfg.get("enabled", False)), "lambda": float(cfg.get("lambda", 1.0)),
-            "panel_path": str(cfg.get("panel_path", ""))}
+            "panel_path": str(cfg.get("panel_path", "")),
+            # optional second panel (e.g. a profile panel next to a basin_fep panel); the penalties are summed
+            "profile_panel_path": str(cfg.get("profile_panel_path", "")),
+            "profile_lambda": float(cfg.get("profile_lambda", 1.0))}
 
 
 def load_path_panel(path: str) -> Dict[str, np.ndarray]:
     """pairs npz: R (S,n,3), mask (S,n), species (S,n), pairs (P,2) int, target (P,), sigma (P,), train (P,) bool.
     basin_fep npz additionally: U_old (S,), basin (S,) int; pairs then index BASINS (A,B), target = c_AB."""
     z = np.load(path)
+    if "profile_target" in z.files:
+        panel = {k: z[k] for k in ("R", "mask", "species", "profile_index", "profile_valid", "profile_target",
+                                   "profile_Minv", "profile_train")}
+        if not panel["profile_train"].any() or panel["profile_index"].max() >= len(panel["R"]):
+            raise ValueError(f"{path}: no training legs or profile_index out of range")
+        return panel
     panel = {k: z[k] for k in ("R", "mask", "species", "pairs", "target", "sigma", "train")}
     if "U_old" in z.files:
         panel.update(U_old=z["U_old"], basin=z["basin"], kT=float(z["kT"]))
@@ -69,15 +82,30 @@ def make_path_penalty(*, energy_of, panel: Dict[str, np.ndarray], lam: float, ne
     import jax.numpy as jnp
 
     R, m, s = (jnp.asarray(panel[k]) for k in ("R", "mask", "species"))
-    tr = np.asarray(panel["train"], bool)
-    i, j = (jnp.asarray(panel["pairs"][tr, c]) for c in (0, 1))
-    t, sg = jnp.asarray(panel["target"][tr]), jnp.asarray(panel["sigma"][tr])
     nb = None if neighbors is None else jax.tree.map(jnp.asarray, neighbors)
 
     def energies(params):
         if nb is None:
             return jax.vmap(lambda r, mm, ss: energy_of(params, r, mm, ss))(R, m, s)
         return jax.vmap(lambda r, mm, ss, n_: energy_of(params, r, mm, ss, neighbor=n_))(R, m, s, nb)
+
+    if "profile_target" in panel:
+        tr = np.asarray(panel["profile_train"], bool)
+        idx = jnp.asarray(panel["profile_index"][tr]); val = jnp.asarray(panel["profile_valid"][tr][:, 1:], jnp.float32)
+        a = jnp.asarray(panel["profile_target"][tr]); M = jnp.asarray(panel["profile_Minv"][tr])
+        n = jnp.maximum(val.sum(1), 1.0)
+
+        def penalty(params):
+            u = energies(params)[idx]
+            r = ((u - u[:, :1]) - a)[:, 1:] * val
+            return float(lam) * jnp.mean(jnp.einsum("li,lij,lj->l", r, M, r) / n)
+
+        penalty.energies = energies
+        return penalty
+
+    tr = np.asarray(panel["train"], bool)
+    i, j = (jnp.asarray(panel["pairs"][tr, c]) for c in (0, 1))
+    t, sg = jnp.asarray(panel["target"][tr]), jnp.asarray(panel["sigma"][tr])
 
     if "U_old" in panel:
         U0 = jnp.asarray(panel["U_old"]); kT = float(panel["kT"]); nb_ = int(panel["basin"].max()) + 1
