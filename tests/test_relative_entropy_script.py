@@ -1,3 +1,5 @@
+import shlex
+import sys
 import subprocess
 import tempfile
 import unittest
@@ -15,14 +17,15 @@ from scripts.train_relative_entropy import (
     _load_configured_initial_states,
 )
 
-PYTHON = "/e/project1/cameo/schmidt36/venv_cameocg_jupiter2026/bin/python"
-MODULES = "source /e/project1/cameo/schmidt36/load_modules_2026.sh"
+REPO = Path(__file__).resolve().parents[1]
+PYTHON = sys.executable
+MODULES = REPO / "env_setup" / "load_modules_2026.sh"
 
 
 def _run_python(args):
-    quoted = " ".join(args)
+    quoted = " ".join(shlex.quote(str(arg)) for arg in args)
     return subprocess.run(
-        f"{MODULES} && PYTHONPATH=. {PYTHON} {quoted}",
+        f"source {shlex.quote(str(MODULES))} && PYTHONPATH=. {shlex.quote(PYTHON)} {quoted}",
         cwd=Path(__file__).resolve().parents[1],
         shell=True,
         text=True,

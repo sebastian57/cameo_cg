@@ -32,6 +32,7 @@ Validation (first 10 frames, compare OpenMM to stored AA forces):
 """
 
 import argparse
+import os
 import logging
 import sys
 import time
@@ -197,9 +198,9 @@ def validate_ff(ctx, R_aa: np.ndarray, F_aa_ref: np.ndarray, n_frames: int = 10)
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-_DEFAULT_GRO = (
-    "/e/project1/cameo/schmidt36/relative-entropy"
-    "/examples/alanine_dipeptide/data/confs/heavy_2_7nm.gro"
+_DEFAULT_GRO = os.environ.get(
+    "CAMEO_HVP_GRO_REF",
+    str(Path(__file__).resolve().parents[1] / "local_work" / "reference" / "heavy_2_7nm.gro"),
 )
 
 

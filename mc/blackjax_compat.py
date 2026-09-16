@@ -10,7 +10,6 @@ from pathlib import Path
 def _ensure_local_blackjax_on_path() -> None:
     for candidate in (
         Path(__file__).resolve().parents[2] / "blackjax",
-        Path("/e/project1/cameo/schmidt36/blackjax"),
     ):
         if (candidate / "blackjax" / "__init__.py").exists():
             path = str(candidate)

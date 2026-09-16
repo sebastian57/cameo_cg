@@ -20,7 +20,7 @@ from models.direct_force import scatter_central_pair_forces
 
 # Resolve helper module paths used by the fast backend implementation.
 # The helper files live in the sibling repository directory:
-#   /p/project1/cameo/schmidt36/cueq_allegro/{layers.py,layers_cueq.py,utils.py}
+#   <workspace>/cueq_allegro/{layers.py,layers_cueq.py,utils.py}
 _CUEQ_HELPER_DIR = Path(__file__).resolve().parents[2] / "cueq_allegro"
 
 

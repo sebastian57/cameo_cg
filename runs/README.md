@@ -49,7 +49,7 @@ A five-minute user cron job provides discovery and repair for jobs that cannot
 run their exit trap:
 
 ```cron
-*/5 * * * * cd /e/project1/cameo/schmidt36/cameo_cg && python3 runs/registry.py sync
+*/5 * * * * cd /path/to/cameo_cg && python3 runs/registry.py sync
 ```
 
 Cron installation is intentionally manual because login environments and
