@@ -1743,7 +1743,7 @@ class Trainer:
             targets.update(make_safety_quantities(self.model, self.config))
         if teacher_distillation_enabled(self.config):
             targets.update(teacher_distillation_quantities(self.model, self.config))
-        if self._direct_force_mode:
+        if getattr(self, "_direct_force_mode", False):
             # ForceMatching builds its standard F observable from -grad(E).
             # Updating the same key is the supported Chemtrain mechanism for a
             # force-only model and avoids all coordinate derivatives.

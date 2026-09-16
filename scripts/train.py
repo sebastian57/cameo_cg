@@ -1994,12 +1994,16 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
 
 
 if __name__ == "__main__":
+    usage = (
+        "Usage:\n"
+        "  python train.py <config.yaml> [job_id] [--resume checkpoint.pkl]\n"
+        "  python train.py <config.yaml> --multi-protein-dir <bucket_dir> [job_id]"
+    )
+    if len(sys.argv) >= 2 and sys.argv[1] in ("-h", "--help"):
+        print(usage)
+        sys.exit(0)
     if len(sys.argv) < 2:
-        logging.error(
-            "Usage:\n"
-            "  python train.py <config.yaml> [job_id] [--resume checkpoint.pkl]\n"
-            "  python train.py <config.yaml> --multi-protein-dir <bucket_dir> [job_id]"
-        )
+        logging.error(usage)
         sys.exit(1)
 
     config_file = sys.argv[1]
