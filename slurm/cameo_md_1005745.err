@@ -1,0 +1,67 @@
+The following modules were not unloaded:
+  (Use "module --force purge" to unload all):
+
+  1) Stages/2026
+
+  [01;33mThis stage is deprecated. Please consider moving to a new stage (2026
+or newer)[0m
+
+
+The following have been reloaded with a version change:
+  1) Stages/2026 => Stages/2025
+
+Jax plugin configuration error: Exception when calling jax_plugins.xla_cuda12.initialize()
+Traceback (most recent call last):
+  File "/e/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 607, in discover_pjrt_plugins
+    plugin_module.initialize()
+  File "/e/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax_plugins/xla_cuda12/__init__.py", line 96, in initialize
+    for _name, _value in cuda_plugin_extension.registrations().items():
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: module 'jax_cuda12_plugin.cuda_plugin_extension' has no attribute 'registrations'
+[MD] Project root: /e/project1/cameo/edelkoetter2/work/cameo_cg  (CAMEO_CG_PROJECT_ROOT=/e/project1/cameo/edelkoetter2/work/cameo_cg)
+[MD] Training config: /e/project1/cameo/edelkoetter2/work/cameo_cg/local_work/outputs/my_run_16_backbone_CB/exports/ala_2_test_run_35_config.yaml
+[MD] Dataset: /e/project1/cameo/edelkoetter2/work/cameo_cg/local_work/input_data/ala2_cg_data_backbone_CB.npz
+[MD] Initial frame: idx=0 N_atoms=6 n_valid=6 n_species=6
+[MD] Box: [49.503044 49.59575  49.451027]
+[Model] Using AllegroModelCuEq (cuEquivariance backend)
+[Model]   compute_dtype    = float32
+[Model]   mlp_dtype        = float32
+[Model]   remat            = level=0, policy=none
+[Model]   MLP activations  = hidden=silu, output=tanh
+[Model]   debug logging    = False
+/e/project1/cameo/edelkoetter2/work/chemtrain-deploy/external/chemtrain_cameo/jax_md_mod/custom_partition.py:73: UserWarning: Mask will only be applied if neighbor list must be re-computed. Setting a too high threshold might lead to unexpected behavior.
+  warnings.warn(
+[Model]   neighbor format = dense (disable_cell_list=False)
+[Model]   neighbor extra_capacity = 1
+[Model] avg_num_neighbors = 5.0 (configured from dataset_sample; initial estimate 5.0)
+[Model] max_edges = inferred (max_edge_multiplier=1.250)
+[Model] Detected 6 unique species
+[Model]   backend         = allegro_cueq_fast_1103
+[Model] ML backbone: allegro_cueq_fast
+[Model] Mode: Pure ALLEGRO_CUEQ_FAST (no priors)
+[MD] Model: CombinedModel(mode=PureALLEGRO_CUEQ_FAST, N_max=6)
+[MD] Params: /e/project1/cameo/edelkoetter2/work/cameo_cg/local_work/outputs/my_run_16_backbone_CB/exports/ala_2_test_run_35_params.pkl
+[MD] [Units] Converted physical → AKMA:
+[MD]   dt: 1 fs  →  0.0204549 AKMA
+[MD]   kT: 298 K  →  0.592187 kcal/mol
+[MD]   gamma: 50 ps (τ)  →  0.00097776 AKMA⁻¹ (γ=1/τ)
+[MD]   mass: [12.011, 14.007, 12.001, 14.007, 12.011, 12.011] amu  →  [12.011, 14.007, 12.001, 14.007, 12.011, 12.011] amu
+[MD] Replicas: running 1 of 1  (base_seed=42, indices=[0])
+[MD] MDRunner: integrator=nvt_langevin n_steps=30000000 dt=0.02045 AKMA kT=0.5922 kcal/mol mass=[12.011, 14.007, 12.001, 14.007, 12.011, 12.011] amu (per-species)
+[MD]   gamma=0.000978 AKMA^-1 (τ ≈ 1022.7 AKMA)
+[MD]   zero_com_velocity: True
+[MD]   observables: ['step', 'T', 'KE', 'PE', 'E_total', 'pressure', 'box_volume']  every 50 steps
+[MD] Compiling integrator (first step may be slow) …
+/e/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/array_methods.py:118: UserWarning: Explicitly requested dtype <class 'jax.numpy.float64'> requested in astype is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return lax_numpy.astype(self, dtype, copy=copy, device=device)
+/e/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/array_methods.py:118: UserWarning: Explicitly requested dtype <class 'jax.numpy.float64'> requested in astype is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return lax_numpy.astype(self, dtype, copy=copy, device=device)
+/e/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/array_methods.py:118: UserWarning: Explicitly requested dtype <class 'jax.numpy.float64'> requested in astype is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return lax_numpy.astype(self, dtype, copy=copy, device=device)
+/e/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/reductions.py:213: UserWarning: Explicitly requested dtype <class 'jax.numpy.float64'> requested in sum is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return _reduction(a, "sum", np.sum, lax.add, 0, preproc=_cast_to_numeric,
+[MD]   compilation + first step: 14.8 s
+[MD] MD complete: 30000000 steps in 30654.3 s (1.02 ms/step)  T_final=317.8 K  PE_final=0.000 kcal/mol
+[MD] Trajectory saved: /e/project1/cameo/edelkoetter2/work/cameo_cg/local_work/md_runs/ala2/backbone_6bead/traj_nvt_30ns.npz
+[MD] Frames: 600001  T_mean=409.1 K  PE_mean=-36.761 kcal/mol
+[MD] OVITO dump: /e/project1/cameo/edelkoetter2/work/cameo_cg/local_work/md_runs/ala2/backbone_6bead/traj_nvt_30ns.dump

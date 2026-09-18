@@ -1,0 +1,30 @@
+Jax plugin configuration error: Exception when calling jax_plugins.xla_cuda12.initialize()
+Traceback (most recent call last):
+  File "/e/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 607, in discover_pjrt_plugins
+    plugin_module.initialize()
+  File "/e/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax_plugins/xla_cuda12/__init__.py", line 96, in initialize
+    for _name, _value in cuda_plugin_extension.registrations().items():
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: module 'jax_cuda12_plugin.cuda_plugin_extension' has no attribute 'registrations'
+/e/project1/cameo/edelkoetter2/work/cameo_cg/config/manager.py:516: UserWarning: cuEq override block(s) model.allegro.allegro_cueq are nested too deeply and will not override Allegro settings. Move them to model.allegro_cueq (or model.allegro_cuEq).
+  warnings.warn(
+[Model] Using AllegroModelCuEq (cuEquivariance backend)
+[Model]   compute_dtype    = float32
+[Model]   mlp_dtype        = float32
+[Model]   remat            = level=0, policy=none
+[Model]   MLP activations  = hidden=silu, output=tanh
+[Model]   debug logging    = True
+/e/project1/cameo/edelkoetter2/work/chemtrain-deploy/external/chemtrain_cameo/jax_md_mod/custom_partition.py:73: UserWarning: Mask will only be applied if neighbor list must be re-computed. Setting a too high threshold might lead to unexpected behavior.
+  warnings.warn(
+[Model]   neighbor format = dense (disable_cell_list=True, capacity_multiplier=1.050)
+[Model]   neighbor extra_capacity = 0
+[Model] avg_num_neighbors = 1.0 (configured from dataset_sample; initial estimate 0.5)
+[Model] max_edges = 1 (max_edge_multiplier=1.250)
+[Model] Detected 2 unique species
+[Model]   backend         = allegro_cueq_fast_1103
+[Model] ML backbone: allegro_cueq_fast
+[Model] Mode: Pure ALLEGRO_CUEQ_FAST (no priors)
+/e/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/array_methods.py:118: UserWarning: Explicitly requested dtype <class 'jax.numpy.float64'> requested in astype is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return lax_numpy.astype(self, dtype, copy=copy, device=device)
+/e/software/default/stages/2025/software/jax/0.4.34-gpsfbf-2024a-CUDA-12/lib/python3.12/site-packages/jax/_src/numpy/reductions.py:213: UserWarning: Explicitly requested dtype <class 'jax.numpy.float64'> requested in sum is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+  return _reduction(a, "sum", np.sum, lax.add, 0, preproc=_cast_to_numeric,

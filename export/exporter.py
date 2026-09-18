@@ -141,6 +141,9 @@ class ModelExporter(exporter.Exporter):
         self.sample_species_model = (
             None if sample_species_model is None else jnp.asarray(sample_species_model, dtype=jnp.int32)
         )
+        self.sample_orientations = (
+            None if getattr(ml_model, "_O0", None) is None else jnp.asarray(getattr(ml_model, "_O0"))
+        )
         self.export_mode = _normalize_export_mode(export_mode)
         self.also_export_naive = bool(also_export_naive)
         self.naive_equivalence_atol = (
@@ -155,6 +158,7 @@ class ModelExporter(exporter.Exporter):
         species: jax.Array,
         graph,
         valid_mask: Optional[jax.Array] = None,
+        orientations: Optional[jax.Array] = None,
     ) -> jax.Array:
         """Compute per-atom energies for LAMMPS."""
         if not self._export_debug_logged:
@@ -202,14 +206,33 @@ class ModelExporter(exporter.Exporter):
             self.dihedrals,
             self.prior_params,
             neighbor=neighbors,
+            orientations=orientations,
         )
 
         return _ensure_per_atom_energy(e, pos.shape[0])
+
+    def _build_symbolic_export_inputs(self):
+        self._add_shapes(self._define_position_shapes)
+        self._add_shapes(self.graph_type.create_symbolic_input_format)
+        if self.sample_orientations is not None:
+            def _orientation_shapes(**kwargs):
+                n_atoms = kwargs["n_atoms"]
+                return (jax.ShapeDtypeStruct((n_atoms, 3, 3), jnp.float32),)
+
+            self._init_fns.append(_orientation_shapes)
+        return self._create_shapes()
 
     def _energy_fn(self, position, species, n_local, n_ghost, newton, *graph_args):
         # Expects particles to be sorted by local, ghost, and padding atoms.
         valid_mask = jnp.arange(position.shape[0]) < (n_local + n_ghost)
         ghost_mask = jnp.arange(position.shape[0]) < n_local
+
+        orientations = None
+        graph_only_args = graph_args
+        expected_graph_args = 3
+        if len(graph_args) == expected_graph_args + 1:
+            graph_only_args = graph_args[:expected_graph_args]
+            orientations = graph_args[expected_graph_args]
 
         graph, build_statistics = self.graph_type.create_from_args(
             self.r_cutoff,
@@ -219,7 +242,7 @@ class ModelExporter(exporter.Exporter):
             ghost_mask,
             valid_mask,
             newton,
-            *graph_args,
+            *graph_only_args,
         )
         graph = jax.lax.stop_gradient(graph)
 
@@ -229,6 +252,7 @@ class ModelExporter(exporter.Exporter):
                 species,
                 graph,
                 valid_mask=valid_mask,
+                orientations=orientations,
             )
 
             assert per_atom_energies.shape == ghost_mask.shape, (
@@ -285,6 +309,7 @@ class ModelExporter(exporter.Exporter):
             mask,
             self.sample_species_model,
             neighbor=self.sample_neighbors,
+            orientations=self.sample_orientations,
         )
         naive_energy_raw = compute_with_apply(
             naive_apply_model,
@@ -293,6 +318,7 @@ class ModelExporter(exporter.Exporter):
             mask,
             self.sample_species_model,
             neighbor=self.sample_neighbors,
+            orientations=self.sample_orientations,
         )
         # naive_apply_model may return per-atom energies (ndim==1); sum to scalar.
         naive_energy_arr = jnp.asarray(naive_energy_raw)
@@ -355,7 +381,7 @@ class ModelExporter(exporter.Exporter):
             self.sample_neighbors,
             positions.shape[0],
         )
-        return (
+        base_inputs = (
             positions,
             species_lammps,
             jnp.asarray(int(positions.shape[0]), dtype=jnp.int32),
@@ -365,6 +391,9 @@ class ModelExporter(exporter.Exporter):
             receivers,
             edge_buffer,
         )
+        if self.sample_orientations is None:
+            return base_inputs
+        return base_inputs + (jnp.asarray(self.sample_orientations, dtype=jnp.float32),)
 
     @contextmanager
     def _temporary_apply_model(self, apply_model):
@@ -516,6 +545,7 @@ class ModelExporter(exporter.Exporter):
                 dihedrals_,
                 prior_params_,
                 neighbor=None,
+                orientations=None,
             ):
                 del nneigh_fn_, displacement_, box_, bonds_, angles_, rep_pairs_, dihedrals_, prior_params_
                 if model.prior_only:
@@ -530,6 +560,7 @@ class ModelExporter(exporter.Exporter):
                             mask_,
                             species_,
                             neighbor,
+                            orientations=orientations,
                         )
                     elif compute_with_apply is not None:
                         e_ml = compute_with_apply(
@@ -539,6 +570,7 @@ class ModelExporter(exporter.Exporter):
                             mask_,
                             species_,
                             neighbor,
+                            orientations=orientations,
                         )
                     elif apply_model_ is ml_model.model_apply_fn:
                         e_ml = ml_model.compute_energy(
@@ -547,6 +579,7 @@ class ModelExporter(exporter.Exporter):
                             mask_,
                             species_,
                             neighbor,
+                            orientations=orientations,
                         )
                     else:
                         raise ValueError(

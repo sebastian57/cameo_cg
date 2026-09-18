@@ -1,227 +1,70 @@
-"""
-Unified Training Script for Allegro Coarse-Grained Protein Force Fields
-
-Uses JAX distributed + chemtrain's shard_map for true multi-node training.
-
-ARCHITECTURE (1 process per NODE, not per GPU!):
-    - 1 node (4 GPUs) = 1 process with 4 local GPUs
-    - 2 nodes (8 GPUs) = 2 processes, each with 4 local GPUs = 8 total GPUs
-
-    After jax.distributed.initialize():
-    - jax.devices() returns ALL 8 GPUs across both nodes
-    - chemtrain creates: Mesh(jax.devices(), axis_names=('batch'))
-    - This mesh spans ALL 8 GPUs for unified training
-    - lax.pmean(grad, 'batch') aggregates gradients across ALL 8 GPUs
-    - Result: ONE training run using ALL 8 GPUs together!
-
-    global_batch_size = batch_per_device * total_gpus_across_all_nodes
-
-Memory model:
-    - Data is loaded ONCE per node (not per GPU)
-    - shard_map splits batches across ALL GPUs in the mesh
-    - Gradients are synchronized across ALL nodes via lax.pmean
-
-Usage:
-    Single-node (1 process, 4 GPUs):
-        sbatch scripts/run_training.sh config.yaml
-
-    Multi-node (2 processes, 8 total GPUs):
-        sbatch --nodes=2 scripts/run_training.sh config.yaml
-
-IMPORTANT: JAX distributed initialization must happen before any other JAX operations.
-           This is why the initialization code is at the top of this file.
-"""
-
-# =============================================================================
-# CRITICAL: JAX DISTRIBUTED INITIALIZATION (must be first!)
-# =============================================================================
-# JAX distributed must be initialized BEFORE any other JAX operations.
-# This includes before importing modules that use jax.numpy, etc.
-# =============================================================================
+"""Training entry point for CAMEO coarse-grained force-field models."""
 
 import os
 import sys
-import jax
-from typing import Optional, Dict
+from pathlib import Path
+from typing import Dict, Optional
 
 sys.path.insert(0, str(os.path.join(os.path.dirname(__file__), "..")))
 from utils.jax_setup import apply_jax_compat_shims, apply_numpy_dataloader_patch
+from utils.distributed import initialize_jax_distributed, sync_all_ranks
 
 apply_jax_compat_shims()
+_DISTRIBUTED = initialize_jax_distributed()
+_IS_DISTRIBUTED = _DISTRIBUTED.is_distributed
+_RANK = _DISTRIBUTED.rank
+_WORLD_SIZE = _DISTRIBUTED.world_size
 
-def _initialize_jax_distributed():
-    """
-    Initialize JAX distributed training.
-
-    MUST be called before any other JAX operations!
-
-    Architecture: 1 process per NODE (not per GPU!)
-        - Each process sees 4 local GPUs (CUDA_VISIBLE_DEVICES=0,1,2,3)
-        - After initialization, jax.devices() returns ALL GPUs across ALL nodes
-        - chemtrain's shard_map creates a mesh spanning ALL devices
-        - lax.pmean synchronizes gradients across ALL devices in the mesh
-        - Result: TRUE multi-node training with unified gradient updates
-
-    Returns:
-        Tuple of (is_distributed, rank, world_size)
-        - rank: which NODE this process is (0, 1, 2, ...)
-        - world_size: total number of NODES (each with 4 GPUs)
-    """
-    # Check if running under SLURM with multiple tasks
-    slurm_ntasks = os.environ.get("SLURM_NTASKS")
-    slurm_procid = os.environ.get("SLURM_PROCID")
-    slurm_job_id = os.environ.get("SLURM_JOB_ID")
-    slurm_nodelist = os.environ.get("SLURM_STEP_NODELIST") or os.environ.get("SLURM_JOB_NODELIST")
-
-    if slurm_job_id and slurm_ntasks and int(slurm_ntasks) > 1:
-        # Multi-node SLURM job
-        # IMPORTANT: JAX automatic detection assumes 1 GPU per task, which doesn't work
-        # for our "1 process per node with 4 GPUs" architecture. Use manual initialization.
-        num_processes = int(slurm_ntasks)
-        process_id = int(slurm_procid) if slurm_procid else 0
-
-        # Coordinator host/port selection:
-        # 1) honor explicit launcher-provided env vars
-        # 2) fallback to SLURM nodelist parsing (legacy behavior)
-        coordinator_host_env = os.environ.get("CHEMTRAIN_COORDINATOR_HOST")
-        coordinator_port_env = os.environ.get("CHEMTRAIN_COORDINATOR_PORT")
-
-        coordinator_source = "env"
-        coordinator_host = coordinator_host_env
-        if not coordinator_host:
-            coordinator_source = "slurm_nodelist"
-            # Get coordinator host from SLURM nodelist
-            # Use subprocess to parse nodelist since scontrol may not be available
-            import subprocess
-            try:
-                result = subprocess.run(
-                    ["scontrol", "show", "hostname", slurm_nodelist],
-                    capture_output=True, text=True, check=True
-                )
-                coordinator_host = result.stdout.strip().split('\n')[0] + ".juwels"
-            except Exception as e:
-                print(f"[SLURM] Warning: Could not parse nodelist, using first node from {slurm_nodelist}: {e}")
-                # Fallback: extract first node manually (handles simple cases like "node[001-002]")
-                import re
-                match = re.match(r'([a-zA-Z]+)(\d+)', slurm_nodelist.replace('[', '').replace(']', ''))
-                if match:
-                    coordinator_host = f"{match.group(1)}{match.group(2)}.juwels"
-                else:
-                    coordinator_host = f"{slurm_nodelist.split(',')[0].split('[')[0]}.juwels"
-
-        # Use launcher-provided port if available, else job-specific default.
-        if coordinator_port_env:
-            coordinator_port = int(coordinator_port_env)
-        else:
-            coordinator_port = 29400 + (int(slurm_job_id) % 1000)
-
-        # Derive local device count from CUDA_VISIBLE_DEVICES
-        # Strip whitespace: SLURM may set CUDA_VISIBLE_DEVICES with trailing spaces
-        cuda_vis = os.environ.get("CUDA_VISIBLE_DEVICES", "0,1,2,3").strip()
-        n_local_gpus = len(cuda_vis.split(","))
-        local_ids = list(range(n_local_gpus))
-
-        print(f"[SLURM] Detected multi-node job: {num_processes} tasks")
-        print(f"[SLURM] Process {process_id}/{num_processes}")
-        print(f"[SLURM] Coordinator ({coordinator_source}): {coordinator_host}:{coordinator_port}")
-        print(f"[SLURM] CUDA_VISIBLE_DEVICES={cuda_vis} -> {n_local_gpus} local GPUs")
-        print(f"[Rank {process_id}] SLURM_NODELIST: {slurm_nodelist}", flush=True)
-        print(f"[Rank {process_id}] Hostname: {os.uname().nodename}", flush=True)
-        print(f"[Rank {process_id}] About to call jax.distributed.initialize()...", flush=True)
-
-        try:
-            print(f"[Rank {process_id}] Attempting jax.distributed.initialize()...", flush=True)
-            jax.distributed.initialize(
-                coordinator_address=f"{coordinator_host}:{coordinator_port}",
-                num_processes=num_processes,
-                process_id=process_id,
-                local_device_ids=local_ids,
-                initialization_timeout=int(os.environ.get("JAX_INIT_TIMEOUT", "1800")),
-            )
-            print(f"[Rank {process_id}] Successfully initialized!", flush=True)
-        except Exception as e:
-            print(f"[Rank {process_id}] FATAL: jax.distributed.initialize() failed: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
-            sys.exit(1)
-
-        rank = jax.process_index()
-        world_size = jax.process_count()
-
-        print(f"[Rank {rank}/{world_size}] JAX distributed initialized")
-
-        # Verify device counts - with 1 process per NODE, n_local should be 4 (GPUs per node)
-        n_local = jax.local_device_count()
-        n_global = jax.device_count()
-        expected_local = 4  # GPUs per node on JUWELS Booster
-
-        print(f"[Rank {rank}] Local GPUs: {n_local}, Total GPUs: {n_global}")
-        print(f"[Rank {rank}] CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')}")
-
-        # Verify: with 1 process per NODE, we expect n_local=4 and n_global=num_processes*4
-        if n_local != expected_local:
-            print(f"WARNING: Expected {expected_local} local GPUs per process (1 process per node), got {n_local}")
-        expected_global = world_size * expected_local
-        if n_global != expected_global:
-            print(f"WARNING: Expected {expected_global} total GPUs ({world_size} nodes × {expected_local} GPUs), got {n_global}")
-
-        is_distributed = True
-    else:
-        # Single-node or not under SLURM - single process mode
-        rank = 0
-        world_size = 1
-        is_distributed = False
-
-        n_local = jax.local_device_count()
-        print(f"[Single-process mode] Local devices: {n_local}")
-
-    # Print all devices
-    print(f"[Rank {rank}] Local devices: {jax.local_devices()}")
-    if is_distributed:
-        print(f"[Rank {rank}] All devices: {jax.devices()}")
-
-    enable_x64 = os.environ.get("JAX_ENABLE_X64", "0").strip().lower() in ("1", "true")
-    jax.config.update("jax_enable_x64", enable_x64)
-
-    return is_distributed, rank, world_size
-
-
-# Initialize JAX distributed FIRST, before any other imports that use JAX
-_IS_DISTRIBUTED, _RANK, _WORLD_SIZE = _initialize_jax_distributed()
-
-# =============================================================================
-# Now safe to import modules that use JAX
-# =============================================================================
-
-import sys
 import copy
 import pickle
 import time
 import json
-from pathlib import Path
+import jax
 import numpy as np
 import jax.numpy as jnp
-from jax.experimental import multihost_utils
 from jax_sgmc.data.numpy_loader import NumpyDataLoader
 from chemtrain.data.data_loaders import DataLoaders
 
 from config.manager import ConfigManager
 from data.loader import DatasetLoader, BucketedDatasetLoader, build_tiled_dataset
 from data.preprocessor import CoordinatePreprocessor
+from data_prep.noise_decoy_frames import add_noised_decoy_frames
 from models.combined_model import CombinedModel
 from training.prior_residual import apply_prior_force_residual_targets, pretrain_prior_for_residual
 from training.trainer import Trainer
 from training.dsm import add_dsm_noise_fields, dsm_enabled
+from training.safety_regularization import (
+    SAFETY_FIELD_KEYS,
+    attach_default_safety_fields,
+    load_safety_datasets,
+    mix_safety_into_train_split,
+    safety_enabled,
+)
+from training.noised_residual import (
+    attach_noised_residual_fields,
+    noised_residual_enabled,
+)
+from training.force_labels import apply_force_label_mode
+from training.crossfit import apply_crossfit_split
+from training.support_gate import (
+    build_support_gate_bank,
+    support_gate_config,
+    support_gate_enabled,
+    support_gate_scope,
+)
+from training.diagnostics import find_training_log, write_dataset_summary
+from training.path_utils import repo_root_from_file, resolve_from_config_or_repo
 from export.exporter import ModelExporter
 from analysis_tests.visualizer import LossPlotter
 from utils.logging import data_logger, model_logger, training_logger, export_logger
 import logging
 
 
+HVP_FIELD_KEYS = ("hvp_probe", "HVP", "hvp_loss_mask")
+
+
 def _sync_all_ranks(tag: str) -> None:
-    """Synchronize all distributed ranks at a named barrier."""
-    if _WORLD_SIZE > 1:
-        multihost_utils.sync_global_devices(tag)
+    sync_all_ranks(_DISTRIBUTED, tag)
 
 
 def _make_export_model(
@@ -232,6 +75,9 @@ def _make_export_model(
     species0,
     id_to_aa,
     n_max: int,
+    O0:Optional[jax.Array] = None,
+    support_gate_bank=None,
+    box_min=None,
 ) -> CombinedModel:
     """Build the model variant that should be used for export/evaluation."""
     export_with_priors = config.export_combined_ml_priors_enabled()
@@ -263,11 +109,46 @@ def _make_export_model(
         config=export_config,
         R0=R0,
         box=box,
+        box_min=box_min,
         species=species0,
         N_max=n_max,
+        O0=O0 if O0 is not None else None,
         id_to_aa=id_to_aa,
         prior_only=False,
+        support_gate_bank=support_gate_bank,
     )
+
+
+def _build_support_gate_bank_if_enabled(config: ConfigManager, train_source: dict, seed: int):
+    if not support_gate_enabled(config):
+        return None
+    cfg = support_gate_config(config)
+    descriptor = str(cfg.get("descriptor", "pairwise_distances")).strip().lower()
+    scope = str(cfg.get("scope", "segment")).strip().lower()
+    if scope not in ("segment", "batch"):
+        raise ValueError("training.support_gate.scope must be 'segment' or 'batch'.")
+    if descriptor != "pairwise_distances":
+        raise ValueError(
+            "training.support_gate.descriptor currently supports only 'pairwise_distances'."
+        )
+    bank = build_support_gate_bank(
+        R=np.asarray(train_source["R"], dtype=np.float32),
+        mask=np.asarray(train_source["mask"], dtype=np.float32),
+        max_centers=int(cfg.get("max_centers", 512)),
+        sigma_multiplier=float(cfg.get("sigma_multiplier", 1.0)),
+        seed=int(cfg.get("seed", seed)),
+        floor=float(cfg.get("floor", 0.0)),
+        stop_gradient=bool(cfg.get("stop_gradient", False)),
+    )
+    data_logger.info(
+        "[SupportGate] Built pairwise-distance RBF bank: scope=%s centers=%d sigma=%.6g floor=%.3g stop_gradient=%s.",
+        scope,
+        int(bank.centers.shape[0]),
+        float(bank.sigma),
+        float(bank.floor),
+        bool(bank.stop_gradient),
+    )
+    return bank
 
 
 def _apply_grad_accum_overrides(config: ConfigManager) -> None:
@@ -356,110 +237,20 @@ def _shuffle_dataset_for_split(dataset: dict, seed: int) -> dict:
     return shuffled
 
 
-def _log_dataset_protein_debug(
-    *,
-    dataset: dict,
-    id_to_aa: Optional[Dict[int, str]],
-    dataset_path: Path,
-    export_dir: Path,
-) -> None:
-    """Log protein-level bead stats and species frequencies for debugging."""
-    if "mask" not in dataset or "species" not in dataset:
-        return
-
-    mask = np.asarray(dataset["mask"], dtype=np.float32) > 0
-    species = np.asarray(dataset["species"], dtype=np.int32)
-    n_frames = int(mask.shape[0])
-    n_valid = np.asarray(np.sum(mask, axis=1), dtype=np.int32)
-
-    source_name = dataset.get("source_name")
-    if source_name is None:
-        source_name = np.full((n_frames,), dataset_path.stem, dtype=object)
-    else:
-        source_name = np.asarray(source_name)
-        if source_name.shape[0] != n_frames:
-            source_name = np.full((n_frames,), dataset_path.stem, dtype=object)
-    source_name = source_name.astype(str)
-
-    valid_species = species[mask]
-    if valid_species.size == 0:
-        data_logger.warning("[DataDebug] No valid beads found; skipping protein/species summary.")
-        return
-
-    species_ids, species_counts = np.unique(valid_species, return_counts=True)
-    species_summary = []
-    for sid, count in zip(species_ids.tolist(), species_counts.tolist()):
-        label = id_to_aa.get(int(sid), f"id{int(sid)}") if id_to_aa else f"id{int(sid)}"
-        species_summary.append(
-            {
-                "species_id": int(sid),
-                "label": str(label),
-                "count": int(count),
-            }
-        )
-
-    data_logger.info(
-        "[DataDebug] Global valid bead count=%d across %d frames (mean_valid_beads=%.2f).",
-        int(valid_species.size),
-        n_frames,
-        float(np.mean(n_valid)),
-    )
-    data_logger.info(
-        "[DataDebug] Global species counts: %s",
-        ", ".join(
-            f"{row['species_id']}:{row['label']}={row['count']}" for row in species_summary
-        ),
-    )
-
-    proteins = np.unique(source_name)
-    protein_rows = []
-    for protein in proteins.tolist():
-        protein_mask = source_name == protein
-        frame_count = int(np.sum(protein_mask))
-        if frame_count == 0:
-            continue
-        valid_per_frame = n_valid[protein_mask]
-        protein_species = species[protein_mask][mask[protein_mask]]
-        ps_ids, ps_counts = np.unique(protein_species, return_counts=True)
-        per_species = {
-            str(int(sid)): int(count)
-            for sid, count in zip(ps_ids.tolist(), ps_counts.tolist())
-        }
-        protein_rows.append(
-            {
-                "protein": str(protein),
-                "frames": frame_count,
-                "beads_per_frame_min": int(np.min(valid_per_frame)),
-                "beads_per_frame_mean": float(np.mean(valid_per_frame)),
-                "beads_per_frame_max": int(np.max(valid_per_frame)),
-                "total_valid_beads": int(np.sum(valid_per_frame, dtype=np.int64)),
-                "species_counts": per_species,
-            }
-        )
-        data_logger.info(
-            "[DataDebug][Protein] name=%s frames=%d beads/frame(min/mean/max)=%d/%.1f/%d total_valid_beads=%d",
-            protein,
-            frame_count,
-            int(np.min(valid_per_frame)),
-            float(np.mean(valid_per_frame)),
-            int(np.max(valid_per_frame)),
-            int(np.sum(valid_per_frame, dtype=np.int64)),
-        )
-
-    summary = {
-        "dataset_path": str(dataset_path),
-        "n_frames": n_frames,
-        "global_valid_beads": int(valid_species.size),
-        "global_species_counts": species_summary,
-        "proteins": protein_rows,
-    }
-    out_path = export_dir / "dataset_debug_summary.json"
-    out_path.write_text(json.dumps(summary, indent=2))
-    data_logger.info("[DataDebug] Wrote dataset summary: %s", out_path)
-
-
 def _validate_tiled_mode_constraints(config: ConfigManager) -> None:
     """Validate currently supported constraints for tiled training mode."""
+    if config.dynamic_box_enabled():
+        if config.get_batch_mode() != "standard":
+            raise ValueError(
+                "data.dynamic_box=true currently requires data.batch_mode='standard'; "
+                "a packed tile cannot represent multiple independent frame boxes."
+            )
+        if config.get_static_neighbors_config()["enabled"]:
+            raise ValueError("data.dynamic_box=true is incompatible with static neighbor graphs.")
+        if not str(config.get_ml_model_type()).lower().startswith("allegro"):
+            raise ValueError("data.dynamic_box=true currently supports Allegro backends only.")
+        if safety_enabled(config):
+            raise ValueError("data.dynamic_box=true is incompatible with safety-frame mixing unless safety frames carry boxes.")
     if config.get_batch_mode() != "tiled":
         return
     if config.use_priors():
@@ -503,6 +294,24 @@ def _validate_prior_residual_mode_constraints(config: ConfigManager) -> None:
         raise ValueError(
             "training.prior_residual.enabled=true requires model.priors "
             "configuration to be present."
+        )
+
+
+def _validate_safety_regularization_constraints(config: ConfigManager) -> None:
+    """Validate currently supported safety fine-tuning constraints."""
+    if not safety_enabled(config):
+        return
+    if config.get_batch_mode() != "standard":
+        raise ValueError(
+            "training.safety_regularization.enabled=true currently requires "
+            "data.batch_mode='standard'. Tiled safety support needs explicit "
+            "metadata propagation and is intentionally disabled for this first test."
+        )
+    if not config.prior_residual_enabled():
+        raise ValueError(
+            "training.safety_regularization.enabled=true currently expects "
+            "training.prior_residual.enabled=true so safety frames regularize "
+            "the ML residual model."
         )
 
 
@@ -571,6 +380,41 @@ def _apply_prior_residual_if_enabled(
         float(stats.get("mean_residual_norm", 0.0)),
     )
     return dataset
+
+
+def _apply_noise_decoys_if_enabled(config: ConfigManager, dataset: dict, seed: int) -> dict:
+    """Append noised duplicate frames when data.noise_decoys.every_n is configured."""
+    cfg = config.get("data", "noise_decoys", default={}) or {}
+    if not isinstance(cfg, dict):
+        cfg = {"every_n": cfg}
+    every_n_raw = cfg.get("every_n", False)
+    if every_n_raw in (False, None, 0, "false", "False", "none", "None", ""):
+        return dataset
+
+    every_n = int(every_n_raw)
+    sigma = float(cfg.get("sigma", cfg.get("noise_sigma", 0.5)))
+    decoy_seed = int(cfg.get("seed", seed + int(cfg.get("seed_offset", 2718))))
+    n_before = int(dataset["R"].shape[0])
+    augmented = add_noised_decoy_frames(
+        dataset,
+        every_n=every_n,
+        sigma=sigma,
+        seed=decoy_seed,
+        source_key=str(cfg.get("source_key", "source_name")),
+        zero_force_decoys=bool(cfg.get("zero_force_decoys", True)),
+    )
+    n_after = int(augmented["R"].shape[0])
+    data_logger.info(
+        "[NoiseDecoys] Added %d noised decoy frames from every_n=%d sigma=%.4g seed=%d "
+        "(frames: %d -> %d).",
+        n_after - n_before,
+        every_n,
+        sigma,
+        decoy_seed,
+        n_before,
+        n_after,
+    )
+    return augmented
 
 
 def _compute_force_loss_weights(split: dict) -> np.ndarray:
@@ -653,6 +497,79 @@ def _estimate_avg_num_neighbors(
     return float(total_neighbors / float(total_valid_nodes))
 
 
+def _wrap_into_box(R: np.ndarray, box: np.ndarray) -> np.ndarray:
+    """Wrap coordinates into [0, box] for an orthorhombic periodic box.
+
+    Applies numpy modulo so all coordinates land in [0, L_i) for each
+    dimension i.  Does not alter padded atom coordinates — callers should
+    handle those via the mask as usual.
+    """
+    box = np.asarray(box, dtype=np.float32)
+    if box.ndim == 1:
+        return np.mod(R, box[None, None, :]).astype(np.float32)
+    if box.ndim == 2 and box.shape[0] == R.shape[0] and box.shape[1] == 3:
+        return np.mod(R, box[:, None, :]).astype(np.float32)
+    raise ValueError(f"box must have shape (3,) or (n_frames, 3), got {box.shape}")
+
+
+def _estimate_avg_num_neighbors_pbc(
+    *,
+    R: np.ndarray,
+    mask: np.ndarray,
+    cutoff: float,
+    box: np.ndarray,           # shape (3,) orthorhombic
+    segment_id: Optional[np.ndarray] = None,
+    max_samples: int = 32,
+    seed: int = 0,
+) -> float:
+    """Estimate avg neighbors using minimum-image convention for PBC.
+
+    Identical sampling logic to _estimate_avg_num_neighbors but wraps
+    pairwise differences into [-box/2, box/2] before computing distances.
+    """
+    n_items = int(R.shape[0])
+    if n_items <= 0:
+        return 0.0
+
+    n_pick = min(n_items, max(1, int(max_samples)))
+    if n_pick == n_items:
+        sample_indices = np.arange(n_items, dtype=np.int32)
+    else:
+        rng = np.random.RandomState(seed)
+        sample_indices = np.sort(rng.choice(n_items, size=n_pick, replace=False).astype(np.int32))
+
+    box_np = np.asarray(box, dtype=np.float64)
+    cutoff_sq = float(cutoff) ** 2
+    total_neighbors = 0.0
+    total_valid_nodes = 0
+
+    for idx in sample_indices:
+        valid = np.asarray(mask[idx] > 0, dtype=bool)
+        if not np.any(valid):
+            continue
+
+        coords = np.asarray(R[idx][valid], dtype=np.float64)
+        if coords.shape[0] <= 1:
+            total_valid_nodes += int(coords.shape[0])
+            continue
+
+        diffs = coords[:, None, :] - coords[None, :, :]
+        diffs = diffs - box_np * np.round(diffs / box_np)   # minimum-image
+        dist_sq = np.sum(diffs * diffs, axis=-1)
+        within_cutoff = (dist_sq < cutoff_sq) & (dist_sq > 0.0)
+
+        if segment_id is not None:
+            seg = np.asarray(segment_id[idx][valid], dtype=np.int32)
+            within_cutoff &= seg[:, None] == seg[None, :]
+
+        total_neighbors += float(np.sum(within_cutoff))
+        total_valid_nodes += int(coords.shape[0])
+
+    if total_valid_nodes <= 0:
+        return 0.0
+    return float(total_neighbors / float(total_valid_nodes))
+
+
 def _get_runtime_allegro_config_section(config: ConfigManager) -> dict:
     """Return the config section that the active Allegro backend will read."""
     model_cfg = config._config.setdefault("model", {})
@@ -671,22 +588,44 @@ def _configure_runtime_avg_num_neighbors(
     config: ConfigManager,
     train_split: dict,
     seed: int,
+    *,
+    box: Optional[np.ndarray] = None,
 ) -> None:
-    """Estimate avg_num_neighbors from sampled training structures/tiles and pin it in config."""
+    """Estimate avg_num_neighbors from sampled training structures/tiles and pin it in config.
+
+    When box is provided and model.pbc=true, uses minimum-image convention for
+    accurate neighbor counts in periodic systems.
+    """
     ml_model_type = str(config.get_ml_model_type()).strip().lower()
     if not ml_model_type.startswith("allegro"):
         return
 
-    estimate = _estimate_avg_num_neighbors(
-        R=np.asarray(train_split["R"], dtype=np.float32),
-        mask=np.asarray(train_split["mask"], dtype=np.float32),
-        cutoff=float(config.get_cutoff()),
-        segment_id=np.asarray(train_split["segment_id"], dtype=np.int32)
-        if "segment_id" in train_split
-        else None,
-        max_samples=32,
-        seed=seed,
-    )
+    use_pbc = config.use_pbc_enabled()
+    if use_pbc and box is not None:
+        estimate = _estimate_avg_num_neighbors_pbc(
+            R=np.asarray(train_split["R"], dtype=np.float32),
+            mask=np.asarray(train_split["mask"], dtype=np.float32),
+            cutoff=float(config.get_cutoff()),
+            box=np.asarray(box, dtype=np.float64),
+            segment_id=np.asarray(train_split["segment_id"], dtype=np.int32)
+            if "segment_id" in train_split
+            else None,
+            max_samples=32,
+            seed=seed,
+        )
+        pbc_tag = "[PBC/MIC]"
+    else:
+        estimate = _estimate_avg_num_neighbors(
+            R=np.asarray(train_split["R"], dtype=np.float32),
+            mask=np.asarray(train_split["mask"], dtype=np.float32),
+            cutoff=float(config.get_cutoff()),
+            segment_id=np.asarray(train_split["segment_id"], dtype=np.int32)
+            if "segment_id" in train_split
+            else None,
+            max_samples=32,
+            seed=seed,
+        )
+        pbc_tag = ""
 
     allegro_cfg = _get_runtime_allegro_config_section(config)
     previous = allegro_cfg.get("avg_num_neighbors")
@@ -694,12 +633,45 @@ def _configure_runtime_avg_num_neighbors(
     allegro_cfg["avg_num_neighbors_source"] = "dataset_sample"
     batch_mode = config.get_batch_mode()
     training_logger.info(
-        "[RuntimeConfig] avg_num_neighbors set from sampled training %s: %.3f "
+        "[RuntimeConfig]%s avg_num_neighbors set from sampled training %s: %.3f "
         "(previous config value: %s, samples<=32).",
+        " " + pbc_tag if pbc_tag else "",
         "tiles" if batch_mode == "tiled" else "structures",
         float(estimate),
         previous,
     )
+
+
+
+def _copy_hvp_fields_from_dataset(target: dict, dataset: dict, start: int, stop: int) -> None:
+    """Attach optional HVP arrays to an untiled split."""
+    if "hvp_probe" in dataset:
+        target["hvp_probe"] = np.asarray(dataset["hvp_probe"][start:stop], dtype=np.float32)
+    if "HVP" in dataset:
+        target["HVP"] = np.asarray(dataset["HVP"][start:stop], dtype=np.float32)
+    if "hvp_loss_mask" in dataset:
+        target["hvp_loss_mask"] = np.asarray(dataset["hvp_loss_mask"][start:stop], dtype=np.float32)
+    elif "hvp_probe" in target and "HVP" in target:
+        target["hvp_loss_mask"] = np.broadcast_to(
+            np.asarray(target["mask"], dtype=np.float32)[:, None, :],
+            target["hvp_probe"].shape[:3],
+        ).astype(np.float32)
+
+
+def _copy_teacher_distillation_fields(target: dict, dataset: dict, start: int, stop: int) -> None:
+    """Attach optional frozen-AA-teacher targets to a split."""
+    for key in ("TeacherFeature", "teacher_feature_mask", "TeacherForce", "teacher_force_mask", "TeacherTorque", "teacher_torque_mask"):
+        if key in dataset:
+            target[key] = np.asarray(dataset[key][start:stop], dtype=np.float32)
+
+
+def _hvp_extra_per_atom_fields(split: dict) -> dict:
+    """Return optional HVP arrays for tiled packing."""
+    return {
+        key: np.asarray(split[key], dtype=np.float32)
+        for key in HVP_FIELD_KEYS
+        if key in split
+    }
 
 
 def _attach_batch_metadata(split: dict, sample_ids: np.ndarray) -> dict:
@@ -734,7 +706,11 @@ def _build_loader_kwargs(split: dict) -> dict:
         if key in (
             "R",
             "F",
+            "U",
+            "O",
+            "T",
             "mask",
+            "box",
             "species",
             "segment_id",
             "force_loss_mask",
@@ -743,6 +719,18 @@ def _build_loader_kwargs(split: dict) -> dict:
             "dsm_eps",
             "dsm_sigma",
             "dsm_loss_mask",
+            *HVP_FIELD_KEYS,
+            "teacher_features",
+            "teacher_feature_mask",
+            "teacher_cg_forces",
+            "teacher_force_mask",
+            "TeacherFeature",
+            "TeacherForce",
+            "TeacherTorque",
+            "teacher_torque_mask",
+            "is_noised_frame",
+            "noise_level_id",
+            *SAFETY_FIELD_KEYS,
         ):
             loader_kwargs[key] = value
         elif key.startswith("meta_") or key in ("n_valid", "n_segments"):
@@ -811,6 +799,16 @@ def _build_validation_split(dataset: dict, start: int, stop: int) -> dict:
             else np.zeros_like(mask_slice, dtype=np.int32)
         ),
     }
+    if "U" in dataset:
+        val_split["U"] = np.asarray(dataset["U"][start:stop], dtype=np.float32)
+    if "O" in dataset:
+        val_split["O"] = np.asarray(dataset["O"][start:stop], dtype=np.float32)
+    if "T" in dataset:
+        val_split["T"] = np.asarray(dataset["T"][start:stop], dtype=np.float32)
+    if "box" in dataset:
+        val_split["box"] = np.asarray(dataset["box"][start:stop], dtype=np.float32)
+    _copy_hvp_fields_from_dataset(val_split, dataset, start, stop)
+    _copy_teacher_distillation_fields(val_split, dataset, start, stop)
     sample_ids = np.arange(start, stop, dtype=np.int32)
     return _attach_batch_metadata(val_split, sample_ids)
 
@@ -824,6 +822,10 @@ def _build_tiled_validation_split(
 ) -> dict:
     """Build a held-out tiled validation split with real validation structures."""
     val_R = np.asarray(dataset["R"][start:stop], dtype=np.float32)
+    if "O" in dataset:
+        val_O = np.asarray(dataset["O"][start:stop], dtype=np.float32)
+    if "T" in dataset:
+        val_T = np.asarray(dataset["T"][start:stop], dtype=np.float32)
     val_F = np.asarray(dataset["F"][start:stop], dtype=np.float32)
     val_mask = np.asarray(dataset["mask"][start:stop], dtype=np.float32)
     _sp = dataset.get("species")
@@ -836,10 +838,15 @@ def _build_tiled_validation_split(
     if val_R.shape[0] == 0:
         raise ValueError("Validation split is empty; cannot build tiled validation dataset.")
 
+    val_hvp_source = {"mask": val_mask}
+    _copy_hvp_fields_from_dataset(val_hvp_source, dataset, start, stop)
+
     structure_ids = np.arange(start, stop, dtype=np.int32)
     tiled = build_tiled_dataset(
         R=val_R,
         F=val_F,
+        O=val_O if "O" in dataset else None,
+        T=val_T if "T" in dataset else None,
         mask=val_mask,
         species=val_species,
         structure_ids=structure_ids,
@@ -858,8 +865,11 @@ def _build_tiled_validation_split(
         large_structure_threshold=config.get_tile_large_structure_threshold(),
         large_structure_edge_threshold=config.get_tile_large_structure_edge_threshold(),
         spatial_separation=config.tile_spatial_separation_enabled(),
+        spatial_layout=config.get_tile_spatial_layout(),
         structure_gap=config.get_tile_structure_gap(),
         seed=seed,
+        extra_per_atom_fields=_hvp_extra_per_atom_fields(val_hvp_source),
+        static_neighbors=config.get_static_neighbors_config(),
     )
     tiled = _attach_batch_metadata(tiled, np.arange(tiled["R"].shape[0], dtype=np.int32))
     data_logger.info(
@@ -887,7 +897,7 @@ def _build_tiled_train_source(dataset: dict, n_train: int) -> dict:
     """Capture the untiled training structures used to rebuild random tiles."""
     mask_slice = np.asarray(dataset["mask"][:n_train], dtype=np.float32)
     _sp = dataset.get("species")
-    return {
+    train_source = {
         "R": np.asarray(dataset["R"][:n_train], dtype=np.float32),
         "F": np.asarray(dataset["F"][:n_train], dtype=np.float32),
         "mask": mask_slice,
@@ -898,6 +908,17 @@ def _build_tiled_train_source(dataset: dict, n_train: int) -> dict:
         ),
         "structure_ids": np.arange(n_train, dtype=np.int32),
     }
+    if "U" in dataset:
+        train_source["U"] = np.asarray(dataset["U"][:n_train], dtype=np.float32)
+    if "O" in dataset:
+        train_source["O"] = np.asarray(dataset["O"][:n_train], dtype=np.float32)
+    if "T" in dataset:
+        train_source["T"] = np.asarray(dataset["T"][:n_train], dtype=np.float32)
+    if "box" in dataset:
+        train_source["box"] = np.asarray(dataset["box"][:n_train], dtype=np.float32)
+    _copy_hvp_fields_from_dataset(train_source, dataset, 0, n_train)
+    _copy_teacher_distillation_fields(train_source, dataset, 0, n_train)
+    return train_source
 
 
 def _log_train_split_profile(train_split: dict, config: ConfigManager) -> None:
@@ -987,38 +1008,24 @@ def _shard_tiles_by_rank(tiled: dict, rank: int, world_size: int) -> dict:
     return sharded
 
 
-def _build_train_split(
-    dataset: dict,
-    n_train: int,
+def _build_tiled_split_from_source(
+    train_source: dict,
     config: ConfigManager,
     seed: int,
 ) -> dict:
-    """Build the training split and optionally tile it."""
-    mask_slice = np.asarray(dataset["mask"][:n_train], dtype=np.float32)
-    species_raw = dataset.get("species")
-    train_split = {
-        "R": np.asarray(dataset["R"][:n_train], dtype=np.float32),
-        "F": np.asarray(dataset["F"][:n_train], dtype=np.float32),
-        "mask": mask_slice,
-        "species": (
-            np.asarray(species_raw[:n_train], dtype=np.int32)
-            if species_raw is not None
-            else np.zeros_like(mask_slice, dtype=np.int32)
-        ),
-    }
-    structure_ids = np.arange(n_train, dtype=np.int32)
-    if config.get_batch_mode() != "tiled":
-        train_split = _attach_batch_metadata(train_split, structure_ids)
-        _log_train_split_profile(train_split, config)
-        return train_split
-
+    """Build packed tiles from untiled structures as late as possible."""
     t_tile_build_start = time.perf_counter()
+    structure_ids = train_source.get("structure_ids")
+    if structure_ids is None:
+        structure_ids = np.arange(train_source["R"].shape[0], dtype=np.int32)
     tiled = build_tiled_dataset(
-        R=train_split["R"],
-        F=train_split["F"],
-        mask=train_split["mask"],
-        species=train_split["species"],
-        structure_ids=structure_ids,
+        R=np.asarray(train_source["R"], dtype=np.float32),
+        F=np.asarray(train_source["F"], dtype=np.float32),
+        O=np.asarray(train_source["O"], dtype=np.float32) if "O" in train_source else None,
+        T=np.asarray(train_source["T"], dtype=np.float32) if "T" in train_source else None,
+        mask=np.asarray(train_source["mask"], dtype=np.float32),
+        species=np.asarray(train_source["species"], dtype=np.int32),
+        structure_ids=np.asarray(structure_ids, dtype=np.int32),
         target_beads=config.get_tile_target_beads(),
         bucket_beads=config.get_tile_bucket_beads(),
         target_edges=config.get_tile_target_edges(),
@@ -1034,14 +1041,16 @@ def _build_train_split(
         large_structure_threshold=config.get_tile_large_structure_threshold(),
         large_structure_edge_threshold=config.get_tile_large_structure_edge_threshold(),
         spatial_separation=config.tile_spatial_separation_enabled(),
+        spatial_layout=config.get_tile_spatial_layout(),
         structure_gap=config.get_tile_structure_gap(),
         seed=seed,
+        extra_per_atom_fields=_hvp_extra_per_atom_fields(train_source),
+        static_neighbors=config.get_static_neighbors_config(),
     )
     t_tile_build_end = time.perf_counter()
     tiled = _attach_batch_metadata(tiled, np.arange(tiled["R"].shape[0], dtype=np.int32))
     t_tile_meta_end = time.perf_counter()
 
-    # Shard tiles across ranks for data parallelism
     if _WORLD_SIZE > 1:
         tiled = _shard_tiles_by_rank(tiled, _RANK, _WORLD_SIZE)
 
@@ -1051,9 +1060,9 @@ def _build_train_split(
         "edge_mode=%s, edge_cutoff=%s, "
         "shuffled=%s, sort_by_size=%s, sort_by_estimated_edges=%s, "
         "isolate_large=%s, large_threshold=%s, large_edge_threshold=%s, "
-        "spatial_separation=%s, structure_gap=%.2f, drop_incomplete=%s).",
+        "spatial_separation=%s, spatial_layout=%s, structure_gap=%.2f, drop_incomplete=%s).",
         int(tiled["R"].shape[0]),
-        int(train_split["R"].shape[0]),
+        int(train_source["R"].shape[0]),
         int(config.get_tile_target_beads()),
         config.get_tile_bucket_beads(),
         config.get_tile_target_edges(),
@@ -1067,13 +1076,15 @@ def _build_train_split(
         config.get_tile_large_structure_threshold(),
         config.get_tile_large_structure_edge_threshold(),
         bool(config.tile_spatial_separation_enabled()),
+        config.get_tile_spatial_layout(),
         float(config.get_tile_structure_gap()),
         bool(config.tile_drop_incomplete_enabled()),
     )
     data_logger.info(
-        "[Tiling] Tile shape: R=%s, segment_id=%s, mean_valid=%.1f, "
+        "[Tiling] Tile shape: R=%s, O=%s, segment_id=%s, mean_valid=%.1f, "
         "mean_segments=%.2f, mean_est_edges=%.1f, max_est_edges=%.1f",
         tuple(tiled["R"].shape),
+        tuple(tiled["O"].shape) if "O" in tiled else None,
         tuple(tiled["segment_id"].shape),
         float(np.mean(tiled["n_valid"])),
         float(np.mean(tiled["n_segments"])),
@@ -1088,6 +1099,78 @@ def _build_train_split(
     )
     _log_train_split_profile(tiled, config)
     return tiled
+
+
+def _cell_list_box_for_tiled_split(
+    config: ConfigManager,
+    train_split: dict,
+    current_box,
+):
+    """Size a free-space cell-list box from packed tiles; reject unsafe layouts."""
+    if (
+        config.get_batch_mode() != "tiled"
+        or config.neighbor_disable_cell_list_enabled()
+        or config.use_pbc_enabled()
+    ):
+        return current_box
+
+    if (
+        not config.tile_spatial_separation_enabled()
+        or config.get_tile_spatial_layout() != "grid_3d"
+    ):
+        raise ValueError(
+            "Nonperiodic tiled cell lists require "
+            "data.tile_spatial_separation=true and "
+            "data.tile_spatial_layout=grid_3d."
+        )
+    if config.tile_rebuild_each_epoch_enabled():
+        raise ValueError(
+            "Nonperiodic tiled cell lists currently require "
+            "data.tile_rebuild_each_epoch=false because the fixed model box is "
+            "sized from the initial packing."
+        )
+
+    R = np.asarray(train_split["R"], dtype=np.float32)
+    mask = np.asarray(train_split["mask"] > 0)
+    coords = R[mask]
+    if coords.size == 0 or not np.isfinite(coords).all():
+        raise ValueError("Cannot construct tiled cell-list box from empty/nonfinite coordinates.")
+    mins = np.min(coords, axis=0)
+    maxs = np.max(coords, axis=0)
+    if np.any(mins < -1.0e-5):
+        raise ValueError(
+            "Cell lists require packed tiled coordinates inside the positive box, "
+            f"but minima are {mins.tolist()}. Check grid_3d packing or keep "
+            "model.neighbor_disable_cell_list=true."
+        )
+    margin = max(float(config.get_cutoff() + config.get_dr_threshold()), 1.0)
+    box = np.asarray(maxs + margin, dtype=np.float32)
+    data_logger.info(
+        "[Tiling][CellList] Recomputed box from packed training tiles: "
+        "mins=%s maxs=%s margin=%.3f box=%s layout=%s",
+        mins,
+        maxs,
+        margin,
+        box,
+        config.get_tile_spatial_layout(),
+    )
+    return jnp.asarray(box, dtype=jnp.float32)
+
+
+def _build_train_split(
+    dataset: dict,
+    n_train: int,
+    config: ConfigManager,
+    seed: int,
+) -> dict:
+    """Build the training split and optionally tile it."""
+    train_split = _build_tiled_train_source(dataset, n_train)
+    if config.get_batch_mode() != "tiled":
+        train_split = _attach_batch_metadata(train_split, train_split["structure_ids"])
+        _log_train_split_profile(train_split, config)
+        return train_split
+
+    return _build_tiled_split_from_source(train_split, config, seed)
 
 
 def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
@@ -1109,6 +1192,7 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     config = ConfigManager(config_file)
     _validate_tiled_mode_constraints(config)
     _validate_prior_residual_mode_constraints(config)
+    _validate_safety_regularization_constraints(config)
     _apply_grad_accum_overrides(config)
     env_neighbor_fmt = os.environ.get("CHEMTRAIN_NEIGHBOR_LIST_FORMAT")
     effective_neighbor_fmt = config.get_neighbor_list_format()
@@ -1150,21 +1234,18 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     config.save(config_path)
     training_logger.info(f"[Config] Saved to: {config_path}")
 
-    # ===== Load and preprocess data =====
     logging.info("\n" + "=" * 60)
     logging.info("LOADING DATA")
     logging.info("=" * 60)
 
-    # Resolve data path relative to clean_code_base directory if it's relative
     data_path = config.get_data_path()
-    data_path_obj = Path(data_path)
-
-    if not data_path_obj.is_absolute():
-        # Get the directory where this script is located (clean_code_base/scripts)
-        script_dir = Path(__file__).parent
-        clean_code_base_dir = script_dir.parent
-        data_path_obj = clean_code_base_dir / data_path
-        data_logger.info(f"Resolved relative path: {data_path} -> {data_path_obj}")
+    data_path_obj = resolve_from_config_or_repo(
+        data_path,
+        config.config_path,
+        repo_root_from_file(__file__),
+    )
+    if Path(data_path) != data_path_obj:
+        data_logger.info("Resolved data.path: %s -> %s", data_path, data_path_obj)
 
     # Guard against accidentally using bucketed data with the single-dataset path.
     if data_path_obj.is_dir():
@@ -1176,12 +1257,10 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
                 f"{data_path_obj} [job_id]"
             )
 
-    # Load dataset (shuffling and limiting frames happens in constructor)
     max_frames = config.get_max_frames()
     seed = config.get_seed()
-    loader = DatasetLoader(str(data_path_obj), max_frames=max_frames, seed=seed)
+    loader = DatasetLoader(str(data_path_obj), max_frames=max_frames, seed=seed, dynamic_box=config.dynamic_box_enabled())
 
-    # Get dataset info
     N_max = loader.N_max
     species0 = loader.species[0]
     n_species_global = int(np.max(loader.species)) + 1
@@ -1191,22 +1270,48 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     data_logger.info(f"Species: {species0}")
     data_logger.info(f"Total frames: {len(loader)}")
 
-    # ===== Compute box from data =====
     cutoff = config.get_cutoff()
     buffer_mult = config.get_buffer_multiplier()
     park_mult = config.get_park_multiplier()
-    preprocessor = CoordinatePreprocessor(
-        cutoff=cutoff,
-        buffer_multiplier=buffer_mult,
-        park_multiplier=park_mult
-    )
+    use_pbc = config.use_pbc_enabled()
 
-    # Compute box extent from all data
-    extent, R_shift = preprocessor.compute_box_extent(loader.R, loader.mask)
-
-    # Preprocess all coordinates
     dataset = loader.get_all()
-    dataset["R"] = preprocessor.center_and_park(dataset["R"], dataset["mask"], extent, R_shift)
+
+    if use_pbc:
+        # PBC mode: use the box stored in the dataset; wrap coordinates into [0, L].
+        if loader.box is None:
+            raise ValueError(
+                "model.pbc=true requires a 'box' array in the NPZ dataset "
+                "(keys tried: 'box', 'cell', 'lattice'). None found."
+            )
+        if config.dynamic_box_enabled():
+            if loader.box_per_frame is None:
+                raise ValueError("data.dynamic_box=true requires frame-aligned boxes")
+            frame_boxes = np.asarray(loader.box_per_frame, dtype=np.float32)
+            box = jnp.asarray(np.max(frame_boxes, axis=0), dtype=jnp.float32)
+            box_min = np.min(frame_boxes, axis=0).astype(np.float32)
+            dataset["box"] = frame_boxes
+            dataset["R"] = _wrap_into_box(dataset["R"], frame_boxes)
+            data_logger.info("[PBC] Dynamic frame boxes enabled: min=%s max=%s", box_min, np.asarray(box))
+        else:
+            box = jnp.asarray(loader.box, dtype=jnp.float32)
+            box_min = None
+            dataset["R"] = _wrap_into_box(dataset["R"], np.asarray(box))
+            data_logger.info(f"[PBC] Using dataset box: {jax.device_get(box)}")
+    else:
+        preprocessor = CoordinatePreprocessor(
+            cutoff=cutoff,
+            buffer_multiplier=buffer_mult,
+            park_multiplier=park_mult,
+        )
+        extent, R_shift = preprocessor.compute_box_extent(loader.R, loader.mask)
+        dataset["R"] = preprocessor.center_and_park(dataset["R"], dataset["mask"], extent, R_shift)
+        box = extent
+        box_min = None
+        data_logger.info(f"[Preprocessing] Computed box: {jax.device_get(box)}")
+        data_logger.info(f"[Preprocessing] R_shift: {jax.device_get(R_shift)}")
+
+    dataset = _apply_noise_decoys_if_enabled(config, dataset, seed=seed)
 
     # LBFGS prior pretraining must happen against raw F_ref, before residuals are subtracted.
     fitted_prior_params = _pretrain_for_residual_if_needed(config, dataset, loader.id_to_aa)
@@ -1224,16 +1329,18 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         park_mult=park_mult,
         fitted_params=fitted_prior_params,
     )
-    _log_dataset_protein_debug(
+    dataset = apply_force_label_mode(config, dataset)
+    write_dataset_summary(
         dataset=dataset,
         id_to_aa=loader.id_to_aa,
         dataset_path=data_path_obj,
         export_dir=export_dir,
     )
 
-    box = extent
-    data_logger.info(f"[Preprocessing] Computed box: {jax.device_get(box)}")
-    data_logger.info(f"[Preprocessing] R_shift: {jax.device_get(R_shift)}")
+    safety_dataset = load_safety_datasets(
+        config,
+        repo_root=repo_root_from_file(__file__),
+    )
 
     # Spline priors are an add-on mode; LBFGS pretraining is only valid for
     # parametric prior parameters. Disable pretraining if both are enabled.
@@ -1251,10 +1358,16 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     logging.info("=" * 60)
 
     split_seed = int(config.get_seed())
-    dataset = _shuffle_dataset_for_split(dataset, seed=split_seed)
+    dataset, crossfit_n_train = apply_crossfit_split(config, dataset)
+    if crossfit_n_train is None:
+        dataset = _shuffle_dataset_for_split(dataset, seed=split_seed)
 
     val_fraction = config.get_val_fraction()
-    N_train = int(np.round(len(dataset["R"]) * (1 - val_fraction)))
+    N_train = (
+        int(crossfit_n_train)
+        if crossfit_n_train is not None
+        else int(np.round(len(dataset["R"]) * (1 - val_fraction)))
+    )
     N_val = len(dataset["R"]) - N_train
 
     # Check if validation set is too small for batching
@@ -1274,19 +1387,76 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     tiled_train_source = None
     if config.get_batch_mode() == "tiled":
         tiled_train_source = _build_tiled_train_source(dataset, N_train)
-
-    train_split = _build_train_split(
-        dataset=dataset,
-        n_train=N_train,
-        config=config,
-        seed=split_seed,
-    )
+        train_source = tiled_train_source
+        if noised_residual_enabled(config):
+            training_logger.info(
+                "[NoisedResidual] Expanding untiled train source before tiling."
+            )
+            train_source = attach_noised_residual_fields(
+                split=tiled_train_source,
+                config=config,
+                id_to_aa=loader.id_to_aa,
+                seed=split_seed,
+                split_seed=split_seed,
+                fitted_params=fitted_prior_params,
+            )
+            training_logger.info(
+                "[NoisedResidual] Untiled train source expanded: n_clean=%d n_noised=%d n_total=%d.",
+                int(np.sum(train_source.get("is_noised_frame", 0) == 0)),
+                int(np.sum(train_source.get("is_noised_frame", 0) == 1)),
+                int(train_source["R"].shape[0]),
+            )
+        train_split = _build_tiled_split_from_source(train_source, config, split_seed)
+    else:
+        train_split = _build_train_split(
+            dataset=dataset,
+            n_train=N_train,
+            config=config,
+            seed=split_seed,
+        )
+        if noised_residual_enabled(config):
+            training_logger.info(
+                "[NoisedResidual] Expanding train split with noised residual frames."
+            )
+            train_split = attach_noised_residual_fields(
+                split=train_split,
+                config=config,
+                id_to_aa=loader.id_to_aa,
+                seed=split_seed,
+                split_seed=split_seed,
+                fitted_params=fitted_prior_params,
+            )
+            training_logger.info(
+                "[NoisedResidual] Train split expanded: n_clean=%d n_noised=%d n_total=%d.",
+                int(np.sum(train_split.get("is_noised_frame", 0) == 0)),
+                int(np.sum(train_split.get("is_noised_frame", 0) == 1)),
+                int(train_split["R"].shape[0]),
+            )
+    if safety_enabled(config):
+        train_split = mix_safety_into_train_split(
+            train_split,
+            safety_dataset,
+            config,
+            seed=split_seed,
+        )
     _configure_auto_leash_d_safe(
         config, tiled_train_source if tiled_train_source is not None else train_split
     )
+    # Bank is always built on individual (untiled) structures so that bank.n_atoms
+    # matches the actual molecule size.  rbf_segment_supports extracts per-segment
+    # coordinates from tiled batches at runtime using segment_id, so tiling is purely
+    # a training-efficiency concern and does not affect gate semantics.
+    support_gate_bank = _build_support_gate_bank_if_enabled(config, train_split, split_seed)
+
     if dsm_enabled(config):
         train_split = add_dsm_noise_fields(train_split, config, seed=split_seed)
-    _configure_runtime_avg_num_neighbors(config, train_split, split_seed)
+    box = _cell_list_box_for_tiled_split(config, train_split, box)
+    _configure_runtime_avg_num_neighbors(
+        config,
+        tiled_train_source if tiled_train_source is not None else train_split,
+        split_seed,
+        box=np.asarray(box) if use_pbc else None,
+    )
     config.save(config_path)
     training_logger.info(f"[Config] Updated runtime config saved to: {config_path}")
 
@@ -1298,6 +1468,7 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     logging.info("=" * 60)
     if config.get_batch_mode() == "tiled":
         R0 = train_split["R"][0]
+        O0 = train_split["O"][0] if "O" in train_split else None
         species0 = train_split["species"][0]
         init_mask0 = train_split["mask"][0]
         N_max = int(train_split["R"].shape[1])
@@ -1307,21 +1478,40 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         )
     else:
         R0 = dataset["R"][0]
+        O0 = dataset["O"][0] if "O" in dataset else None
         species0 = loader.species[0]
         init_mask0 = dataset["mask"][0]
         N_max = int(loader.N_max)
 
-    model = CombinedModel(
-        config=config,
-        R0=R0,
-        box=box,
-        species=species0,
-        N_max=N_max,
-        init_mask=init_mask0,
-        n_species_override=n_species_global,
-        id_to_aa=loader.id_to_aa,
-        prior_only=config.prior_only_enabled()
-    )
+    if O0 is not None:
+        model = CombinedModel(
+            config=config,
+            R0=R0,
+            O0=O0,
+            box=box,
+            box_min=box_min,
+            species=species0,
+            N_max=N_max,
+            init_mask=init_mask0,
+            n_species_override=n_species_global,
+            id_to_aa=loader.id_to_aa,
+            prior_only=config.prior_only_enabled(),
+            support_gate_bank=support_gate_bank,
+        )
+    else:
+        model = CombinedModel(
+            config=config,
+            R0=R0,
+            box=box,
+            box_min=box_min,
+            species=species0,
+            N_max=N_max,
+            init_mask=init_mask0,
+            n_species_override=n_species_global,
+            id_to_aa=loader.id_to_aa,
+            prior_only=config.prior_only_enabled(),
+            support_gate_bank=support_gate_bank,
+        )
 
     model_logger.info(f"Initialized: {model}")
 
@@ -1347,6 +1537,8 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
             )
             if dsm_enabled(config):
                 val_split = add_dsm_noise_fields(val_split, config, seed=split_seed + 100000)
+            if safety_enabled(config):
+                val_split = attach_default_safety_fields(val_split, config)
             val_loader = NumpyDataLoader(**_build_loader_kwargs(val_split))
     elif N_val == 0 or val_fraction == 0.0:
         val_loader = train_loader
@@ -1354,6 +1546,8 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         val_split = _build_validation_split(dataset, N_train, N_train + N_val)
         if dsm_enabled(config):
             val_split = add_dsm_noise_fields(val_split, config, seed=split_seed + 100000)
+        if safety_enabled(config):
+            val_split = attach_default_safety_fields(val_split, config)
         val_loader = NumpyDataLoader(**_build_loader_kwargs(val_split))
 
     loaders = DataLoaders(
@@ -1376,6 +1570,13 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         "force_loss_mask": jnp.asarray(train_split["force_loss_mask"]),
         "force_loss_weights": jnp.asarray(train_split["force_loss_weights"]),
     }
+    if "O" in train_split:
+        train_data["O"] = jnp.asarray(train_split["O"])
+        print("========== Check O import ==========")
+        print("O:",train_data["O"][0])
+        print("========== End : Check O import ==========")
+    if "T" in train_split:
+        train_data["T"] = jnp.asarray(train_split["T"])
     if "segment_id" in train_split:
         train_data["segment_id"] = jnp.asarray(train_split["segment_id"])
     for key, value in train_split.items():
@@ -1389,7 +1590,27 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
         val_loader=val_loader,
         train_data=train_data,
         tiled_train_source=tiled_train_source,
+        noised_id_to_aa=loader.id_to_aa,
+        noised_fitted_params=fitted_prior_params,
     )
+
+    init_ckpt_cfg = config.get("training", "init_from_checkpoint", default={}) or {}
+    if isinstance(init_ckpt_cfg, dict) and bool(init_ckpt_cfg.get("enabled", False)):
+        init_path_raw = init_ckpt_cfg.get("path")
+        if init_path_raw is None:
+            raise ValueError(
+                "training.init_from_checkpoint.enabled=true requires a path."
+            )
+        init_path = resolve_from_config_or_repo(
+            init_path_raw,
+            config.config_path,
+            repo_root_from_file(__file__),
+        )
+        trainer.initialize_params_from_checkpoint(
+            str(init_path),
+            source_key=str(init_ckpt_cfg.get("source_key", "best_params")),
+            partial_matching=bool(init_ckpt_cfg.get("partial_matching", False)),
+        )
 
     # Handle resume from checkpoint
     resolved_checkpoint = None
@@ -1443,24 +1664,32 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     logging.info("EXPORTING MODEL")
     logging.info("=" * 60)
 
-    mlir_path = export_dir / f"{model_name}.mlir"
-    export_model = _make_export_model(
-        config=config,
-        model=model,
-        R0=R0,
-        box=box,
-        species0=species0,
-        id_to_aa=loader.id_to_aa,
-        n_max=model.N_max,
-    )
-    exporter = ModelExporter.from_combined_model(
-        model=export_model,
-        params=best_params,
-        box=box,
-        species=species0
-    )
-    exporter.export_to_file(mlir_path)
-    export_logger.info(f"MLIR: {mlir_path}")
+    export_enabled = bool(config.get("export", "enabled", default=True))
+    if export_enabled:
+        mlir_path = export_dir / f"{model_name}.mlir"
+        export_model = _make_export_model(
+            config=config,
+            model=model,
+            R0=R0,
+            box=box,
+            species0=species0,
+            id_to_aa=loader.id_to_aa,
+            n_max=model.N_max,
+            support_gate_bank=support_gate_bank,
+            box_min=box_min,
+        )
+        exporter = ModelExporter.from_combined_model(
+            model=export_model,
+            params=best_params,
+            box=box,
+            species=species0
+        )
+        exporter.export_to_file(mlir_path)
+        export_logger.info(f"MLIR: {mlir_path}")
+    else:
+        export_logger.info(
+            "MLIR export disabled by export.enabled=false; saving params and diagnostics only."
+        )
 
     # Save parameters as pickle
     params_path = export_dir / f"{model_name}_params.pkl"
@@ -1473,42 +1702,12 @@ def main(config_file: str, job_id: str = None, resume_checkpoint: str = None):
     logging.info("GENERATING PLOTS")
     logging.info("=" * 60)
 
-    # Resolve training log from canonical run directories first, then legacy fallbacks.
-    log_file = None
-    log_candidates = []
-    log_name = f"train_{job_id}.log"
-
-    run_output_dir = Path(config.get_output_dir())
-    run_slurm_dir = Path(config.get_slurm_dir())
-    run_dir_from_export = export_dir.parent
-
-    for base in (run_output_dir, run_slurm_dir, run_dir_from_export):
-        log_candidates.extend(
-            [
-                base / log_name,
-                base / f"slurm-{job_id}.out",
-                base / f"slurm-{job_id}.err",
-            ]
-        )
-
-    log_candidates.extend(
-        [
-            Path("outputs") / log_name,
-            Path(log_name),
-            Path("outputs") / f"slurm-{job_id}.out",
-            Path(f"slurm-{job_id}.out"),
-        ]
+    log_file = find_training_log(
+        job_id=job_id,
+        output_dir=Path(config.get_output_dir()),
+        slurm_dir=Path(config.get_slurm_dir()),
+        export_dir=export_dir,
     )
-
-    seen = set()
-    for candidate in log_candidates:
-        resolved = candidate.resolve(strict=False)
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        if candidate.exists():
-            log_file = candidate
-            break
 
     if log_file is not None:
         plotter = LossPlotter(str(log_file), config=config)
@@ -1554,6 +1753,11 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
     apply_numpy_dataloader_patch()
 
     config = ConfigManager(config_file)
+    if config.get_crossfit_config()["enabled"]:
+        raise ValueError(
+            "data.crossfit is currently supported only for a single NPZ dataset; "
+            "a bucketed multi-protein run needs one manifest per bucket."
+        )
     _validate_tiled_mode_constraints(config)
     _validate_prior_residual_mode_constraints(config)
     _apply_grad_accum_overrides(config)
@@ -1585,9 +1789,8 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
     config.save(config_path)
     training_logger.info(f"[Config] Saved to: {config_path}")
 
-    # Load all buckets
     bucketed = BucketedDatasetLoader(bucket_dir, max_frames=config.get_max_frames(),
-                                     seed=config.get_seed())
+                                     seed=config.get_seed(), dynamic_box=config.dynamic_box_enabled())
     training_logger.info(bucketed.summary())
     global_n_species = max(int(np.max(dl.species)) + 1 for _, dl in bucketed.buckets)
     training_logger.info(f"Global species cardinality across buckets: {global_n_species}")
@@ -1601,6 +1804,7 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
 
     prev_params = None
     all_results = {}
+    final_support_gate_bank = None
 
     for bucket_idx, (n_max, loader) in enumerate(bucketed.buckets):
         training_logger.info(
@@ -1610,14 +1814,34 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
             f"{'=' * 60}"
         )
 
-        extent, R_shift = preprocessor.compute_box_extent(loader.R, loader.mask)
         dataset = loader.get_all()
-        dataset["R"] = preprocessor.center_and_park(
-            dataset["R"], dataset["mask"], extent, R_shift
-        )
+        use_pbc_mp = config.use_pbc_enabled()
+        if use_pbc_mp:
+            if loader.box is None:
+                raise ValueError(
+                    f"model.pbc=true requires a 'box' array in bucket "
+                    f"'{loader.npz_path.name}'. None found."
+                )
+            if config.dynamic_box_enabled():
+                frame_boxes = np.asarray(loader.box_per_frame, dtype=np.float32)
+                box = jnp.asarray(np.max(frame_boxes, axis=0), dtype=jnp.float32)
+                box_min = np.min(frame_boxes, axis=0).astype(np.float32)
+                dataset["box"] = frame_boxes
+                dataset["R"] = _wrap_into_box(dataset["R"], frame_boxes)
+                data_logger.info("[PBC][Bucket %d] Dynamic boxes: min=%s max=%s", bucket_idx, box_min, np.asarray(box))
+            else:
+                box = jnp.asarray(loader.box, dtype=jnp.float32)
+                box_min = None
+                dataset["R"] = _wrap_into_box(dataset["R"], np.asarray(box))
+                data_logger.info(f"[PBC][Bucket {bucket_idx}] Using dataset box: {jax.device_get(box)}")
+        else:
+            extent, R_shift = preprocessor.compute_box_extent(loader.R, loader.mask)
+            dataset["R"] = preprocessor.center_and_park(
+                dataset["R"], dataset["mask"], extent, R_shift
+            )
+            box = extent
+            box_min = None
 
-        # pretrain_prior + prior_residual is not supported in multi-protein mode
-        # (each bucket is a different protein with different N_max/topology).
         if config.pretrain_prior_enabled() and config.prior_residual_enabled():
             training_logger.warning(
                 "[PriorResidual] pretrain_prior=true is not supported in multi-protein "
@@ -1637,9 +1861,8 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
             buffer_mult=buffer_mult,
             park_mult=park_mult,
         )
-        box = extent
+        dataset = apply_force_label_mode(config, dataset)
 
-        # Data loaders
         split_seed = int(config.get_seed()) + int(bucket_idx)
         dataset = _shuffle_dataset_for_split(dataset, seed=split_seed)
 
@@ -1666,9 +1889,17 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
         _configure_auto_leash_d_safe(
             config, tiled_train_source if tiled_train_source is not None else train_split
         )
+        support_gate_bank = _build_support_gate_bank_if_enabled(config, train_split, split_seed)
+        final_support_gate_bank = support_gate_bank
         if dsm_enabled(config):
             train_split = add_dsm_noise_fields(train_split, config, seed=split_seed)
-        _configure_runtime_avg_num_neighbors(config, train_split, split_seed)
+        box = _cell_list_box_for_tiled_split(config, train_split, box)
+        _configure_runtime_avg_num_neighbors(
+            config,
+            tiled_train_source if tiled_train_source is not None else train_split,
+            split_seed,
+            box=np.asarray(box) if use_pbc_mp else None,
+        )
         config.save(config_path)
         training_logger.info(
             "[Config][Bucket %d] Updated runtime config saved to: %s",
@@ -1693,11 +1924,12 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
             model_n_max = int(n_max)
 
         model = CombinedModel(
-            config=config, R0=R0, box=box, species=species0, N_max=model_n_max,
+            config=config, R0=R0, box=box, box_min=box_min, species=species0, N_max=model_n_max,
             init_mask=init_mask0,
             n_species_override=global_n_species,
             id_to_aa=loader.id_to_aa,
-            prior_only=config.prior_only_enabled()
+            prior_only=config.prior_only_enabled(),
+            support_gate_bank=support_gate_bank,
         )
         model_logger.info(f"Bucket {bucket_idx}: {model}")
 
@@ -1736,7 +1968,7 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
             "mask": jnp.asarray(train_split["mask"]),
             "species": jnp.asarray(train_split["species"]),
             "force_loss_mask": jnp.asarray(train_split["force_loss_mask"]),
-        "force_loss_weights": jnp.asarray(train_split["force_loss_weights"]),
+            "force_loss_weights": jnp.asarray(train_split["force_loss_weights"]),
         }
         if "segment_id" in train_split:
             train_data["segment_id"] = jnp.asarray(train_split["segment_id"])
@@ -1749,9 +1981,10 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
             train_loader=train_loader, val_loader=val_loader,
             train_data=train_data,
             tiled_train_source=tiled_train_source,
+            noised_id_to_aa=loader.id_to_aa,
+            noised_fitted_params=None,
         )
 
-        # Warm-start from previous bucket's params
         if prev_params is not None:
             trainer.params = prev_params
             trainer.best_params = prev_params
@@ -1765,11 +1998,7 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
 
         training_logger.info(f"Bucket {bucket_idx} done: {results}")
 
-    # Export using final bucket's params (largest N_max)
     final_n_max, final_loader = bucketed.buckets[-1]
-    # Use the model-initialization species vector from the last bucket.
-    # In tiled mode this carries the tiled particle axis; in standard mode it
-    # is identical to final_loader.species[0].
     final_species0 = species0
 
     training_logger.info(f"\nExporting model (N_max={final_n_max})…")
@@ -1790,6 +2019,8 @@ def main_multi_protein(config_file: str, bucket_dir: str, job_id: str = None):
             species0=final_species0,
             id_to_aa=loader.id_to_aa,
             n_max=final_n_max,
+            support_gate_bank=final_support_gate_bank,
+            box_min=box_min,
         )
         exporter = ModelExporter.from_combined_model(
             model=export_model, params=prev_params,

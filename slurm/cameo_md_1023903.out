@@ -1,0 +1,10 @@
+============================================================
+CAMEO CG JAX-MD Simulation
+Config      : local_work/config/md/ala2_backbone_5bead_wCB.yaml
+Project root: /e/project1/cameo/edelkoetter2/work/cameo_cg
+Job ID      : 1023903
+Node        : jpbo-085-17
+============================================================
+Wrote 300001 frames × 6 atoms → /e/project1/cameo/edelkoetter2/work/cameo_cg/local_work/md_runs/ala2/backbone_6bead/model_21/traj_nvt_30ns.dump
+  box: ['[-7.59, 7.59]', '[-7.60, 7.60]', '[-7.66, 7.66]']
+  atom types: [1, 2, 3, 4, 5, 6]

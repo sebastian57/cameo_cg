@@ -15,6 +15,8 @@ import jax
 import jax.numpy as jnp
 from jax_md import space, partition, util as md_util
 from utils.logging import model_logger
+from training.edge_distance_gate import compute_edge_distance_gate
+from models.direct_force import scatter_central_pair_forces
 
 # Resolve helper module paths used by the fast backend implementation.
 # The helper files live in the sibling repository directory:
@@ -75,6 +77,115 @@ def _irrep_block_slices(irreps: cue.Irreps) -> List[Tuple[int, Any, int, int]]:
     return blocks
 
 
+def _irrep_offsets(irreps: cue.Irreps) -> Dict[Tuple[int, int], List[Tuple[int, int]]]:
+    """Compute (start, end) positions for every block of each (l, p) irrep in ir_mul layout.
+
+    Returns a list of slices per (l, p) because the same irrep type can appear in
+    multiple non-contiguous blocks — e.g. the embedding layer concatenates Y-derived
+    features and two separate species embeddings, each stored as its own 0e block.
+    """
+    if hasattr(irreps, 'irreps'):
+        irreps = irreps.irreps
+    offsets: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
+    pos = 0
+    for mul, ir in irreps:
+        width = int(mul) * int(ir.dim)
+        key = (int(ir.l), int(ir.p))
+        offsets.setdefault(key, []).append((pos, pos + width))
+        pos += width
+    return offsets
+
+
+def _rep_irrep_norm_features(rep: cuex.RepArray) -> jnp.ndarray:
+    """Return rotation-invariant per-irrep norm features for each edge."""
+    irreps = rep.irreps if isinstance(rep.irreps, cue.Irreps) else rep.irreps.irreps
+    offset = 0
+    parts = []
+    for mul, ir in irreps:
+        width = int(mul) * int(ir.dim)
+        chunk = rep.array[:, offset : offset + width]
+        block = chunk.reshape(chunk.shape[0], int(mul), int(ir.dim))
+        parts.append(jnp.linalg.norm(block, axis=-1))
+        offset += width
+    if parts:
+        return jnp.concatenate(parts, axis=-1)
+    return jnp.zeros((rep.array.shape[0], 0), dtype=rep.array.dtype)
+
+
+def _axis_irrep_norm_features(axis_array: jnp.ndarray, irreps: cue.Irreps) -> jnp.ndarray:
+    """Return per-irrep norms for arrays shaped [n_edges, axis, irreps_dim]."""
+    if hasattr(irreps, "irreps"):
+        irreps = irreps.irreps
+    n_edges = axis_array.shape[0]
+    n_axis = axis_array.shape[1]
+    flat = axis_array.reshape(n_edges * n_axis, axis_array.shape[-1])
+    offset = 0
+    parts = []
+    for mul, ir in irreps:
+        width = int(mul) * int(ir.dim)
+        chunk = flat[:, offset : offset + width]
+        block = chunk.reshape(chunk.shape[0], int(mul), int(ir.dim))
+        norm = jnp.linalg.norm(block, axis=-1).reshape(n_edges, n_axis * int(mul))
+        parts.append(norm)
+        offset += width
+    if parts:
+        return jnp.concatenate(parts, axis=-1)
+    return jnp.zeros((n_edges, 0), dtype=axis_array.dtype)
+
+
+def _axis_irrep_group_ids(axis_array: jnp.ndarray, irreps: cue.Irreps) -> jnp.ndarray:
+    """Return feature-group IDs matching _axis_irrep_norm_features output columns."""
+    if hasattr(irreps, "irreps"):
+        irreps = irreps.irreps
+    n_axis = int(axis_array.shape[1])
+    groups = []
+    group_id = 0
+    for mul, _ir in irreps:
+        groups.extend([group_id] * (n_axis * int(mul)))
+        group_id += 1
+    return jnp.asarray(groups, dtype=jnp.int32)
+
+
+def _rep_scalar_features_and_group_ids(rep: cuex.RepArray) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Extract 0e scalar TP features and group IDs per scalar irrep block."""
+    irreps = rep.irreps if isinstance(rep.irreps, cue.Irreps) else rep.irreps.irreps
+    offset = 0
+    parts = []
+    groups = []
+    group_id = 0
+    for mul, ir in irreps:
+        width = int(mul) * int(ir.dim)
+        chunk = rep.array[:, offset : offset + width]
+        if int(ir.l) == 0 and int(ir.p) == 1:
+            parts.append(chunk)
+            groups.extend([group_id] * width)
+            group_id += 1
+        offset += width
+    if parts:
+        return jnp.concatenate(parts, axis=-1), jnp.asarray(groups, dtype=jnp.int32)
+    return jnp.zeros((rep.array.shape[0], 0), dtype=rep.array.dtype), jnp.zeros((0,), dtype=jnp.int32)
+
+
+def _rep_odd_scalar_features_and_group_ids(rep: cuex.RepArray) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Extract 0o scalar TP features and group IDs per scalar irrep block."""
+    irreps = rep.irreps if isinstance(rep.irreps, cue.Irreps) else rep.irreps.irreps
+    offset = 0
+    parts = []
+    groups = []
+    group_id = 0
+    for mul, ir in irreps:
+        width = int(mul) * int(ir.dim)
+        chunk = rep.array[:, offset : offset + width]
+        if int(ir.l) == 0 and int(ir.p) == -1:
+            parts.append(chunk)
+            groups.extend([group_id] * width)
+            group_id += 1
+        offset += width
+    if parts:
+        return jnp.concatenate(parts, axis=-1), jnp.asarray(groups, dtype=jnp.int32)
+    return jnp.zeros((rep.array.shape[0], 0), dtype=rep.array.dtype), jnp.zeros((0,), dtype=jnp.int32)
+
+
 def _normalize_tp_mode(tp_mode: str) -> str:
     """Normalize TP mode aliases to internal names."""
     aliases = {
@@ -119,10 +230,14 @@ def _parse_mode_csv(modes: Optional[Union[str, Iterable[str]]]) -> Optional[Tupl
 
 
 def _mesh_safe_softplus(x):
-    """Softplus variant that avoids Manual-vs-Auto sharding mismatches."""
+    """Softplus variant that avoids Manual-vs-Auto sharding mismatches.
+
+    Uses scalar literal 0.0 instead of zeros_like(x) so no sharding is
+    inherited from x — required for JAX >= 0.10 which rejects Auto-sharded
+    tensors used as templates inside a Manual mesh context.
+    """
     x = jnp.asarray(x)
-    zero = jnp.zeros_like(x)
-    return jnp.maximum(x, zero) + jnp.log1p(jnp.exp(-jnp.abs(x)))
+    return jnp.maximum(x, 0.0) + jnp.log1p(jnp.exp(-jnp.abs(x)))
 
 
 def _is_indexed_linear_candidate(stp: cue.SegmentedTensorProduct) -> bool:
@@ -317,7 +432,9 @@ class AllegroEmbedding(hk.Module):
         vectors: cuex.RepArray,
         senders: jnp.ndarray,
         receivers: jnp.ndarray,
-        species: jnp.ndarray
+        species: jnp.ndarray,
+        orientations_s:Optional[jnp.array]=None,
+        orientations_r:Optional[jnp.array]=None,
     ) -> Tuple[jnp.ndarray, cuex.RepArray]:
         """Compute initial embeddings.
 
@@ -326,6 +443,8 @@ class AllegroEmbedding(hk.Module):
             senders: Sender node indices, shape [n_edges]
             receivers: Receiver node indices, shape [n_edges]
             species: Species for each node, shape [n_nodes]
+            orientations_s: Optional sender orientation matrices, shape [n_edges, 3, 3]
+            orientations_r: Optional receiver orientation matrices, shape [n_edges, 3, 3]
 
         Returns:
             x: Scalar features, shape [n_edges, mlp_n_hidden]
@@ -340,7 +459,15 @@ class AllegroEmbedding(hk.Module):
         species_sender = self.species_embedding(species[senders])
         species_receiver = self.species_embedding(species[receivers])
 
-        x = jnp.concatenate([radial_features, species_sender, species_receiver], axis=-1)
+        if orientations_s is not None and orientations_r is not None:
+            vec_sender = jnp.einsum("ij,ijk->ik", vectors.array, orientations_s)
+            vec_receiver = jnp.einsum("ij,ijk->ik", vectors.array, orientations_r)
+
+            R_rel_flat = jnp.einsum("ijk,ijl->ikl", orientations_s, orientations_r).reshape(n_edges, 9)
+
+            x = jnp.concatenate([radial_features, vec_sender, vec_receiver, R_rel_flat, species_sender, species_receiver], axis=-1)
+        else:
+            x = jnp.concatenate([radial_features, species_sender, species_receiver], axis=-1)
 
         x = e3nn.haiku.MultiLayerPerceptron(
             self.embed_layers,
@@ -381,7 +508,44 @@ class AllegroEmbedding(hk.Module):
                 cue.IrrepsAndLayout(species_irreps, cue.ir_mul),
                 species_receiver
             )
-            V = cuex.concatenate([Y, species_sender_rep, species_receiver_rep])
+
+            if orientations_s is not None and orientations_r is not None:
+                Y_ori_parts_s = []
+                Y_ori_parts_r = []
+
+                for axis in range(3):  # iterate over all 3 orientation axes
+                    ori_s_rep = cuex.RepArray(
+                        cue.IrrepsAndLayout(cue.Irreps("O3", "1o"), cue.ir_mul),
+                        orientations_s[:, :, axis]  # (E, 3)
+                    )
+                    ori_r_rep = cuex.RepArray(
+                        cue.IrrepsAndLayout(cue.Irreps("O3", "1o"), cue.ir_mul),
+                        orientations_r[:, :, axis]  # (E, 3)
+                    )
+                    Y_ori_s = cuex.spherical_harmonics(ls, ori_s_rep, normalize=True)
+                    Y_ori_r = cuex.spherical_harmonics(ls, ori_r_rep, normalize=True)
+
+                    # Expand to match multiplicity structure
+                    for mul, ir in irreps_Y:
+                        l_idx = ls.index(ir.l)
+                        l_dim = 2 * ir.l + 1
+                        l_start = sum(2 * ls[j] + 1 for j in range(l_idx))
+                        l_end = l_start + l_dim
+                        Y_ori_parts_s.append(jnp.repeat(Y_ori_s.array[:, l_start:l_end], mul, axis=-1))
+                        Y_ori_parts_r.append(jnp.repeat(Y_ori_r.array[:, l_start:l_end], mul, axis=-1))
+
+                Y_ori_s_array = jnp.concatenate(Y_ori_parts_s, axis=-1)
+                Y_ori_r_array = jnp.concatenate(Y_ori_parts_r, axis=-1)
+                
+                Y_ori_irreps = cue.Irreps("O3", " + ".join([f"{3*mul}x{ir.l}{'e' if ir.p == 1 else 'o'}"
+                for mul, ir in irreps_Y]))
+
+                Y_ori_s_rep = cuex.RepArray(cue.IrrepsAndLayout(Y_ori_irreps, cue.ir_mul), Y_ori_s_array)
+                Y_ori_r_rep = cuex.RepArray(cue.IrrepsAndLayout(Y_ori_irreps, cue.ir_mul), Y_ori_r_array)
+
+                V = cuex.concatenate([Y, Y_ori_s_rep, Y_ori_r_rep, species_sender_rep, species_receiver_rep])
+            else:
+                V = cuex.concatenate([Y, species_sender_rep, species_receiver_rep])
 
             V_irreps = V.irreps if isinstance(V.irreps, cue.Irreps) else V.irreps.irreps
             num_irreps = sum(mul for mul, ir in V_irreps)
@@ -652,43 +816,79 @@ class AllegroLayer(hk.Module):
         self,
         Y_irreps: cue.Irreps,
         V_red_irreps: cue.Irreps,
-    ) -> Dict[Tuple[int, int], cue.EquivariantPolynomial]:
-        """Build separate TP descriptors for each (l, p) irrep block.
-        
-        This enables using uniform_1d method which requires single-mode descriptors.
-        """
-        irrep_descriptors = {}
-        
-        for mul, ir in self.output_irreps:
-            l, p = ir.l, ir.p
-            
-            if (l, p) in irrep_descriptors:
-                continue
-            
-            Y_filtered = cue.Irreps("O3", f"1x{l}{'e' if p == 1 else 'o'}")
+    ) -> Dict[Tuple[int, int], List[Tuple[Any, int, int, int, int]]]:
+        """Build TP descriptors covering all CG-valid paths to each output irrep.
 
-            def keep_fn(mul_ir):
-                mul_, ir_ = mul_ir
-                return int(ir_.l) == l and int(ir_.p) == p
-            V_filtered = V_red_irreps.filter(keep=keep_fn)
-            
-            if V_filtered.dim == 0:
-                continue
-            
-            try:
-                tp_desc = cue.descriptors.full_tensor_product(
-                    Y_filtered,
-                    V_filtered,
-                    irreps3_filter=cue.Irreps("O3", f"{mul}x{l}{'e' if p == 1 else 'o'}"),
-                )
-                output_dim = getattr(tp_desc.outputs[0], "dim", 0)
-                if output_dim == 0:
-                    continue
-                irrep_descriptors[(l, p)] = tp_desc
-            except Exception:
-                continue
-        
-        return irrep_descriptors
+        For each output irrep (l_out, p_out), enumerates every valid combination
+        (l_Y, p_Y) ⊗ (l_V, p_V) → (l_out, p_out) satisfying the triangle rule
+        |l_Y − l_V| ≤ l_out ≤ l_Y + l_V and parity p_Y * p_V = p_out.  Each such
+        path gets its own single-irrep descriptor that is eligible for the
+        uniform_1d kernel.  Outputs from multiple paths to the same (l_out, p_out)
+        are concatenated in _tensor_product_per_irrep, matching the full-TP
+        behaviour of _build_tp_descriptor.
+
+        0e is appended to the processed set when absent from self.output_irreps so
+        that scalar channels are always produced for the x-update — identical to the
+        has_scalar guard in _build_tp_descriptor.
+
+        Returns:
+            Dict mapping (l_out, p_out) → list of
+            (tp_desc, y_start, y_end, v_start, v_end).
+        """
+        y_offsets = _irrep_offsets(Y_irreps)
+        v_offsets = _irrep_offsets(V_red_irreps)
+
+        # Output irreps to process; always include 0e for the x scalar update.
+        seen: set = set()
+        out_keys: List[Tuple[int, int]] = []
+        for _, ir in self.output_irreps:
+            key = (int(ir.l), int(ir.p))
+            if key not in seen:
+                seen.add(key)
+                out_keys.append(key)
+        if (0, 1) not in seen:
+            out_keys.append((0, 1))
+
+        descriptors: Dict[Tuple[int, int], List[Any]] = {}
+
+        for l_out, p_out in out_keys:
+            out_ir_list = [ir for _, ir in cue.Irreps("O3", f"1x{l_out}{'e' if p_out == 1 else 'o'}")]
+            path_list: List[Any] = []
+
+            for (l_Y, p_Y), y_slices in sorted(y_offsets.items()):
+                p_V_needed = p_out * p_Y           # parity conservation
+                l_V_min = abs(l_out - l_Y)
+                l_V_max = l_out + l_Y
+
+                for (l_V, p_V), v_slices in sorted(v_offsets.items()):
+                    if p_V != p_V_needed:
+                        continue
+                    if not (l_V_min <= l_V <= l_V_max):
+                        continue
+
+                    # Build one descriptor per (y_block, v_block) pair so each
+                    # descriptor has uniform Y and V dimensions (uniform_1d eligible).
+                    for y_start, y_end in y_slices:
+                        y_mul = (y_end - y_start) // (2 * l_Y + 1)
+                        Y_single = cue.Irreps("O3", f"{y_mul}x{l_Y}{'e' if p_Y == 1 else 'o'}")
+                        for v_start, v_end in v_slices:
+                            v_mul = (v_end - v_start) // (2 * l_V + 1)
+                            V_single = cue.Irreps("O3", f"{v_mul}x{l_V}{'e' if p_V == 1 else 'o'}")
+
+                            try:
+                                tp_desc = cue.descriptors.full_tensor_product(
+                                    Y_single, V_single, irreps3_filter=out_ir_list,
+                                )
+                                if getattr(tp_desc.outputs[0], "dim", 0) == 0:
+                                    continue
+                                path_list.append((tp_desc, y_start, y_end, v_start, v_end))
+                            except Exception:
+                                continue
+
+            if path_list:
+                descriptors[(l_out, p_out)] = path_list
+
+        return descriptors
 
     def _tensor_product_per_irrep(
         self,
@@ -701,82 +901,100 @@ class AllegroLayer(hk.Module):
         *,
         method: str,
     ) -> Tuple[jnp.ndarray, cue.Irreps]:
-        """Apply TP using per-irrep descriptors with uniform_1d method.
-        
-        This splits the TP into separate calls per (l, p) irrep block,
-        each of which is eligible for the fast uniform_1d kernel.
+        """Apply TP using per-irrep descriptors, covering all valid CG paths.
+
+        Each output irrep collects contributions from every valid (l_Y, l_V)
+        path enumerated by _build_per_irrep_tp_descriptors.  Individual path
+        results are concatenated along the channel axis so that CueLinear can
+        learn the optimal linear combination — identical to the full-TP strategy
+        used by _build_tp_descriptor in the fused_sp / baseline_mixed backends.
+
+        Y and V slices are extracted using correct ir_mul layout offsets rather
+        than a naive prefix slice, ensuring each descriptor receives the right
+        spherical-harmonic and feature components.
         """
+        # If uniform_1d was requested but cuequivariance_ops_jax is absent, fall back
+        # to naive automatically — this mirrors the existing ALLEGRO_TP_METHOD_FALLBACK
+        # mechanism used by _tensor_product_fused_sp, and is triggered automatically on
+        # SLURM nodes where slurm_env.sh exports ALLEGRO_TP_METHOD_FALLBACK=naive.
+        if method == "uniform_1d":
+            try:
+                import cuequivariance_ops_jax  # noqa: F401
+            except ImportError:
+                if self.tp_method_fallback == "naive":
+                    if hk.running_init():
+                        model_logger.warning(
+                            f"[{self.name}] cuequivariance_ops_jax not available; "
+                            "falling back to method='naive' (ALLEGRO_TP_METHOD_FALLBACK=naive)."
+                        )
+                    method = "naive"
+                else:
+                    raise ValueError(
+                        "cuequivariance_ops_jax is required for tp_method='uniform_1d' but is not installed. "
+                        "Install cuequivariance-ops-jax-cu12, or set ALLEGRO_TP_METHOD_FALLBACK=naive."
+                    )
+
         irrep_descriptors = self._build_per_irrep_tp_descriptors(Y_irreps, V_red_irreps)
+        n_paths_total = sum(len(v) for v in irrep_descriptors.values())
+
         if hk.running_init():
             model_logger.info(
-                f"[{self.name}] per-irrep descriptor count={len(irrep_descriptors)} n_edges={n_edges} mul_gcd={mul_gcd} "
+                f"[{self.name}] per-irrep descriptor count={len(irrep_descriptors)} "
+                f"n_paths={n_paths_total} n_edges={n_edges} mul_gcd={mul_gcd} "
                 f"wY_axis_shape={tuple(wY_axis.shape)} V_axis_shape={tuple(V_axis.shape)}"
             )
-        
+
         if not irrep_descriptors:
             if hk.running_init():
                 model_logger.warning(
                     f"[{self.name}] per-irrep TP built no descriptors; returning zero-width output."
                 )
             return jnp.zeros((n_edges, mul_gcd, 0)), cue.Irreps("O3", "0x0e")
-        
-        results = []
-        output_irreps_list = []
-        
+
         Eg = n_edges * mul_gcd
-        
-        for (l, p), tp_desc in sorted(irrep_descriptors.items()):
-            try:
-                wY_dim = tp_desc.inputs[0].dim
-                V_dim = tp_desc.inputs[1].dim
-                out_dim = getattr(tp_desc.outputs[0], "dim", 0)
-                if out_dim == 0:
-                    if hk.running_init():
-                        model_logger.info(
-                            f"[{self.name}] skipping zero-width uniform_1d descriptor for ({l},{p})."
-                        )
-                    continue
-                
-                wY_flat = wY_axis.reshape(Eg, -1)
-                V_flat = V_axis.reshape(Eg, -1)
-                
-                wY_slice = wY_flat[:, :wY_dim]
-                V_slice = V_flat[:, :V_dim]
-                
+        wY_flat = wY_axis.reshape(Eg, -1)   # (Eg, Y_full_dim)
+        V_flat = V_axis.reshape(Eg, -1)      # (Eg, V_dim_per_gcd)
+
+        results: List[jnp.ndarray] = []
+        out_irreps_parts: List[str] = []
+
+        for (l_out, p_out), path_list in sorted(irrep_descriptors.items()):
+            for tp_desc, y_start, y_end, v_start, v_end in path_list:
+                wY_slice = wY_flat[:, y_start:y_end]   # correct l_Y components
+                V_slice = V_flat[:, v_start:v_end]      # correct l_V components
+
+                if hk.running_init():
+                    out_dim = getattr(tp_desc.outputs[0], "dim", 0)
+                    model_logger.info(
+                        f"[{self.name}] uniform_1d path ({l_out},{p_out}): "
+                        f"y[{y_start}:{y_end}] v[{v_start}:{v_end}] "
+                        f"wY_dim={y_end - y_start} V_dim={v_end - v_start} out_dim={out_dim}"
+                    )
+
                 wY_rep = cuex.RepArray(tp_desc.inputs[0], wY_slice)
                 V_rep = cuex.RepArray(tp_desc.inputs[1], V_slice)
-                if hk.running_init():
-                    model_logger.info(
-                        f"[{self.name}] uniform_1d debug ({l},{p}): Eg={Eg} n_edges={n_edges} mul_gcd={mul_gcd} "
-                        f"wY_dim={wY_dim} V_dim={V_dim} out_dim={out_dim} "
-                        f"wY_slice_shape={tuple(wY_slice.shape)} V_slice_shape={tuple(V_slice.shape)}"
-                    )
-                
-                out = cuex.equivariant_polynomial(tp_desc, [wY_rep, V_rep], method=method)
-                
-                if isinstance(out, list):
-                    out = out[0]
-                
-                out_arr = out.array.reshape(n_edges, mul_gcd, -1)
-                results.append(out_arr)
-                output_irreps_list.append(tp_desc.outputs[0].irreps)
-                
-            except Exception as e:
-                if hk.running_init():
-                    model_logger.warning(f"[{self.name}] Failed TP for ({l},{p}): {e}")
-                continue
-        
+
+                try:
+                    out = cuex.equivariant_polynomial(tp_desc, [wY_rep, V_rep], method=method)
+                    if isinstance(out, list):
+                        out = out[0]
+                    results.append(out.array.reshape(n_edges, mul_gcd, -1))
+                    out_irreps = out.irreps.irreps if hasattr(out.irreps, 'irreps') else out.irreps
+                    for mul, ir in out_irreps:
+                        out_irreps_parts.append(f"{mul}x{ir.l}{'e' if ir.p == 1 else 'o'}")
+                except Exception as e:
+                    if hk.running_init():
+                        model_logger.warning(
+                            f"[{self.name}] TP failed for path ({l_out},{p_out}): {e}"
+                        )
+                    continue
+
         if not results:
             return jnp.zeros((n_edges, mul_gcd, 0)), cue.Irreps("O3", "0x0e")
-        
+
         out_axis = jnp.concatenate(results, axis=-1)
-        
-        output_irreps = cue.Irreps("O3", "")
-        for irreps in output_irreps_list:
-            for mul, ir in irreps:
-                output_irreps = output_irreps + cue.Irreps("O3", f"{mul}x{ir.l}{'e' if ir.p == 1 else 'o'}")
-        
-        return out_axis, output_irreps
+        tp_output_irreps = cue.Irreps("O3", " + ".join(out_irreps_parts))
+        return out_axis, tp_output_irreps
 
     def _tensor_product_fused_sp(
         self,
@@ -925,7 +1143,8 @@ class AllegroLayer(hk.Module):
         V: cuex.RepArray,
         senders: jnp.ndarray,
         species: jnp.ndarray,
-        num_nodes: int
+        num_nodes: int,
+        return_intermediates: bool = False,
     ) -> Tuple[jnp.ndarray, cuex.RepArray]:
         """Apply tensor product layer using axis-based approach.
 
@@ -984,7 +1203,6 @@ class AllegroLayer(hk.Module):
 
 
             V_axis, V_red_irreps = unflatten_mul_to_axis(V.array, V.irreps, mul_gcd)
-
 
             tp_desc = self._build_tp_descriptor(Y_irreps, V_red_irreps)
 
@@ -1066,6 +1284,22 @@ class AllegroLayer(hk.Module):
         envelope = polynomial_envelope(lengths, p=self.envelope_p, cutoff=1.0)
         y = envelope[:, None] * y
 
+        if return_intermediates:
+            tp_scalar_only, tp_scalar_groups = _rep_scalar_features_and_group_ids(V_new)
+            tp_odd_scalar_only, tp_odd_scalar_groups = _rep_odd_scalar_features_and_group_ids(V_new)
+            return y, V_out, {
+                "env_norm_features": _axis_irrep_norm_features(wY_axis, Y_irreps),
+                "env_norm_feature_groups": _axis_irrep_group_ids(wY_axis, Y_irreps),
+                "tp_norm_features": _axis_irrep_norm_features(out_axis, tp_output_irreps),
+                "tp_norm_feature_groups": _axis_irrep_group_ids(out_axis, tp_output_irreps),
+                "tp_scalar_features": x_new,
+                "tp_scalar_only_features": tp_scalar_only,
+                "tp_scalar_only_feature_groups": tp_scalar_groups,
+                "tp_odd_scalar_features": tp_odd_scalar_only,
+                "tp_odd_scalar_feature_groups": tp_odd_scalar_groups,
+                "scalar_update_features": y,
+            }
+
         return y, V_out
 
 
@@ -1125,6 +1359,87 @@ class AllegroFastForceHead(hk.Module):
         return node_vec
 
 
+class AllegroCentralForceHead(hk.Module):
+    """Direct-force readout with pairwise momentum and torque conservation.
+
+    The scalar coefficient is allowed to be directional and many-body.  Each
+    directed edge contribution is scattered with opposite signs to its two
+    endpoints.  For the bidirectional graphs produced by JAX-MD, the two
+    directed contributions therefore implement the explicit
+    ``0.5 * (a_ij + a_ji)`` symmetrization without a reverse-edge lookup.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int = 128,
+        n_hidden_layers: int = 2,
+        envelope_p: int = 6,
+        activation=jax.nn.silu,
+        zero_init: bool = True,
+        name: Optional[str] = None,
+    ):
+        super().__init__(name=name)
+        self.hidden_size = int(hidden_size)
+        self.n_hidden_layers = int(n_hidden_layers)
+        self.envelope_p = int(envelope_p)
+        self.activation = activation
+        self.zero_init = bool(zero_init)
+        if self.hidden_size <= 0:
+            raise ValueError("direct-force hidden_size must be > 0")
+        if self.n_hidden_layers < 0:
+            raise ValueError("direct-force n_hidden_layers must be >= 0")
+
+    def __call__(
+        self,
+        vectors: cuex.RepArray,
+        x: jnp.ndarray,
+        V: cuex.RepArray,
+        senders: jnp.ndarray,
+        receivers: jnp.ndarray,
+        valid_edges: jnp.ndarray,
+        num_nodes: int,
+    ) -> jnp.ndarray:
+        """Return direct per-node forces with shape ``[N, 3]``."""
+        scalar_V = AllegroReadout._extract_scalar_channels(V)
+        features = jnp.concatenate((x, scalar_V), axis=-1)
+        hidden = features
+        for layer_idx in range(self.n_hidden_layers):
+            hidden = hk.Linear(
+                self.hidden_size,
+                name=f"hidden_{layer_idx}",
+            )(hidden)
+            hidden = self.activation(hidden)
+
+        output_init = (
+            hk.initializers.Constant(0.0)
+            if self.zero_init
+            else hk.initializers.VarianceScaling(1.0, "fan_in", "truncated_normal")
+        )
+        coefficient = hk.Linear(
+            1,
+            w_init=output_init,
+            b_init=hk.initializers.Constant(0.0),
+            name="coefficient",
+        )(hidden).squeeze(-1)
+
+        vector_array = vectors.array
+        distance_scaled = jnp.linalg.norm(vector_array, axis=-1)
+        envelope = polynomial_envelope(
+            distance_scaled,
+            p=self.envelope_p,
+            cutoff=1.0,
+        )
+        return scatter_central_pair_forces(
+            coefficient,
+            vector_array,
+            senders,
+            receivers,
+            valid_edges,
+            num_nodes,
+            edge_scale=envelope,
+        )
+
+
 class AllegroReadout(hk.Module):
     """Readout layer to produce per-edge energies.
 
@@ -1138,6 +1453,7 @@ class AllegroReadout(hk.Module):
         output_n_layers: int,
         envelope_p: int = 6,
         output_activation = jax.nn.silu,
+        parity_odd_readout: bool = False,
         name: Optional[str] = None
     ):
         """Initialize AllegroReadout.
@@ -1154,6 +1470,12 @@ class AllegroReadout(hk.Module):
         self.output_n_layers = output_n_layers
         self.envelope_p = envelope_p
         self.output_activation = output_activation
+        # Standard Allegro reads out a pure even scalar (0e), which makes the energy
+        # O(3)-invariant: U(R) == U(mirror R) exactly, so the model cannot distinguish
+        # enantiomers. Enabling this admits pseudoscalar (0o) channels into the readout,
+        # making the energy SO(3)-invariant but parity-odd-capable, which is what a
+        # chiral molecule's PMF actually requires.
+        self.parity_odd_readout = bool(parity_odd_readout)
 
     @staticmethod
     def _e3nn_style_linear_no_bias(
@@ -1172,8 +1494,8 @@ class AllegroReadout(hk.Module):
         return jnp.sqrt(alpha) * jnp.matmul(x, w)
 
     @staticmethod
-    def _extract_scalar_channels(rep: cuex.RepArray) -> jnp.ndarray:
-        """Extract 0e channels from a RepArray in ir_mul layout."""
+    def _extract_scalar_channels(rep: cuex.RepArray, include_odd: bool = False) -> jnp.ndarray:
+        """Extract 0e (and optionally 0o) channels from a RepArray in ir_mul layout."""
         irreps = rep.irreps if isinstance(rep.irreps, cue.Irreps) else rep.irreps.irreps
         offset = 0
         scalar_parts = []
@@ -1181,7 +1503,7 @@ class AllegroReadout(hk.Module):
         for mul, ir in irreps:
             width = mul * ir.dim
             chunk = rep.array[:, offset:offset + width]
-            if ir.l == 0 and ir.p == 1:
+            if ir.l == 0 and (ir.p == 1 or (include_odd and ir.p == -1)):
                 scalar_parts.append(chunk)
             offset += width
 
@@ -1225,7 +1547,9 @@ class AllegroReadout(hk.Module):
             xV = cuex.concatenate([x_rep, V])
             h_in_array = xV.array
 
-            scalar_features = self._extract_scalar_channels(xV)
+            scalar_features = self._extract_scalar_channels(
+                xV, include_odd=self.parity_odd_readout
+            )
             fan_in = scalar_features.shape[-1]
 
             if fan_in == 0:
@@ -1264,10 +1588,12 @@ class AllegroReadout(hk.Module):
                 "h_in": h_in_array,
                 "h_lin": h_lin_array,
                 "h_out": energies.array,
-                "scalar_fan_in": int(fan_in),
-                "scalar_mu_l2": float(scalar_mu_l2),
-                "scalar_mu_max_abs": float(scalar_mu_max_abs),
-                "mu_dot_w": float(mu_dot_w),
+                "scalar_features": scalar_features,
+                "scalar_features_enveloped": scalar_features * envelope[:, None],
+                "scalar_fan_in": jnp.asarray(fan_in, dtype=jnp.int32),
+                "scalar_mu_l2": scalar_mu_l2,
+                "scalar_mu_max_abs": scalar_mu_max_abs,
+                "mu_dot_w": mu_dot_w,
             }
 
         return energies
@@ -1387,6 +1713,15 @@ class Allegro(hk.Module):
         fast_force_source: str = "layer0",
         fast_force_aggregate: Literal["receiver", "sender"] = "receiver",
         fast_force_degree_norm: Optional[Literal["deg_sqrt", "deg"]] = None,
+        enable_direct_force_head: bool = False,
+        direct_force_hidden: int = 128,
+        direct_force_layers: int = 2,
+        direct_force_envelope_p: int = 6,
+        direct_force_zero_init: bool = True,
+        parity_odd_readout: bool = False,
+        chirality_head_enabled: bool = False,
+        chirality_sign: float = 0.0,
+        chirality_known: bool = False,
         name: str = 'Allegro'
     ):
         """Initialize Allegro model.
@@ -1439,8 +1774,12 @@ class Allegro(hk.Module):
         self.output_irreps = output_irreps
         self.mlp_n_hidden = mlp_n_hidden
         self.enable_fast_force_head = bool(enable_fast_force_head)
+        self.enable_direct_force_head = bool(enable_direct_force_head)
         self.fast_force_source = fast_force_source
         self.remat_layers = bool(remat_layers)
+        self.chirality_head_enabled = bool(chirality_head_enabled)
+        self.chirality_sign = float(chirality_sign)
+        self.chirality_known = bool(chirality_known)
         self.tp_fused_option_b1_layer0 = bool(tp_fused_option_b1_layer0)
         self.tp_fused_option_b1_modes = _parse_mode_csv(tp_fused_option_b1_modes)
         if self.tp_fused_option_b1_layer0 and self.tp_fused_option_b1_modes is None:
@@ -1518,7 +1857,8 @@ class Allegro(hk.Module):
             output_activation=(
                 mlp_activation if mlp_output_activation is None else mlp_output_activation
             ),
-            envelope_p=envelope_p
+            envelope_p=envelope_p,
+            parity_odd_readout=parity_odd_readout,
         )
 
         self.fast_force_head = (
@@ -1530,6 +1870,18 @@ class Allegro(hk.Module):
             if self.enable_fast_force_head
             else None
         )
+        self.direct_force_head = (
+            AllegroCentralForceHead(
+                hidden_size=direct_force_hidden,
+                n_hidden_layers=direct_force_layers,
+                envelope_p=direct_force_envelope_p,
+                activation=mlp_activation,
+                zero_init=direct_force_zero_init,
+                name="central_force_head",
+            )
+            if self.enable_direct_force_head
+            else None
+        )
 
     def __call__(
         self,
@@ -1539,7 +1891,14 @@ class Allegro(hk.Module):
         species: jnp.ndarray,
         num_nodes: int,
         return_fast_forces: bool = False,
+        return_direct_forces: bool = False,
         compute_energy: bool = True,
+        return_al_features: bool = False,
+        orientations_s: Optional[jnp.ndarray] = None,
+        orientations_r: Optional[jnp.ndarray] = None,
+        valid_edges: Optional[jnp.ndarray] = None,
+        chirality_sign: Optional[jax.Array] = None,
+        chirality_known: Optional[jax.Array] = None,
     ) -> Union[cuex.RepArray, jnp.ndarray, Tuple[cuex.RepArray, jnp.ndarray]]:
         """Predict per-edge energies and optionally fast per-node forces.
 
@@ -1551,6 +1910,8 @@ class Allegro(hk.Module):
             num_nodes: Number of nodes (concrete value, not traced)
             return_fast_forces: If True, also compute fast per-node force head.
             compute_energy: If False, skip readout and only compute fast forces.
+            return_al_features: If True, return final invariant edge features
+                used by the readout linear head.
 
         Returns:
             Per-edge energies, or per-node fast forces, or both.
@@ -1559,23 +1920,84 @@ class Allegro(hk.Module):
             raise ValueError(
                 "return_fast_forces=True requires enable_fast_force_head=True in Allegro init."
             )
+        if return_direct_forces and self.direct_force_head is None:
+            raise ValueError(
+                "return_direct_forces=True requires enable_direct_force_head=True."
+            )
+        if return_direct_forces and return_fast_forces:
+            raise ValueError("Legacy fast forces and central direct forces are mutually exclusive.")
 
-        x, V = self.embedding_layer(vectors, senders, receivers, species)
+        if orientations_s is not None or orientations_r is not None:
+            x, V = self.embedding_layer(vectors, senders, receivers, species,
+                             orientations_s=orientations_s,
+                             orientations_r=orientations_r)
+        else:
+            x, V = self.embedding_layer(vectors, senders, receivers, species)
+
         source_V = V if self.fast_force_source == "embedding" else None
+        latent_norm_parts = []
+        env_norm_parts = []
+        env_norm_group_parts = []
+        tp_norm_parts = []
+        tp_norm_group_parts = []
+        tp_scalar_parts = []
+        tp_scalar_only_parts = []
+        tp_scalar_only_group_parts = []
+        tp_odd_scalar_parts = []
+        tp_odd_scalar_group_parts = []
+        scalar_update_parts = []
+        x_state_parts = []
+        needs_layer_aux = return_al_features or self.chirality_head_enabled
+        if return_al_features:
+            latent_norm = _rep_irrep_norm_features(V)
+            if latent_norm.shape[-1] > 0:
+                latent_norm_parts.append(latent_norm)
+            x_state_parts.append(x)
 
         for i, layer in enumerate(self.layers):
             if self.remat_layers:
-                y, V_new = hk.remat(
+                layer_out = hk.remat(
                     lambda vectors_, x_, V_, senders_, species_, layer=layer: layer(
-                        vectors_, x_, V_, senders_, species_, num_nodes
+                        vectors_, x_, V_, senders_, species_, num_nodes,
+                        return_intermediates=needs_layer_aux,
                     )
                 )(vectors, x, V, senders, species)
             else:
-                y, V_new = layer(vectors, x, V, senders, species, num_nodes)
+                layer_out = layer(
+                    vectors,
+                    x,
+                    V,
+                    senders,
+                    species,
+                    num_nodes,
+                    return_intermediates=needs_layer_aux,
+                )
+
+            if needs_layer_aux:
+                y, V_new, layer_aux = layer_out
+                tp_odd_scalar_parts.append(layer_aux["tp_odd_scalar_features"])
+            if return_al_features:
+                layer_group_offset = i * 10000
+                env_norm_parts.append(layer_aux["env_norm_features"])
+                env_norm_group_parts.append(layer_aux["env_norm_feature_groups"] + layer_group_offset)
+                tp_norm_parts.append(layer_aux["tp_norm_features"])
+                tp_norm_group_parts.append(layer_aux["tp_norm_feature_groups"] + layer_group_offset)
+                tp_scalar_parts.append(layer_aux["tp_scalar_features"])
+                tp_scalar_only_parts.append(layer_aux["tp_scalar_only_features"])
+                tp_scalar_only_group_parts.append(layer_aux["tp_scalar_only_feature_groups"] + layer_group_offset)
+                tp_odd_scalar_group_parts.append(layer_aux["tp_odd_scalar_feature_groups"] + layer_group_offset)
+                scalar_update_parts.append(layer_aux["scalar_update_features"])
+            elif not needs_layer_aux:
+                y, V_new = layer_out
 
             alpha = _mesh_safe_softplus(self.alpha)
             x = (x + alpha * y) / (1.0 + alpha)
             V = V_new
+            if return_al_features:
+                latent_norm = _rep_irrep_norm_features(V)
+                if latent_norm.shape[-1] > 0:
+                    latent_norm_parts.append(latent_norm)
+                x_state_parts.append(x)
             if self.fast_force_source == f"layer{i}":
                 source_V = V
 
@@ -1585,16 +2007,125 @@ class Allegro(hk.Module):
                 source_V = V
             fast_forces = self.fast_force_head(source_V, senders, receivers, num_nodes)
 
+        direct_forces = None
+        if return_direct_forces:
+            if valid_edges is None:
+                valid_edges = jnp.ones(senders.shape, dtype=jnp.bool_)
+            direct_forces = self.direct_force_head(
+                vectors,
+                x,
+                V,
+                senders,
+                receivers,
+                valid_edges,
+                num_nodes,
+            )
+
+        if return_al_features and not compute_energy:
+            raise ValueError("return_al_features=True requires compute_energy=True.")
+
         if compute_energy:
-            energies = self.readout_layer(vectors, x, V)
+            readout = self.readout_layer(
+                vectors,
+                x,
+                V,
+                return_intermediates=return_al_features,
+            )
+            if return_al_features:
+                energies, al_aux = readout
+            else:
+                energies = readout
+            if self.chirality_head_enabled:
+                odd_features = jnp.concatenate(tp_odd_scalar_parts, axis=-1)
+                if int(odd_features.shape[-1]) == 0:
+                    raise ValueError(
+                        "chirality_head_enabled=True requires at least one intermediate 0o channel."
+                    )
+                head_weights = hk.get_parameter(
+                    "chirality_head_weights",
+                    shape=(int(odd_features.shape[-1]), 1),
+                    init=hk.initializers.Constant(0.0),
+                )
+                sign = self.chirality_sign if chirality_sign is None else chirality_sign
+                known = self.chirality_known if chirality_known is None else chirality_known
+                envelope = polynomial_envelope(
+                    jnp.linalg.norm(vectors.array, axis=-1),
+                    p=self.readout_layer.envelope_p,
+                    cutoff=1.0,
+                )
+                correction = (
+                    jnp.asarray(known, dtype=energies.array.dtype)
+                    * jnp.asarray(sign, dtype=energies.array.dtype)
+                    * (odd_features @ head_weights)
+                    * envelope[:, None]
+                )
+                energies = cuex.RepArray(
+                    cue.IrrepsAndLayout(energies.irreps, cue.ir_mul),
+                    energies.array + correction,
+                )
             if return_fast_forces:
+                if return_al_features:
+                    return energies, fast_forces, al_aux
                 return energies, fast_forces
+            if return_al_features:
+                if latent_norm_parts:
+                    tensor_norm_features = jnp.concatenate(latent_norm_parts, axis=-1)
+                else:
+                    tensor_norm_features = _rep_irrep_norm_features(V)
+                tensor_envelope = polynomial_envelope(
+                    jnp.linalg.norm(vectors.array, axis=-1),
+                    p=self.readout_layer.envelope_p,
+                    cutoff=1.0,
+                )
+                al_aux["tensor_norm_features"] = tensor_norm_features
+                al_aux["tensor_norm_features_enveloped"] = (
+                    tensor_norm_features * tensor_envelope[:, None]
+                )
+                if env_norm_parts:
+                    env_norm_features = jnp.concatenate(env_norm_parts, axis=-1)
+                    al_aux["env_norm_features"] = env_norm_features
+                    al_aux["env_norm_features_enveloped"] = env_norm_features * tensor_envelope[:, None]
+                    al_aux["env_norm_feature_groups"] = jnp.concatenate(env_norm_group_parts, axis=0)
+                if tp_norm_parts:
+                    tp_norm_features = jnp.concatenate(tp_norm_parts, axis=-1)
+                    al_aux["tp_norm_features"] = tp_norm_features
+                    al_aux["tp_norm_features_enveloped"] = tp_norm_features * tensor_envelope[:, None]
+                    al_aux["tp_norm_feature_groups"] = jnp.concatenate(tp_norm_group_parts, axis=0)
+                if tp_scalar_parts:
+                    tp_scalar_features = jnp.concatenate(tp_scalar_parts, axis=-1)
+                    al_aux["tp_scalar_features"] = tp_scalar_features
+                    al_aux["tp_scalar_features_enveloped"] = tp_scalar_features * tensor_envelope[:, None]
+                if tp_scalar_only_parts:
+                    tp_scalar_only_features = jnp.concatenate(tp_scalar_only_parts, axis=-1)
+                    al_aux["tp_scalar_only_features"] = tp_scalar_only_features
+                    al_aux["tp_scalar_only_features_enveloped"] = tp_scalar_only_features * tensor_envelope[:, None]
+                    al_aux["tp_scalar_only_feature_groups"] = jnp.concatenate(tp_scalar_only_group_parts, axis=0)
+                if tp_odd_scalar_parts:
+                    tp_odd_scalar_features = jnp.concatenate(tp_odd_scalar_parts, axis=-1)
+                    al_aux["tp_odd_scalar_features"] = tp_odd_scalar_features
+                    al_aux["tp_odd_scalar_features_enveloped"] = tp_odd_scalar_features * tensor_envelope[:, None]
+                    al_aux["tp_odd_scalar_feature_groups"] = jnp.concatenate(tp_odd_scalar_group_parts, axis=0)
+                if scalar_update_parts:
+                    scalar_update_features = jnp.concatenate(scalar_update_parts, axis=-1)
+                    al_aux["scalar_update_features"] = scalar_update_features
+                    al_aux["scalar_update_features_enveloped"] = scalar_update_features * tensor_envelope[:, None]
+                if x_state_parts:
+                    x_state_features = jnp.concatenate(x_state_parts, axis=-1)
+                    al_aux["x_state_features"] = x_state_features
+                    al_aux["x_state_features_enveloped"] = x_state_features * tensor_envelope[:, None]
+                return energies, al_aux
             return energies
 
         if return_fast_forces:
             return fast_forces
 
-        raise ValueError("At least one of compute_energy or return_fast_forces must be True.")
+        if return_direct_forces:
+            return direct_forces
+
+        raise ValueError(
+            "At least one of compute_energy, return_fast_forces, or "
+            "return_direct_forces must be True."
+        )
 
 
 def allegro_neighborlist_pp(
@@ -1610,6 +2141,7 @@ def allegro_neighborlist_pp(
     per_particle: bool = False,
     positive_species: bool = False,
     logging: bool = True,
+    edge_distance_gate=None,
     **allegro_kwargs
 ):
     """Allegro model wrapper for neighbor list-based energy prediction.
@@ -1623,6 +2155,7 @@ def allegro_neighborlist_pp(
         max_edge_multiplier: Unused compatibility placeholder (matches cuEq wrapper API).
         max_edges: Unused compatibility placeholder (matches cuEq wrapper API).
         avg_num_neighbors: Average neighbors (required)
+        edge_distance_gate: Optional EdgeDistanceGateBank for per-edge energy gating.
         mode: Prediction mode:
             - "energy": total energy only
             - "energy_and_fast_forces": total energy + fast per-node forces
@@ -1639,7 +2172,9 @@ def allegro_neighborlist_pp(
     r_cutoff = jnp.array(r_cutoff, dtype=jnp.float32)
 
     assert avg_num_neighbors is not None, "avg_num_neighbors is required"
-    if mode not in ("energy", "energy_and_fast_forces", "fast_forces"):
+    if mode not in (
+        "energy", "energy_and_fast_forces", "fast_forces", "direct_forces", "al_features"
+    ):
         raise NotImplementedError(f"Mode {mode} not implemented")
 
     # Keep wrapper API compatible with allegro_cueq_v2 and ignore wrapper-only args.
@@ -1657,6 +2192,8 @@ def allegro_neighborlist_pp(
     allegro_kwargs.pop("mlp_hidden_activation", None)
     if mode in ("energy_and_fast_forces", "fast_forces"):
         allegro_kwargs.setdefault("enable_fast_force_head", True)
+    if mode == "direct_forces":
+        allegro_kwargs.setdefault("enable_direct_force_head", True)
     # Honor config-provided activations while keeping historical defaults.
     allegro_kwargs.setdefault("mlp_activation", jax.nn.mish)
     allegro_kwargs.setdefault("mlp_output_activation", None)
@@ -1681,6 +2218,10 @@ def allegro_neighborlist_pp(
         **dynamic_kwargs
     ):
         """Model function compatible with JAX-MD."""
+
+        # Extract orientations before passing dynamic_kwargs to displacement
+        orientations = dynamic_kwargs.pop("orientations", None)  # (n_nodes, 3, 3)
+
         n_nodes = position.shape[0]
 
         if species is None:
@@ -1724,11 +2265,21 @@ def allegro_neighborlist_pp(
         )
         fallback_vec = jnp.array([r_cutoff, 0.0, 0.0], dtype=vectors.dtype)
         vectors = jnp.where(valid_edges[:, None], vectors, fallback_vec)
+        distances = jnp.linalg.norm(vectors, axis=-1)
 
         vectors = vectors / r_cutoff
 
         vector_irreps = cue.IrrepsAndLayout(cue.Irreps("O3", "1o"), cue.ir_mul)
         vectors_rep = cuex.RepArray(vector_irreps, vectors)
+
+
+        if orientations is not None:
+            orientations_s = orientations[senders_safe]   # (E, 3, 3)
+            orientations_r = orientations[receivers_safe]  # (E, 3, 3)
+        else:
+            orientations_s = None
+            orientations_r = None
+
 
         net = Allegro(
             avg_num_neighbors=avg_num_neighbors,
@@ -1737,17 +2288,48 @@ def allegro_neighborlist_pp(
         )
 
         if mode == "energy":
-            per_edge_energies = net(
+            needs_latent_gate = (
+                edge_distance_gate is not None
+                and edge_distance_gate.has_ala2_combined_gate
+                and "latent" in edge_distance_gate.ala2_combined_components
+            )
+            edge_out = net(
                 vectors_rep,
                 senders,
                 receivers,
                 species,
                 n_nodes,
+                orientations_s=orientations_s,
+                orientations_r=orientations_r,
                 return_fast_forces=False,
                 compute_energy=True,
+                return_al_features=needs_latent_gate,
             )
+            if needs_latent_gate:
+                per_edge_energies, al_aux = edge_out
+            else:
+                per_edge_energies = edge_out
+                al_aux = {}
+            per_edge_values = per_edge_energies.array.squeeze(-1)
+            if edge_distance_gate is not None:
+                latent_feature_key = getattr(
+                    edge_distance_gate,
+                    "ala2_latent_feature_key",
+                    "tensor_norm_features_enveloped",
+                )
+                edge_alpha = compute_edge_distance_gate(
+                    distances=distances,
+                    senders=senders,
+                    receivers=receivers,
+                    species=species,
+                    valid_edges=valid_edges,
+                    bank=edge_distance_gate,
+                    positions=position,
+                    edge_latent_features=al_aux.get(latent_feature_key),
+                )
+                per_edge_values = per_edge_values * edge_alpha
             per_node_energies = jax.ops.segment_sum(
-                per_edge_energies.array.squeeze(-1),
+                per_edge_values,
                 senders,
                 num_segments=n_nodes
             )
@@ -1760,6 +2342,53 @@ def allegro_neighborlist_pp(
                 return per_atom_energies
             return md_util.high_precision_sum(per_atom_energies)
 
+        if mode == "al_features":
+            per_edge_energies, al_aux = net(
+                vectors_rep,
+                senders,
+                receivers,
+                species,
+                n_nodes,
+                return_fast_forces=False,
+                compute_energy=True,
+                return_al_features=True,
+            )
+            out = {
+                "edge_features": al_aux["scalar_features_enveloped"],
+                "edge_features_unenveloped": al_aux["scalar_features"],
+                "edge_tensor_norm_features": al_aux["tensor_norm_features_enveloped"],
+                "edge_tensor_norm_features_unenveloped": al_aux["tensor_norm_features"],
+                "per_edge_energy": per_edge_energies.array.squeeze(-1),
+                "senders": senders,
+                "receivers": receivers,
+                "distances": distances,
+                "valid_edges": valid_edges,
+            }
+            optional_feature_keys = (
+                "env_norm_features",
+                "env_norm_features_enveloped",
+                "env_norm_feature_groups",
+                "tp_norm_features",
+                "tp_norm_features_enveloped",
+                "tp_norm_feature_groups",
+                "tp_scalar_features",
+                "tp_scalar_features_enveloped",
+                "tp_scalar_only_features",
+                "tp_scalar_only_features_enveloped",
+                "tp_scalar_only_feature_groups",
+                "tp_odd_scalar_features",
+                "tp_odd_scalar_features_enveloped",
+                "tp_odd_scalar_feature_groups",
+                "scalar_update_features",
+                "scalar_update_features_enveloped",
+                "x_state_features",
+                "x_state_features_enveloped",
+            )
+            for key in optional_feature_keys:
+                if key in al_aux:
+                    out[key] = al_aux[key]
+            return out
+
         if mode == "energy_and_fast_forces":
             per_edge_energies, fast_forces = net(
                 vectors_rep,
@@ -1770,8 +2399,20 @@ def allegro_neighborlist_pp(
                 return_fast_forces=True,
                 compute_energy=True,
             )
+            per_edge_values = per_edge_energies.array.squeeze(-1)
+            if edge_distance_gate is not None:
+                edge_alpha = compute_edge_distance_gate(
+                    distances=distances,
+                    senders=senders,
+                    receivers=receivers,
+                    species=species,
+                    valid_edges=valid_edges,
+                    bank=edge_distance_gate,
+                    positions=position,
+                )
+                per_edge_values = per_edge_values * edge_alpha
             per_node_energies = jax.ops.segment_sum(
-                per_edge_energies.array.squeeze(-1),
+                per_edge_values,
                 senders,
                 num_segments=n_nodes
             )
@@ -1779,6 +2420,19 @@ def allegro_neighborlist_pp(
             per_atom_energies = per_atom_energies * mask
             total_energy = md_util.high_precision_sum(per_atom_energies)
             return total_energy, fast_forces
+
+        if mode == "direct_forces":
+            direct_forces = net(
+                vectors_rep,
+                senders_safe,
+                receivers_safe,
+                species,
+                n_nodes,
+                return_direct_forces=True,
+                compute_energy=False,
+                valid_edges=valid_edges,
+            )
+            return direct_forces * jnp.asarray(mask, dtype=direct_forces.dtype)[:, None]
 
         fast_forces = net(
             vectors_rep,

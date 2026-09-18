@@ -22,9 +22,45 @@ from chemtrain.data.data_loaders import DataLoaders
 
 from config.types import PretrainResult, TrainingResults, StageResult
 from .optimizers import create_optimizer_from_config
+from .swa import SWAState, save_swa_checkpoint
+from .basin_energy_monitor import build_basin_energy_monitor
+from .msam import shmap_msam_update_fn
 from .dsm import add_dsm_noise_fields, dsm_config, dsm_enabled, dsm_error, make_dsm_quantity
+from .hvp_matching import hvp_config, hvp_error, make_hvp_quantity
+from .torque_matching import (
+    torque_config, torque_mse, make_torque_quantity,
+    init_log_sigma, wrap_uncertainty_loss_fn,
+)
+from chemtrain.learn import max_likelihood as ct_ml
+
+from .safety_regularization import (
+    SAFETY_FIELD_KEYS,
+    make_safety_quantities,
+    safety_config,
+    safety_error_fns,
+    safety_gammas,
+    safety_weights_keys,
+)
+from .noised_residual import (
+    attach_noised_residual_fields,
+    noised_residual_config_parsed,
+)
+from .diagnostics import log_neighbor_debug_once
+from .teacher_distillation import (
+    config_parsed as teacher_distillation_config,
+    enabled as teacher_distillation_enabled,
+    error_fns as teacher_distillation_error_fns,
+    gammas as teacher_distillation_gammas,
+    quantities as teacher_distillation_quantities,
+    required_fields as teacher_distillation_required_fields,
+    weights_keys as teacher_distillation_weights_keys,
+)
 from utils.logging import training_logger
 from data.loader import build_tiled_dataset, attach_batch_metadata
+from data.static_neighbors import assert_static_graph_compatible
+
+
+HVP_FIELD_KEYS = ("hvp_probe", "HVP", "hvp_loss_mask")
 
 
 def valid_component_mse(predictions, targets, weights=None):
@@ -79,6 +115,8 @@ class Trainer:
         val_loader: Optional[Any] = None,
         train_data: Optional[Dict[str, jax.Array]] = None,
         tiled_train_source: Optional[Dict[str, np.ndarray]] = None,
+        noised_id_to_aa: Optional[Dict[int, str]] = None,
+        noised_fitted_params: Optional[Dict[str, np.ndarray]] = None,
         seed: Optional[int] = None,  # Optional seed override for ensemble training
     ):
         """
@@ -91,6 +129,8 @@ class Trainer:
             val_loader: Validation data loader (optional)
             train_data: Optional dict with R, F, mask for prior pre-training
             tiled_train_source: Untiled training structures used to rebuild tiled batches
+            noised_id_to_aa: Optional species metadata for noised residual prior forces
+            noised_fitted_params: Optional fitted prior parameters for noised residual prior forces
             seed: Optional seed override (for ensemble training). If None, uses config seed.
         """
         self.model = model
@@ -102,15 +142,94 @@ class Trainer:
         self.batch_per_device = config.get_batch_per_device()
         self.batch_cache = config.get_batch_cache()
         self.gammas = config.get_gammas()
+        self._direct_force_mode = config.get_model_output_mode() == "direct_force"
+        if self._direct_force_mode:
+            if float(self.gammas.get("U", 0.0)) != 0.0:
+                raise ValueError("Direct-force teacher training requires gamma U = 0.")
+            training_logger.info(
+                "[DirectForce] Replacing Chemtrain's energy-gradient F observable "
+                "with the Allegro central direct-force head."
+            )
+
+        self._torque_cfg = torque_config(config)
+        if self._torque_cfg["enabled"]:
+            self.gammas = dict(self.gammas)
+            if self._torque_cfg["uncertainty_weighting"]:
+                training_logger.info(
+                    "[TorqueMatching] enabled with uncertainty weighting "
+                    "(Kendall 2018); log_sigma_T is learnable, lambda=%.4g is "
+                    "used only for initialization.",
+                    self._torque_cfg["lambda"],
+                )
+            else:
+                self.gammas["T"] = float(self._torque_cfg["lambda"])
+                training_logger.info("[TorqueMatching] enabled: gamma=%.4g", self._torque_cfg["lambda"])
         self._dsm_cfg = dsm_config(config)
         if self._dsm_cfg["enabled"]:
             self.gammas = dict(self.gammas)
             self.gammas["DSM"] = float(self._dsm_cfg["lambda"])
+        self._hvp_cfg = hvp_config(config)
+        if self._hvp_cfg["enabled"]:
+            self.gammas = dict(self.gammas)
+            self.gammas.setdefault("HVP", float(self._hvp_cfg["lambda"]))
+        self._safety_cfg = safety_config(config)
+        if self._safety_cfg["enabled"]:
+            self.gammas = dict(self.gammas)
+            self.gammas.update(safety_gammas(config))
+            training_logger.info(
+                "[Safety] Regularization enabled: gammas=%s",
+                {k: self.gammas[k] for k in safety_gammas(config)},
+            )
+        self._teacher_distillation_cfg = teacher_distillation_config(config)
+        if teacher_distillation_enabled(config):
+            available = self._loader_reference_data(train_loader)
+            missing = [key for key in teacher_distillation_required_fields(config) if key not in available]
+            if missing:
+                raise ValueError(
+                    "training.teacher_distillation requires dataset fields "
+                    f"{missing}; available keys: {sorted(available.keys())}"
+                )
+            self.gammas = dict(self.gammas)
+            self.gammas.update(teacher_distillation_gammas(config))
+            training_logger.info(
+                "[TeacherDistillation] enabled: feature=%s force=%s",
+                self._teacher_distillation_cfg["feature"],
+                self._teacher_distillation_cfg["force"],
+            )
+        self._dsm_refresh_interval_steps = int(self._dsm_cfg.get("refresh_interval_steps", 0))
+        self._noised_residual_cfg = noised_residual_config_parsed(config)
+        self._noised_residual_enabled = bool(self._noised_residual_cfg.get("enabled", False))
+        self._noised_refresh_interval_epochs = int(
+            self._noised_residual_cfg.get("refresh_interval_epochs", 1)
+        )
+        self._noised_id_to_aa = noised_id_to_aa
+        self._noised_fitted_params = noised_fitted_params
+        self._dsm_refresh_count = 0
+        self._dsm_optimizer_steps = 0
+        self._seed = seed if seed is not None else config.get_seed()
         self.checkpoint_path = Path(config.get_checkpoint_path())
         self.checkpoint_path.mkdir(parents=True, exist_ok=True)
         self._rank = jax.process_index()
         self._world_size = jax.process_count()
         self._batch_mode = config.get_batch_mode()
+        self._static_neighbors_cfg = config.get_static_neighbors_config()
+        self._static_neighbors_enabled = bool(self._static_neighbors_cfg["enabled"])
+        if self._static_neighbors_enabled:
+            # Fail before any graph is built or consumed: a graph that is stale
+            # with respect to the evaluated coordinates still yields finite
+            # forces and a converging run, so the error must be raised here
+            # rather than surfacing as a silent accuracy loss.
+            assert_static_graph_compatible(config)
+            training_logger.info(
+                "[StaticNeighbors] Enabled: backend=%s r_list=%.3f "
+                "(cutoff=%.3f + dr_threshold=%.3f) capacity_multiplier=%.2f. "
+                "Per-sample JAX-MD neighbor updates are disabled.",
+                self._static_neighbors_cfg["backend"],
+                self._static_neighbors_cfg["r_list"],
+                config.get_cutoff(),
+                config.get_dr_threshold(),
+                self._static_neighbors_cfg["capacity_multiplier"],
+            )
         self._global_device_count = jax.device_count()
         self._global_batch_size = self.batch_per_device * self._global_device_count
         self._grad_accum_steps = max(1, int(os.environ.get("CHEMTRAIN_GRAD_ACCUM_STEPS", "1")))
@@ -118,8 +237,19 @@ class Trainer:
             os.environ.get("CHEMTRAIN_GRAD_ACCUM_MODE", "stack_scan")
         ).strip().lower()
         self._force_loss_normalization = config.get_force_loss_normalization()
-        self._tile_rebuild_each_epoch = (
+        # A genuine held-out split, as opposed to scripts/train.py's `val_loader =
+        # train_loader` fallback. Gates whether the per-epoch evaluation pass runs at all.
+        self._has_holdout_validation = float(config.get_val_fraction()) > 0.0
+        self._config_tile_rebuild_each_epoch = (
             self._batch_mode == "tiled" and config.tile_rebuild_each_epoch_enabled()
+        )
+        self._tile_rebuild_each_epoch = (
+            self._config_tile_rebuild_each_epoch
+            or (
+                self._batch_mode == "tiled"
+                and self._noised_residual_enabled
+                and self._noised_refresh_interval_epochs > 0
+            )
         )
         self._tile_shuffle_structures = config.tile_shuffle_structures_enabled()
         self._tile_sort_by_size = config.tile_sort_by_size_enabled()
@@ -160,6 +290,9 @@ class Trainer:
         self._tile_spatial_separation = (
             self._batch_mode == "tiled" and config.tile_spatial_separation_enabled()
         )
+        self._tile_spatial_layout = (
+            config.get_tile_spatial_layout() if self._batch_mode == "tiled" else "line_x"
+        )
         self._tile_structure_gap = (
             config.get_tile_structure_gap() if self._batch_mode == "tiled" else 25.0
         )
@@ -168,6 +301,7 @@ class Trainer:
             self._tiled_train_source = {
                 key: np.asarray(value) for key, value in tiled_train_source.items()
             }
+        self._dsm_standard_train_source = None
 
         # Runtime precision + JIT buffer donation policy.
         self._mixed_precision_enabled = config.mixed_precision_enabled()
@@ -344,6 +478,14 @@ class Trainer:
                 training_logger.warning(f"Could not extract training data: {e}. Prior pre-training may not work.")
                 self._train_data = None
 
+        if self._dsm_cfg["enabled"] and self._batch_mode != "tiled":
+            dsm_keys = {"DSM", "dsm_eps", "dsm_sigma", "dsm_loss_mask"}
+            self._dsm_standard_train_source = {
+                key: np.asarray(value)
+                for key, value in self._loader_reference_data(self.train_loader).items()
+                if key not in dsm_keys
+            }
+
         training_logger.info(
             "[Training] Force loss normalization: %s",
             self._force_loss_normalization,
@@ -360,13 +502,13 @@ class Trainer:
         self._initialize_dataset_profile()
 
         # Initialize model parameters
-        # Use provided seed or fall back to config seed
-        if seed is not None:
-            self._seed = seed
-        else:
-            self._seed = config.get_seed()
         self.params = model.initialize_params(jax.random.PRNGKey(self._seed))
         training_logger.info(f"Initialized model with seed={self._seed}")
+        if self._dsm_refresh_interval_steps > 0:
+            training_logger.info(
+                "[DSM] Training noise refresh enabled every %d optimizer steps.",
+                self._dsm_refresh_interval_steps,
+            )
         if self._tile_rebuild_each_epoch:
             training_logger.info(
                 "[Tiling] Epoch-wise tile rebuild enabled (shuffle=%s, sort_by_size=%s, target_beads=%s, bucket_beads=%s)",
@@ -379,6 +521,9 @@ class Trainer:
 
         # Current trainer instance (will be set during training)
         self._chemtrain_trainer = None
+        self._basin_energy_monitor = self._build_basin_energy_monitor_for_rank(
+            config, model, rank=self._rank, default_output_dir=config.get_output_dir()
+        )
 
         # Optimizer state to restore on next train_stage call (set by load_chemtrain_checkpoint)
         self._resume_opt_state = None
@@ -556,16 +701,16 @@ class Trainer:
             return None
 
         if not hasattr(self, "_manual_force_profile_fn"):
-            def _single_force(params_, R_, mask_, species_, segment_id_):
+            def _single_force(params_, R_, mask_, species_, segment_id_, box_):
                 species_safe = jnp.where(mask_ > 0, species_, 0).astype(jnp.int32)
                 def _energy_fn(R_eval):
                     return self.model.compute_energy(
-                        params_, R_eval, mask_, species_safe, segment_id=segment_id_
+                        params_, R_eval, mask_, species_safe, segment_id=segment_id_, box=box_
                     )
                 return -jax.grad(_energy_fn)(R_)
 
             self._manual_force_profile_fn = jax.jit(
-                jax.vmap(_single_force, in_axes=(None, 0, 0, 0, 0))
+                jax.vmap(_single_force, in_axes=(None, 0, 0, 0, 0, 0))
             )
 
         R = jnp.asarray(batch_host["R"])
@@ -576,8 +721,12 @@ class Trainer:
         if segment_id is None:
             segment_id = np.zeros_like(batch_host["mask"], dtype=np.int32)
         segment_id = jnp.asarray(segment_id, dtype=jnp.int32)
+        box = batch_host.get("box")
+        if box is None:
+            box = np.zeros((R.shape[0], 3), dtype=np.float32)
+        box = jnp.asarray(box, dtype=jnp.float32)
 
-        F_pred = self._manual_force_profile_fn(params, R, mask, species, segment_id)
+        F_pred = self._manual_force_profile_fn(params, R, mask, species, segment_id, box)
         sq = np.asarray(jax.device_get(jnp.square(F_ref - F_pred)), dtype=np.float64)
         mask_np = np.asarray(batch_host["mask"], dtype=np.float64)
         mask3 = np.broadcast_to(mask_np[..., None], sq.shape)
@@ -1049,149 +1198,11 @@ class Trainer:
             return str(value)
 
     def _log_neighbor_debug_once(self) -> None:
-        """
-        One-time rank-0 neighbor summary for capacity, occupancy and overflow.
-
-        This emulates the training path once:
-          nbrs_init -> util.neighbor_update -> mask_neighbor_list -> ml_model.update
-        and logs dense->sparse conversion stats when applicable.
-        """
         if not self._neighbor_debug_enabled or self._neighbor_debug_logged:
             return
         if self._neighbor_debug_rank0_only and self._rank != 0:
             return
-
-        ml_model = getattr(self.model, "ml_model", None)
-        if ml_model is None:
-            return
-        if not hasattr(ml_model, "summarize_neighborlist"):
-            training_logger.warning(
-                "[NeighborDebug] ML model has no summarize_neighborlist(); skipping."
-            )
-            self._neighbor_debug_logged = True
-            return
-        if not hasattr(ml_model, "nneigh_fn") or not hasattr(ml_model, "nbrs_init"):
-            training_logger.warning(
-                "[NeighborDebug] ML model has no neighbor function/init list; skipping."
-            )
-            self._neighbor_debug_logged = True
-            return
-
-        R_src = getattr(self.train_loader, "R", None)
-        mask_src = getattr(self.train_loader, "mask", None)
-        species_src = getattr(self.train_loader, "species", None)
-        if R_src is None or mask_src is None:
-            training_logger.warning(
-                "[NeighborDebug] train_loader is missing R/mask arrays; skipping."
-            )
-            self._neighbor_debug_logged = True
-            return
-
-        from chemtrain import util as chemtrain_util
-        from chemtrain.ensemble import evaluation as chemtrain_eval
-        from jax_md_mod import custom_partition
-        from jax_md import partition
-
-        compute_dtype = getattr(ml_model, "compute_dtype", jnp.float32)
-        R0 = jnp.asarray(R_src[0], dtype=compute_dtype)
-        mask0 = jnp.asarray(mask_src[0]) > 0
-        if species_src is not None:
-            species0 = jnp.asarray(species_src[0], dtype=jnp.int32)
-        else:
-            species0 = jnp.zeros((R0.shape[0],), dtype=jnp.int32)
-
-        # 1) chemtrain reference update + masking
-        state0 = chemtrain_eval.SimpleState(R0)
-        nbrs_updated = chemtrain_util.neighbor_update(ml_model.nbrs_init, state0)
-        nbrs_masked = custom_partition.mask_neighbor_list(nbrs_updated, mask0)
-        stats_masked = ml_model.summarize_neighborlist(nbrs_masked, mask0)
-
-        # 2) model-side update (the same update path used by compute_energy)
-        ref_position = getattr(nbrs_masked, "reference_position", None)
-        target_dtype = getattr(ref_position, "dtype", compute_dtype)
-        nbrs_post = ml_model.nneigh_fn.update(
-            jnp.asarray(R0, dtype=target_dtype),
-            nbrs_masked,
-        )
-        stats_post = ml_model.summarize_neighborlist(nbrs_post, mask0)
-
-        if stats_masked["format"] == "dense":
-            training_logger.info(
-                "[NeighborDebug][runtime][dense] "
-                "N_max=%d M_slots(masked)=%d max_neighbors=%d mean_neighbors=%.2f "
-                "util_max=%.3f M_slots(post_update)=%d util_max(post)=%.3f "
-                "shape_changed=%s error(masked)=%s did_buffer_overflow(masked)=%s overflow(masked)=%s "
-                "error(post)=%s did_buffer_overflow(post)=%s overflow(post)=%s",
-                stats_masked["n_atoms"],
-                stats_masked["capacity"],
-                stats_masked["max_neighbors"],
-                stats_masked["mean_neighbors"],
-                stats_masked["utilization"],
-                stats_post["capacity"],
-                stats_post["utilization"],
-                stats_masked["idx_shape"] != stats_post["idx_shape"],
-                stats_masked["error"],
-                stats_masked["did_buffer_overflow"],
-                stats_masked["overflow"],
-                stats_post["error"],
-                stats_post["did_buffer_overflow"],
-                stats_post["overflow"],
-            )
-        else:
-            training_logger.info(
-                "[NeighborDebug][runtime][sparse] "
-                "N_max=%d E_capacity(masked)=%d E_valid=%d util=%.3f "
-                "E_capacity(post_update)=%d E_valid(post)=%d util(post)=%.3f "
-                "shape_changed=%s error(masked)=%s did_buffer_overflow(masked)=%s overflow(masked)=%s "
-                "error(post)=%s did_buffer_overflow(post)=%s overflow(post)=%s",
-                stats_masked["n_atoms"],
-                stats_masked["capacity"],
-                stats_masked["e_valid"],
-                stats_masked["utilization"],
-                stats_post["capacity"],
-                stats_post["e_valid"],
-                stats_post["utilization"],
-                stats_masked["idx_shape"] != stats_post["idx_shape"],
-                stats_masked["error"],
-                stats_masked["did_buffer_overflow"],
-                stats_masked["overflow"],
-                stats_post["error"],
-                stats_post["did_buffer_overflow"],
-                stats_post["overflow"],
-            )
-
-        # 3) Dense -> sparse conversion diagnostics (if this backend uses it)
-        if getattr(nbrs_post, "format", None) == partition.Dense:
-            from jax_md_mod.model import sparse_graph
-
-            cutoff = jnp.asarray(getattr(ml_model, "cutoff"), dtype=jnp.float32)
-            species_valid = jnp.where(mask0, species0, 0).astype(jnp.int32)
-            max_edges = getattr(ml_model, "max_edges", None)
-            dense_shape = tuple(int(x) for x in np.asarray(jax.device_get(nbrs_post.idx)).shape)
-            graph, capped = sparse_graph.sparse_graph_from_neighborlist(
-                ml_model.displacement,
-                jnp.asarray(R0, dtype=jnp.float32),
-                nbrs_post,
-                cutoff,
-                species=species_valid,
-                max_edges=max_edges,
-                species_mask=mask0,
-            )
-            e_capacity = int(np.asarray(jax.device_get(graph.idx_i)).shape[0])
-            n_edges = int(np.asarray(jax.device_get(graph.n_edges)).item())
-            training_logger.info(
-                "[NeighborDebug][dense_to_sparse] dense_shape=%s max_edges=%s "
-                "sparse_idx_i_shape=%s sparse_idx_j_shape=%s E_capacity=%d n_edges=%d capped=%s",
-                dense_shape,
-                str(max_edges),
-                tuple(int(x) for x in np.asarray(jax.device_get(graph.idx_i)).shape),
-                tuple(int(x) for x in np.asarray(jax.device_get(graph.idx_j)).shape),
-                e_capacity,
-                n_edges,
-                self._coerce_neighbor_meta(capped),
-            )
-
-        self._neighbor_debug_logged = True
+        self._neighbor_debug_logged = log_neighbor_debug_once(self)
 
     def _edge_count_for_structure(self, R_sample: Any, mask_sample: Optional[Any]) -> Optional[Tuple[int, int, int]]:
         """
@@ -1213,7 +1224,7 @@ class Trainer:
         else:
             valid_mask = jnp.asarray(mask_sample) > 0
 
-        if hasattr(ml_model, "_spread_padded_coordinates"):
+        if hasattr(ml_model, "_spread_padded_coordinates") and not getattr(ml_model, "_pbc", False):
             padded_mask = jnp.logical_not(valid_mask)
             R_safe = ml_model._spread_padded_coordinates(R_base, padded_mask)
             R_eval = jnp.where(valid_mask[:, None], R_base, jax.lax.stop_gradient(R_safe))
@@ -1490,15 +1501,26 @@ class Trainer:
             if key in (
                 "R",
                 "F",
+                "U",
                 "mask",
                 "species",
                 "segment_id",
                 "force_loss_mask",
                 "force_loss_weights",
+                "O",
+                "T",
+                "torque_loss_mask",
+                "torque_loss_weights",
                 "DSM",
                 "dsm_eps",
                 "dsm_sigma",
                 "dsm_loss_mask",
+                # Static graph consumed by chemtrain's quantity_map; the
+                # companion neighbor_n_edges/neighbor_capacity arrays stay out of
+                # the loader since they are construction diagnostics only.
+                "neighbor_idx",
+                *HVP_FIELD_KEYS,
+                *SAFETY_FIELD_KEYS,
             ):
                 loader_kwargs[key] = value
             elif key.startswith("meta_") or key in ("n_valid", "n_segments"):
@@ -1512,12 +1534,24 @@ class Trainer:
 
         epoch_seed = int(self._seed + epoch_idx)
         t_build_start = time.perf_counter()
+        train_source = self._tiled_train_source
+        if self._noised_residual_enabled:
+            train_source = attach_noised_residual_fields(
+                train_source,
+                self.config,
+                id_to_aa=self._noised_id_to_aa,
+                seed=epoch_seed,
+                split_seed=epoch_seed,
+                fitted_params=self._noised_fitted_params,
+            )
         tiled = build_tiled_dataset(
-            R=self._tiled_train_source["R"],
-            F=self._tiled_train_source["F"],
-            mask=self._tiled_train_source["mask"],
-            species=self._tiled_train_source["species"],
-            structure_ids=self._tiled_train_source.get("structure_ids"),
+            R=train_source["R"],
+            F=train_source["F"],
+            O=train_source.get("O"),
+            T=train_source.get("T"),
+            mask=train_source["mask"],
+            species=train_source["species"],
+            structure_ids=train_source.get("structure_ids"),
             target_beads=int(self._tile_target_beads),
             bucket_beads=self._tile_bucket_beads,
             target_edges=self._tile_target_edges,
@@ -1533,8 +1567,15 @@ class Trainer:
             large_structure_threshold=self._tile_large_structure_threshold,
             large_structure_edge_threshold=self._tile_large_structure_edge_threshold,
             spatial_separation=self._tile_spatial_separation,
+            spatial_layout=self._tile_spatial_layout,
             structure_gap=self._tile_structure_gap,
             seed=epoch_seed,
+            extra_per_atom_fields={
+                key: np.asarray(train_source[key], dtype=np.float32)
+                for key in HVP_FIELD_KEYS
+                if key in train_source
+            },
+            static_neighbors=self._static_neighbors_cfg,
         )
         t_build_end = time.perf_counter()
         tiled = attach_batch_metadata(
@@ -1594,23 +1635,94 @@ class Trainer:
 
         def _refresh_tiles(chemtrain_trainer, *args, **kwargs):
             epoch_idx = int(stage_start_epoch + getattr(chemtrain_trainer, "_epoch", 0))
+            if (
+                not self._config_tile_rebuild_each_epoch
+                and self._noised_residual_enabled
+                and self._noised_refresh_interval_epochs > 1
+            ):
+                if epoch_idx % self._noised_refresh_interval_epochs != 0:
+                    return
             train_split = self._build_epoch_tiled_split(epoch_idx)
             train_loader = NumpyDataLoader(**self._split_loader_kwargs(train_split))
             chemtrain_trainer.set_loader(train_loader, stage="training")
-            chemtrain_trainer.set_loader(train_loader, stage="validation")
+            if self._has_holdout_validation:
+                chemtrain_trainer.set_loader(train_loader, stage="validation")
+                self.val_loader = train_loader
             self.train_loader = train_loader
-            self.val_loader = train_loader
             self._set_dataset_profile(train_split, log=False)
 
         trainer.add_task("pre_epoch", _refresh_tiles)
+
+    def _build_refreshed_dsm_split(self, refresh_idx: int) -> Dict[str, np.ndarray]:
+        """Rebuild the training split used for DSM noise refresh."""
+        if self._batch_mode == "tiled":
+            if self._tiled_train_source is None:
+                raise ValueError("Missing tiled_train_source for DSM tile refresh.")
+            return self._build_epoch_tiled_split(refresh_idx)
+
+        if self._dsm_standard_train_source is None:
+            raise ValueError("Missing standard training source for DSM noise refresh.")
+        split = {
+            key: np.asarray(value)
+            for key, value in self._dsm_standard_train_source.items()
+        }
+        return add_dsm_noise_fields(split, self.config, seed=int(self._seed + refresh_idx))
+
+    def _install_dsm_step_refresh(self, trainer: Any) -> None:
+        """Regenerate DSM noise, and tiled packing when needed, every N optimizer steps."""
+        if not self._dsm_cfg["enabled"] or self._dsm_refresh_interval_steps <= 0:
+            return
+        if self._batch_mode == "tiled" and self._tiled_train_source is None:
+            training_logger.warning(
+                "[DSM] refresh_interval_steps=%d requested, but tiled_train_source is missing; "
+                "keeping fixed DSM noise.",
+                self._dsm_refresh_interval_steps,
+            )
+            return
+        if self._batch_mode != "tiled" and self._dsm_standard_train_source is None:
+            training_logger.warning(
+                "[DSM] refresh_interval_steps=%d requested, but standard train source is missing; "
+                "keeping fixed DSM noise.",
+                self._dsm_refresh_interval_steps,
+            )
+            return
+
+        def _refresh_after_batch(chemtrain_trainer, *args, **kwargs):
+            self._dsm_optimizer_steps += 1
+            if self._dsm_optimizer_steps % self._dsm_refresh_interval_steps != 0:
+                return
+
+            self._dsm_refresh_count += 1
+            refresh_idx = int(self._dsm_refresh_count)
+            train_split = self._build_refreshed_dsm_split(refresh_idx)
+            train_loader = NumpyDataLoader(**self._split_loader_kwargs(train_split))
+            chemtrain_trainer.set_loader(train_loader, stage="training")
+            self.train_loader = train_loader
+            self._set_dataset_profile(train_split, log=False)
+            training_logger.info(
+                "[DSM] Refreshed training noise%s after optimizer_step=%d (refresh=%d).",
+                " and rebuilt tiles" if self._batch_mode == "tiled" else "",
+                self._dsm_optimizer_steps,
+                refresh_idx,
+            )
+
+        trainer.add_task("post_batch", _refresh_after_batch)
 
     def _force_matching_error_fns(self) -> Optional[Dict[str, Callable]]:
         """Return custom per-target error functions for chemtrain."""
         fns = {}
         if self._force_loss_normalization in ("valid_components", "per_structure_components"):
             fns["F"] = valid_component_mse
+        if self._torque_cfg["enabled"]:
+            fns["T"] = torque_mse
         if self._dsm_cfg["enabled"]:
             fns["DSM"] = dsm_error
+        if self._hvp_cfg["enabled"]:
+            fns["HVP"] = hvp_error
+        if self._safety_cfg["enabled"]:
+            fns.update(safety_error_fns(self.config))
+        if teacher_distillation_enabled(self.config):
+            fns.update(teacher_distillation_error_fns(self.config))
         return fns or None
 
     def _force_matching_weights_keys(self) -> Optional[Dict[str, str]]:
@@ -1620,20 +1732,63 @@ class Trainer:
             keys["F"] = "force_loss_mask"
         elif self._force_loss_normalization == "per_structure_components":
             keys["F"] = "force_loss_weights"
+        if self._torque_cfg["enabled"] and self._torque_cfg.get("loss_mask_key"):   
+            keys["T"] = str(self._torque_cfg["loss_mask_key"])    
         if self._dsm_cfg["enabled"]:
             keys["DSM"] = "dsm_loss_mask"
+        if self._hvp_cfg["enabled"]:
+            keys["HVP"] = str(self._hvp_cfg["loss_mask_key"])
+        if self._safety_cfg["enabled"]:
+            keys.update(safety_weights_keys(self.config))
+        if teacher_distillation_enabled(self.config):
+            keys.update(teacher_distillation_weights_keys(self.config))
         return keys or None
 
     def _force_matching_additional_targets(self) -> Optional[Dict[str, Callable]]:
         """Return Chemtrain additional target quantities."""
-        if not self._dsm_cfg["enabled"]:
-            return None
-        return {
-            "DSM": make_dsm_quantity(
-                self.model.energy_fn_template,
+        targets: Dict[str, Callable] = {}
+        if self._torque_cfg["enabled"]:
+            targets["T"] = make_torque_quantity(
+                self.model,
+                orientation_key=str(self._torque_cfg.get("orientation_key", "O")),
+                ref_key=str(self._torque_cfg.get("ref_key", "T")),
+            )
+            print("========================================")
+            print("Torque quantity initialized.")
+            print("========================================")
+        if self._dsm_cfg["enabled"]:
+            targets["DSM"] = make_dsm_quantity(
+                self.model.dsm_energy_fn_template,
                 kT=float(self._dsm_cfg["kT"]),
             )
-        }
+        if self._hvp_cfg["enabled"]:
+            hvp_template_mode = str(self._hvp_cfg.get("energy_template", "auto")).strip().lower()
+            if hvp_template_mode in ("ml", "ml_only", "residual_ml"):
+                hvp_energy_template = self.model.energy_fn_template
+            elif hvp_template_mode in ("auto", "combined", "combined_ml_prior", "total", "exported"):
+                hvp_energy_template = getattr(self.model, "hvp_energy_fn_template", None)
+                if hvp_energy_template is None:
+                    hvp_energy_template = self.model.energy_fn_template
+            else:
+                raise ValueError(
+                    "training.hvp.energy_template must be one of "
+                    "'auto', 'combined_ml_prior', or 'ml_only'; "
+                    f"got {hvp_template_mode!r}."
+                )
+            targets["HVP"] = make_hvp_quantity(
+                hvp_energy_template,
+                probe_key=str(self._hvp_cfg["probe_key"]),
+            )
+        if self._safety_cfg["enabled"]:
+            targets.update(make_safety_quantities(self.model, self.config))
+        if teacher_distillation_enabled(self.config):
+            targets.update(teacher_distillation_quantities(self.model, self.config))
+        if self._direct_force_mode:
+            # ForceMatching builds its standard F observable from -grad(E).
+            # Updating the same key is the supported Chemtrain mechanism for a
+            # force-only model and avoids all coordinate derivatives.
+            targets["F"] = self.model.direct_force_quantity
+        return targets or None
 
     def _loader_reference_data(self, loader: Any) -> Dict[str, Any]:
         """Extract loader arrays while preserving auxiliary batch metadata."""
@@ -1660,6 +1815,31 @@ class Trainer:
             reference_data[key] = value
         return reference_data
 
+    def _numpy_loader_reference_data(self, loader: NumpyDataLoader) -> Dict[str, Any]:
+        if hasattr(loader, "reference_data"):
+            reference_data = getattr(loader, "reference_data")
+            if isinstance(reference_data, dict):
+                return reference_data
+        if hasattr(loader, "_reference_data"):
+            reference_data = getattr(loader, "_reference_data")
+            if isinstance(reference_data, dict):
+                return reference_data
+        return self._loader_reference_data(loader)
+
+    def _validate_hvp_reference_data(self, reference_data: Dict[str, Any], label: str) -> None:
+        if not self._hvp_cfg["enabled"] or not self._hvp_cfg.get("require_targets", True):
+            return
+        missing = [
+            key
+            for key in (str(self._hvp_cfg["probe_key"]), str(self._hvp_cfg["target_key"]))
+            if key not in reference_data
+        ]
+        if missing:
+            raise ValueError(
+                f"training.hvp.enabled=true requires {label} batch data to contain "
+                f"{missing}; available keys: {sorted(reference_data.keys())}"
+            )
+
     def _create_chemtrain_loaders(self) -> DataLoaders:
         """
         Create chemtrain DataLoaders from our loaders.
@@ -1670,20 +1850,26 @@ class Trainer:
         # Convert our DatasetLoader to NumpyDataLoader if needed.
         # DatasetLoader stores NumPy arrays, so no device transfer is required.
         if not isinstance(self.train_loader, NumpyDataLoader):
+            train_reference_data = self._loader_reference_data(self.train_loader)
+            self._validate_hvp_reference_data(train_reference_data, "training")
             train_np_loader = NumpyDataLoader(
                 copy=False,
-                **self._loader_reference_data(self.train_loader),
+                **train_reference_data,
             )
         else:
+            self._validate_hvp_reference_data(self._numpy_loader_reference_data(self.train_loader), "training")
             train_np_loader = self.train_loader
 
         if self.val_loader is not None:
             if not isinstance(self.val_loader, NumpyDataLoader):
+                val_reference_data = self._loader_reference_data(self.val_loader)
+                self._validate_hvp_reference_data(val_reference_data, "validation")
                 val_np_loader = NumpyDataLoader(
                     copy=False,
-                    **self._loader_reference_data(self.val_loader),
+                    **val_reference_data,
                 )
             else:
+                self._validate_hvp_reference_data(self._numpy_loader_reference_data(self.val_loader), "validation")
                 val_np_loader = self.val_loader
         else:
             val_np_loader = train_np_loader  # Use training data for validation
@@ -1693,6 +1879,227 @@ class Trainer:
             val_loader=val_np_loader,
             test_loader=None
         )
+
+    def _create_swa_state_for_stage(
+        self, optimizer_name: str, epochs: int
+    ) -> Tuple[Optional[SWAState], Optional[Dict[str, Any]]]:
+        """Create SWA state for the selected training stage, if enabled."""
+        cfg = self.config.get_swa_config()
+        if not cfg["enabled"] or cfg["stage"] != optimizer_name:
+            return None, None
+
+        if cfg["start_epoch"] is None:
+            start_epoch = int(np.ceil(float(epochs) * float(cfg["start_fraction"])))
+        else:
+            start_epoch = int(cfg["start_epoch"])
+
+        state = SWAState(
+            stage=optimizer_name,
+            start_epoch=start_epoch,
+            sample_freq_epochs=int(cfg["sample_freq_epochs"]),
+            use_best_params=bool(cfg["use_best_params"]),
+        )
+        training_logger.info(
+            "[SWA] Enabled for stage=%s start_epoch=%d sample_freq_epochs=%d "
+            "use_best_params=%s",
+            optimizer_name,
+            start_epoch,
+            state.sample_freq_epochs,
+            state.use_best_params,
+        )
+        return state, cfg
+
+    def _install_swa_sampler(
+        self, trainer: Any, state: SWAState, stage_start_epoch: int
+    ) -> None:
+        """Attach a post-epoch task that averages selected parameter samples."""
+
+        def _sample_swa(chemtrain_trainer, *args, **kwargs):
+            completed_epoch = int(
+                stage_start_epoch + getattr(chemtrain_trainer, "_epoch", 0) + 1
+            )
+            if not state.should_sample(completed_epoch):
+                return
+            params = (
+                chemtrain_trainer.best_inference_params
+                if state.use_best_params
+                else chemtrain_trainer.params
+            )
+            state.update(params, epoch=completed_epoch)
+            training_logger.info(
+                "[SWA] Sampled stage=%s epoch=%d sample_count=%d",
+                state.stage,
+                completed_epoch,
+                state.n_samples,
+            )
+
+        trainer.add_task("post_epoch", _sample_swa)
+
+    @staticmethod
+    def _build_basin_energy_monitor_for_rank(
+        config: Any,
+        model: Any,
+        *,
+        rank: int,
+        default_output_dir: str | Path,
+    ) -> Any:
+        """Construct the file-writing monitor on rank zero only."""
+        if int(rank) != 0:
+            return None
+        return build_basin_energy_monitor(
+            config, model, default_output_dir=default_output_dir
+        )
+
+    def _install_basin_energy_monitor(
+        self,
+        trainer: Any,
+        *,
+        stage_name: str,
+        stage_start_epoch: int,
+        stage_end_epoch: int,
+    ) -> None:
+        """Attach post-epoch basin diagnostics using stage-global epoch numbers."""
+        monitor = getattr(self, "_basin_energy_monitor", None)
+        if monitor is None:
+            return
+        if monitor.should_record(stage_start_epoch, final_step=stage_end_epoch):
+            monitor.record(
+                trainer.params,
+                mode="fm",
+                stage=stage_name,
+                step=stage_start_epoch,
+            )
+
+        def _record(chemtrain_trainer, *args, **kwargs):
+            completed_epoch = int(
+                stage_start_epoch + getattr(chemtrain_trainer, "_epoch", 0) + 1
+            )
+            if monitor.should_record(completed_epoch, final_step=stage_end_epoch):
+                monitor.record(
+                    chemtrain_trainer.params,
+                    mode="fm",
+                    stage=stage_name,
+                    step=completed_epoch,
+                )
+
+        trainer.add_task("post_epoch", _record)
+
+
+
+    def _save_swa_checkpoint_if_ready(
+        self,
+        state: Optional[SWAState],
+        cfg: Optional[Dict[str, Any]],
+        optimizer_name: str,
+        completed_epochs: int,
+        final_losses: Dict[str, Any],
+        trainer: Any,
+    ) -> None:
+        """Persist SWA params as a separate checkpoint artifact when configured."""
+        if state is None or cfg is None:
+            return
+        final_losses["swa_sample_count"] = int(state.n_samples)
+        final_losses["swa_sample_epochs"] = list(state.sample_epochs)
+        if state.n_samples <= 0:
+            training_logger.warning(
+                "[SWA] Enabled for stage=%s but collected no samples; no SWA checkpoint written.",
+                optimizer_name,
+            )
+            return
+        if not cfg["save_checkpoint"]:
+            return
+
+        output_path = self.checkpoint_path / f"swa_{optimizer_name}_epoch{completed_epochs}.pkl"
+        metadata = {
+            "stage": optimizer_name,
+            "completed_epochs": int(completed_epochs),
+            "train_losses": list(trainer.train_losses),
+            "val_losses": list(trainer.val_losses),
+            "swa_config": dict(cfg),
+        }
+        save_swa_checkpoint(output_path, state, metadata)
+        final_losses["swa_checkpoint"] = str(output_path)
+        training_logger.info(
+            "[SWA] Saved checkpoint: %s (samples=%d epochs=%s)",
+            output_path,
+            state.n_samples,
+            state.sample_epochs,
+        )
+
+    def _create_msam_config_for_stage(
+        self, optimizer_name: str, epochs: int
+    ) -> Optional[Dict[str, Any]]:
+        """Return mSAM config for this stage, if enabled."""
+        cfg = self.config.get_msam_config()
+        if not cfg["enabled"] or cfg["stage"] != optimizer_name:
+            return None
+
+        if cfg["start_epoch"] is None:
+            start_epoch = int(np.ceil(float(epochs) * float(cfg["start_fraction"])))
+        else:
+            start_epoch = int(cfg["start_epoch"])
+
+        stage_cfg = dict(cfg)
+        stage_cfg["start_epoch"] = start_epoch
+        if self._grad_accum_steps <= 1:
+            training_logger.warning(
+                "[mSAM] Enabled with grad_accum_steps=%d; this runs full-batch SAM "
+                "rather than micro-batch SAM.",
+                self._grad_accum_steps,
+            )
+        training_logger.info(
+            "[mSAM] Enabled for stage=%s start_epoch=%d rho=%.6g epsilon=%.3g "
+            "grad_accum_steps=%d grad_accum_mode=%s",
+            optimizer_name,
+            start_epoch,
+            float(stage_cfg["rho"]),
+            float(stage_cfg["epsilon"]),
+            self._grad_accum_steps,
+            self._grad_accum_mode,
+        )
+        return stage_cfg
+
+    def _install_msam_update(
+        self,
+        trainer: Any,
+        optimizer: optax.GradientTransformation,
+        cfg: Dict[str, Any],
+        stage_start_epoch: int,
+    ) -> None:
+        """Attach an epoch-windowed mSAM update wrapper to a Chemtrain trainer."""
+        if getattr(trainer, "_disable_shmap", False):
+            raise NotImplementedError(
+                "training.msam currently supports Chemtrain shmap training only; "
+                "disable_shmap/pmap mode is not supported."
+            )
+
+        base_update_fn = trainer._update_fn
+        msam_update_fn = shmap_msam_update_fn(
+            trainer.batched_model,
+            trainer._loss_fn,
+            optimizer,
+            getattr(trainer, "_penalty_fn", None),
+            rho=float(cfg["rho"]),
+            epsilon=float(cfg["epsilon"]),
+        )
+        start_epoch = int(cfg["start_epoch"])
+        activated = [False]
+
+        def _msam_windowed_update_fn(*args, **kwargs):
+            stage_epoch = int(stage_start_epoch + getattr(trainer, "_epoch", 0))
+            if stage_epoch < start_epoch:
+                return base_update_fn(*args, **kwargs)
+            if not activated[0]:
+                activated[0] = True
+                training_logger.info(
+                    "[mSAM] Activating updates at stage-local epoch=%d "
+                    "(configured start_epoch=%d).",
+                    stage_epoch,
+                    start_epoch,
+                )
+            return msam_update_fn(*args, **kwargs)
+
+        trainer._update_fn = _msam_windowed_update_fn
 
     def train_stage(
         self,
@@ -1724,6 +2131,8 @@ class Trainer:
 
         # Create optimizer
         optimizer = create_optimizer_from_config(self.config, optimizer_name)
+        swa_state, swa_cfg = self._create_swa_state_for_stage(optimizer_name, epochs)
+        msam_cfg = self._create_msam_config_for_stage(optimizer_name, epochs)
 
         # Create chemtrain loaders
         t_loader_start = time.perf_counter()
@@ -1738,7 +2147,16 @@ class Trainer:
         )
 
         # Create energy function template
-        energy_fn_template = self.model.energy_fn_template
+        energy_fn_template = (
+            self.model.zero_energy_fn_template
+            if self._direct_force_mode
+            else self.model.energy_fn_template
+        )
+
+        # Inject learnable log_sigma into params before optimizer is initialized.
+        if self._torque_cfg["enabled"] and self._torque_cfg["uncertainty_weighting"]:
+            if "log_sigma" not in self.params:
+                self.params = {**self.params, "log_sigma": {"T": init_log_sigma(self._torque_cfg["lambda"])}}
 
         # Create ForceMatching trainer
         t_trainer_init_start = time.perf_counter()
@@ -1746,7 +2164,11 @@ class Trainer:
             init_params=self.params,
             optimizer=optimizer,
             energy_fn_template=energy_fn_template,
-            nbrs_init=self.model.initial_neighbors,
+            # nbrs_init=None makes chemtrain's quantity_map skip neighbor_update
+            # and fall through to the dataset-supplied `neighbor_idx` instead.
+            nbrs_init=(
+                None if self._static_neighbors_enabled else self.model.initial_neighbors
+            ),
             gammas=self.gammas,
             error_fns=self._force_matching_error_fns(),
             weights_keys=self._force_matching_weights_keys(),
@@ -1756,6 +2178,30 @@ class Trainer:
             batch_cache=self.batch_cache,
             disable_shmap=False,
         )
+        # Replace the fixed-gamma loss with the uncertainty-weighted version.
+        if self._torque_cfg["enabled"] and self._torque_cfg["uncertainty_weighting"]:
+            # Wrap batched_model to inject log_sigma_T from params into predictions.
+            # This sidesteps chemtrain's assertion that every quantity key must exist
+            # in the batch data — log_sigma_T is a param scalar, not a dataset field.
+            _orig_model = trainer.batched_model
+            def _augmented_model(params, batch, _orig=_orig_model):
+                preds = _orig(params, batch)
+                batch_size = preds["T"].shape[0]
+                return {**preds, "log_sigma_T": jnp.full((batch_size,), params["log_sigma"]["T"])}
+            trainer.batched_model = _augmented_model
+
+            uw_loss_fn = wrap_uncertainty_loss_fn(
+                trainer._loss_fn,
+                loss_mask_key=self._torque_cfg.get("loss_mask_key", "") or "",
+            )
+            trainer._loss_fn = uw_loss_fn
+            trainer._update_fn = ct_ml.shmap_update_fn(
+                trainer.batched_model, uw_loss_fn, optimizer, penalty_fn=None,
+            )
+            trainer._evaluate_fn = ct_ml.shmap_loss_fn(
+                trainer.batched_model, uw_loss_fn, penalty_fn=None,
+            )
+
         t_trainer_init_end = time.perf_counter()
         self._record_loader_setup(
             "training",
@@ -1775,17 +2221,46 @@ class Trainer:
             (t_set_train_loader_end - t_set_train_loader_start) * 1e3,
             observations=int(loaders.train_loader.static_information["observation_count"]),
         )
-        t_set_val_loader_start = time.perf_counter()
-        trainer.set_loader(loaders.val_loader, stage="validation")
-        t_set_val_loader_end = time.perf_counter()
-        self._record_loader_setup(
-            "validation",
-            "set_loader_validation",
-            (t_set_val_loader_end - t_set_val_loader_start) * 1e3,
-            observations=int(loaders.val_loader.static_information["observation_count"]),
-        )
+        # Register validation ONLY when there is a genuine held-out split. With
+        # val_fraction 0.0 scripts/train.py falls back to `val_loader = train_loader`, and
+        # registering that made chemtrain evaluate the ENTIRE training set every epoch --
+        # a measured 26% of wall time for a "val loss" computed on the training data.
+        # Skipping registration makes chemtrain report `val_loss = None`, which prints as
+        # "not evaluated (no held-out split)" instead of a number that looks like validation.
+        if self._has_holdout_validation:
+            t_set_val_loader_start = time.perf_counter()
+            trainer.set_loader(loaders.val_loader, stage="validation")
+            t_set_val_loader_end = time.perf_counter()
+            self._record_loader_setup(
+                "validation",
+                "set_loader_validation",
+                (t_set_val_loader_end - t_set_val_loader_start) * 1e3,
+                observations=int(loaders.val_loader.static_information["observation_count"]),
+            )
+        else:
+            training_logger.warning(
+                "[Validation] val_fraction=0 -> NO held-out split. Skipping the per-epoch "
+                "evaluation pass (worth ~26% of wall time); val loss will be reported as "
+                "not evaluated. Set training.val_fraction > 0 to get a real one."
+            )
         self._install_batch_fetch_profiler(trainer, stage="training")
         self._install_epochwise_tile_rebuild(trainer, stage_start_epoch=start_epoch)
+        self._install_dsm_step_refresh(trainer)
+        self._install_basin_energy_monitor(
+            trainer,
+            stage_name=optimizer_name,
+            stage_start_epoch=start_epoch,
+            stage_end_epoch=epochs,
+        )
+        if swa_state is not None:
+            self._install_swa_sampler(trainer, swa_state, stage_start_epoch=start_epoch)
+        if msam_cfg is not None:
+            self._install_msam_update(
+                trainer,
+                optimizer,
+                msam_cfg,
+                stage_start_epoch=start_epoch,
+            )
         self._log_neighbor_debug_once()
 
         # Restore optimizer state from checkpoint if available.
@@ -1804,6 +2279,64 @@ class Trainer:
                 )
             finally:
                 self._resume_opt_state = None  # Only restore once per resume
+
+        # --- TEMPORARY DEBUG: per-leaf gradient norms on step 0 ---
+        if os.environ.get("DEBUG_GRAD_NORMS"):
+            _orig_update_fn = trainer._update_fn
+            _debug_done = [False]
+        
+            def _debug_wrapped_update_fn(*args, **kwargs):
+                result = _orig_update_fn(*args, **kwargs)
+                if not _debug_done[0]:
+                    _debug_done[0] = True
+                    curr_grad = result[3]
+                    params_after = result[0]  # result[0] = new_params (post-update)
+                    try:
+                        scale_shift = params_after["ml"]["atomic_energy_layer/~/scale_shift_layer"]
+                        training_logger.info(
+                            "[ScaleShiftDebug] scale=%s shift=%s",
+                            scale_shift["scale"], scale_shift["shift"],
+                        )
+                    except KeyError as e:
+                        training_logger.info("[ScaleShiftDebug] key not found: %s — check params_before structure", e)
+                        
+                    def report(path, g):
+                        name = "/".join(str(p) for p in path)
+                        training_logger.info(
+                            "[GradDebug] %-70s norm=%.3e shape=%s",
+                            name, float(jnp.linalg.norm(g)), g.shape,
+                        )
+                    jax.tree_util.tree_map_with_path(report, curr_grad)
+                return result
+        
+            trainer._update_fn = _debug_wrapped_update_fn
+        # --- END TEMPORARY DEBUG ---
+
+        # --- TEMPORARY DEBUG: scale/shift init values on step 0 ---
+        if os.environ.get("DEBUG_SCALE_SHIFT"):
+            _orig_update_fn_ss = trainer._update_fn
+            _debug_ss_done = [False]
+
+            def _debug_ss_wrapped_update_fn(*args, **kwargs):
+                if not _debug_ss_done[0]:
+                    _debug_ss_done[0] = True
+                    params_before = args[0]  # pre-update params; args[0] per chemtrain shmap_update_fn signature
+                    try:
+                        scale_shift = params_before["ml"]["atomic_energy_layer/~/scale_shift_layer"]
+                        training_logger.info(
+                            "[ScaleShiftDebug] scale=%s shift=%s",
+                            scale_shift["scale"], scale_shift["shift"],
+                        )
+                    except KeyError as e:
+                        training_logger.info(
+                            "[ScaleShiftDebug] key not found: %s — top-level keys: %s",
+                            e, list(params_before.keys()),
+                        )
+                return _orig_update_fn_ss(*args, **kwargs)
+
+            trainer._update_fn = _debug_ss_wrapped_update_fn
+        # --- END TEMPORARY DEBUG ---
+
 
         # Attach per-batch timing profiler if requested (non-invasive monkey-patch).
         # Must be done BEFORE trainer.train() so it intercepts from step 0.
@@ -1844,12 +2377,26 @@ class Trainer:
                 self._report_batch_profiler()
             if self._batch_stats_enabled:
                 self._report_epoch_profiles()
+
+        # Chemtrain currently catches update/compilation failures inside
+        # ``train`` and writes an ``epoch-*_error_state.pkl`` file instead of
+        # propagating the exception. Do not let such a failed stage continue
+        # into checkpoint/export code and appear as a successful zero-loss run.
+        if remaining_epochs > 0 and not getattr(trainer, "train_losses", []):
+            error_states = sorted(self.checkpoint_path.glob("epoch-*_error_state.pkl"))
+            detail = f"; error state: {error_states[-1]}" if error_states else ""
+            raise RuntimeError(
+                "Training stage produced no epoch losses. Chemtrain likely caught "
+                f"an update failure{detail}. See the training log for the original error."
+            )
         stage_wall_seconds = time.perf_counter() - stage_start_time
 
         # Update parameters
         self.params = trainer.params
         self.best_params = trainer.best_inference_params
         self._chemtrain_trainer = trainer
+        if self._basin_energy_monitor is not None:
+            self._basin_energy_monitor.finalize()
         if self.model.use_priors and getattr(self.model, "train_priors", False) and "prior" in self.params:
             self.model.prior.params = self.params["prior"]
 
@@ -1892,6 +2439,14 @@ class Trainer:
         }
         if trace_dir is not None:
             final_losses["jax_trace_dir"] = str(trace_dir)
+        self._save_swa_checkpoint_if_ready(
+            swa_state,
+            swa_cfg,
+            optimizer_name,
+            epochs,
+            final_losses,
+            trainer,
+        )
 
         training_logger.info(
             f"Stage wall time: {stage_wall_seconds:.2f} s "
@@ -2278,6 +2833,7 @@ class Trainer:
         for idx, stage in enumerate(stages):
             opt_name = stage["optimizer"]
             n_epochs = stage["epochs"]
+            stage_gammas = stage.get("gammas")
 
             if n_epochs <= 0:
                 continue
@@ -2289,13 +2845,24 @@ class Trainer:
                 else:
                     continue
 
-            start_epoch = resume_epoch if resume_stage == opt_name else 0
-            results[f"stage{idx+1}"] = self.train_stage(
-                opt_name,
-                n_epochs,
-                start_epoch=start_epoch,
-                checkpoint_freq=checkpoint_freq
-            )
+            # Temporarily override gammas for this stage if specified
+            saved_gammas = self.gammas
+            if stage_gammas:
+                self.gammas = dict(self.gammas)
+                self.gammas.update({k: float(v) for k, v in stage_gammas.items()})
+                training_logger.info("[Training] Stage %d gamma overrides: %s", idx + 1, stage_gammas)
+
+            try:
+                start_epoch = resume_epoch if resume_stage == opt_name else 0
+                results[f"stage{idx+1}"] = self.train_stage(
+                    opt_name,
+                    n_epochs,
+                    start_epoch=start_epoch,
+                    checkpoint_freq=checkpoint_freq
+                )
+            finally:
+                self.gammas = saved_gammas
+
             # Only use resume_epoch for the stage we're resuming into
             resume_stage = None
             resume_epoch = 0
@@ -2314,29 +2881,53 @@ class Trainer:
         """
         R = self.train_loader.R[frame_idx]
         F_ref = self.train_loader.F[frame_idx]
+        O = self.train_loader.O[frame_idx] if hasattr(self.train_loader, "O") else None
+        T_ref = self.train_loader.T[frame_idx] if hasattr(self.train_loader, "T") else None
         mask = self.train_loader.mask[frame_idx]
         species = self.train_loader.species[frame_idx]
+        frame_box = getattr(self.train_loader, "box", None)
+        if frame_box is None:
+            frame_box = getattr(self.train_loader, "box_per_frame", None)
+        frame_box = frame_box[frame_idx] if frame_box is not None and np.asarray(frame_box).ndim == 2 else frame_box
 
         # Compute energy components
         components = self.model.compute_components(
             self.best_params or self.params,
-            R, mask, species
+            R, mask, species, box=frame_box, O=O
         )
 
         # Compute forces
         def energy_fn(R_):
             return self.model.compute_energy(
                 self.best_params or self.params,
-                R_, mask, species
+                R_, mask, species, box=frame_box, O=O
+            )
+        def energy_tn(O_):
+            return self.model.compute_energy(
+                self.best_params or self.params,
+                R, mask, species, box=frame_box, O=O_
             )
 
         F_pred = -jax.grad(energy_fn)(R)
+
 
         # Compute errors (only for real atoms)
         real_mask = mask > 0
         F_pred_real = F_pred[real_mask]
         F_ref_real = F_ref[real_mask]
 
+        if O is not None and T_ref is not None:
+            dU_dO = jax.grad(energy_tn)(O)
+            T_pred = -jnp.cross(
+                O.transpose(0,2,1),         # (N, 3_col, 3_spatial)
+                dU_dO.transpose(0,2,1),     # (N, 3_col, 3_spatial)
+                axis=-1                     # cross over spatial dim
+                ).sum(axis=1)               # # sum over columns → (N, 3)
+            T_pred_real = T_pred[real_mask]
+            T_ref_real = T_ref[real_mask] if T_ref is not None else None
+            torque_rmse =  float(jnp.sqrt(jnp.mean((T_pred_real - T_ref_real) ** 2))) 
+            torque_mae = float(jnp.mean(jnp.abs(T_pred_real - T_ref_real))) 
+            
         rmse = float(jnp.sqrt(jnp.mean((F_pred_real - F_ref_real) ** 2)))
         mae = float(jnp.mean(jnp.abs(F_pred_real - F_ref_real)))
 
@@ -2344,6 +2935,8 @@ class Trainer:
             "energy_components": {k: float(v) for k, v in components.items()},
             "force_rmse": rmse,
             "force_mae": mae,
+            "torque_rmse": float(jnp.sqrt(jnp.mean((T_pred_real - T_ref_real) ** 2))) if T_ref_real is not None else None,
+            "torque_mae": float(jnp.mean(jnp.abs(T_pred_real - T_ref_real))) if T_ref_real is not None else None,
         }
 
     def save_params(self, output_path: str):
@@ -2377,6 +2970,76 @@ class Trainer:
 
         self.best_params = self.params
         training_logger.info(f"Loaded parameters from: {input_path}")
+
+    def initialize_params_from_checkpoint(
+        self,
+        input_path: str,
+        source_key: str = "best_params",
+        partial_matching: bool = False,
+    ) -> None:
+        """Initialize model params from a checkpoint without resuming optimizer state."""
+        input_path = Path(input_path)
+        if not input_path.exists():
+            raise FileNotFoundError(f"Initial checkpoint not found: {input_path}")
+
+        with input_path.open("rb") as f:
+            payload = pickle.load(f)
+
+        params = payload
+        key = str(source_key or "best_params")
+        if isinstance(payload, dict):
+            if key == "trainer_state.params":
+                trainer_state = payload.get("trainer_state", {})
+                params = trainer_state.get("params")
+            elif key in payload:
+                params = payload[key]
+            elif key == "params" and isinstance(payload.get("trainer_state"), dict):
+                params = payload["trainer_state"].get("params")
+            else:
+                raise KeyError(
+                    f"Checkpoint {input_path} does not contain source_key={key!r}. "
+                    f"Available top-level keys: {sorted(payload.keys())}"
+                )
+
+        if isinstance(params, dict) and "ml" not in params:
+            params = {"ml": params}
+        if not isinstance(params, dict) or "ml" not in params:
+            raise TypeError(
+                f"Unsupported initial params payload from {input_path}: {type(params)}"
+            )
+
+        if partial_matching:
+            copied = [0]
+            skipped = [0]
+
+            def merge(target, source):
+                if isinstance(target, dict) and isinstance(source, dict):
+                    return {
+                        key: merge(value, source[key]) if key in source else value
+                        for key, value in target.items()
+                    }
+                if hasattr(target, "shape") and hasattr(source, "shape") and target.shape == source.shape:
+                    copied[0] += 1
+                    return jnp.asarray(source)
+                skipped[0] += 1
+                return target
+
+            self.params = merge(self.params, params)
+            training_logger.info(
+                "Partially initialized matching checkpoint tensors from %s: copied=%d skipped_or_unmatched=%d",
+                input_path, copied[0], skipped[0],
+            )
+        else:
+            self.params = jax.tree_util.tree_map(jnp.asarray, params)
+        self.best_params = self.params
+        self._resume_opt_state = None
+        training_logger.info(
+            "Initialized model params from checkpoint %s (source_key=%s, partial_matching=%s); "
+            "optimizer state was not restored.",
+            input_path,
+            key,
+            partial_matching,
+        )
 
     def get_best_params(self) -> Dict[str, Any]:
         """Get best parameters from training."""

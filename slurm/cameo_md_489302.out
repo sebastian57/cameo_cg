@@ -1,0 +1,10 @@
+============================================================
+CAMEO CG JAX-MD Simulation
+Config      : local_work/config/md/ala2_backbone_5bead_charron_Caps.yaml
+Project root: /e/project1/cameo/edelkoetter2/work/cameo_cg
+Job ID      : 489302
+Node        : jpbo-004-15
+============================================================
+Wrote 20001 frames × 9 atoms → /e/project1/cameo/edelkoetter2/work/cameo_cg/local_work/md_runs/ala2/charron_wCaps/traj_nvt_1ns.dump
+  box: ['[-8961617.00, 8961617.00]', '[-4619608.50, 4619608.50]', '[-3986731.50, 3986731.50]']
+  atom types: [1, 2, 3, 4, 5, 6, 7, 8, 9]

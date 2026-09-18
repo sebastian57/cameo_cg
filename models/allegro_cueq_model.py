@@ -15,17 +15,41 @@ Two new config keys are recognised under model.allegro (or model.allegro_cuEq / 
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+from jax.sharding import PartitionSpec
+try:
+    from jax.sharding import get_abstract_mesh
+except ImportError:
+    class _EmptyAbstractMesh:
+        empty = True
+
+    def get_abstract_mesh():
+        return _EmptyAbstractMesh()
 from jax_md import space, partition
+from pathlib import Path
 from typing import Optional, Any
 from jax_md_mod import custom_partition
 
 from .base_model import BaseMLModel, register_ml_model, resolve_compute_dtype
 from .allegro_model import _resolve_mlp_activation
 from .neighborlist_utils import resolve_neighbor_list_format, compute_avg_num_neighbors
+from .dynamic_neighborlist import dynamic_neighbor_list
+from training.edge_distance_gate import EdgeDistanceGateBank, edge_distance_gate_config
 from utils.logging import model_logger
 
 # allegro_cueq_v2 is imported lazily inside __init__ to avoid a hard dependency
 # on cuequivariance at import time (non-cueq runs would fail otherwise).
+
+
+def _replicate_params_when_mesh_active(params: Any) -> Any:
+    """Make parameter shardings explicit inside active mesh contexts."""
+    if get_abstract_mesh().empty:
+        return params
+    return jax.tree_util.tree_map(
+        lambda x: jax.lax.with_sharding_constraint(x, PartitionSpec())
+                  if isinstance(x, jax.Array) else x,
+        params,
+    )
 
 
 def _resolve_mlp_dtype(cfg_value) -> tuple[str, jnp.dtype]:
@@ -77,8 +101,10 @@ class AllegroModelCuEq(BaseMLModel):
         box: jax.Array,
         species: jax.Array,
         N_max: int,
+        O0: Optional[jax.Array] = None,
         n_species_override: Optional[int] = None,
         init_mask: Optional[jax.Array] = None,
+        box_min: Optional[jax.Array] = None,
     ):
         """
         Initialize AllegroModelCuEq.
@@ -89,6 +115,7 @@ class AllegroModelCuEq(BaseMLModel):
             box:     Simulation box dimensions, shape (3,)
             species: Species IDs, shape (n_atoms,)
             N_max:   Maximum number of atoms (for padding)
+            orientations: Optional orientation vectors for each atom, shape (n_atoms, 3)
             n_species_override: Optional global species cardinality override.
         """
         self.config = config
@@ -103,8 +130,17 @@ class AllegroModelCuEq(BaseMLModel):
             config.get_neighbor_list_format()
         )
         self._neighbor_disable_cell_list = bool(config.neighbor_disable_cell_list_enabled())
+        self._dynamic_box = bool(config.dynamic_box_enabled())
 
         self.allegro_config = dict(config.get_allegro_config())
+        self._neighbor_capacity_multiplier = float(
+            self.allegro_config.pop("neighbor_capacity_multiplier", 1.25)
+        )
+        if self._neighbor_capacity_multiplier < 1.0:
+            raise ValueError(
+                "neighbor_capacity_multiplier must be >= 1.0, got "
+                f"{self._neighbor_capacity_multiplier}."
+            )
         self._pad_spacing = jnp.asarray(
             self.cutoff + self.dr_threshold + 1.0, dtype=self.compute_dtype
         )
@@ -166,21 +202,52 @@ class AllegroModelCuEq(BaseMLModel):
         #  JAX-MD neighbor list                                               #
         # ------------------------------------------------------------------ #
 
-        self.displacement, self.shift = space.free()
         safe_box = jnp.asarray(box, dtype=self.compute_dtype)
+        if config.use_pbc_enabled():
+            displacement_box = (
+                jnp.asarray(box_min, dtype=self.compute_dtype)
+                if self._dynamic_box and box_min is not None
+                else safe_box
+            )
+            self.displacement, self.shift = space.periodic_general(
+                displacement_box, fractional_coordinates=False
+            )
+            self._pbc = True
+            model_logger.info(
+                f"  PBC mode       = space.periodic_general, box={jax.device_get(safe_box)}"
+            )
+        else:
+            self.displacement, self.shift = space.free()
+            self._pbc = False
 
-        self.nneigh_fn = custom_partition.masked_neighbor_list(
-            self.displacement,
-            box=safe_box,
-            r_cutoff=self.cutoff,
-            dr_threshold=self.dr_threshold,
-            fractional_coordinates=False,
-            disable_cell_list=self._neighbor_disable_cell_list,
-            format=self.neighbor_list_format,
-        )
+        if self._dynamic_box:
+            if not self._pbc:
+                raise ValueError("data.dynamic_box=true requires periodic cuEq Allegro mode")
+            self.nneigh_fn = dynamic_neighbor_list(
+                self.displacement,
+                box=safe_box,
+                box_min=box_min,
+                r_cutoff=self.cutoff,
+                dr_threshold=self.dr_threshold,
+                capacity_multiplier=self._neighbor_capacity_multiplier,
+                disable_cell_list=self._neighbor_disable_cell_list,
+                format=self.neighbor_list_format,
+            )
+        else:
+            self.nneigh_fn = custom_partition.masked_neighbor_list(
+                self.displacement,
+                box=safe_box,
+                r_cutoff=self.cutoff,
+                dr_threshold=self.dr_threshold,
+                capacity_multiplier=self._neighbor_capacity_multiplier,
+                fractional_coordinates=False,
+                disable_cell_list=self._neighbor_disable_cell_list,
+                format=self.neighbor_list_format,
+            )
         model_logger.info(
             f"  neighbor format = {self.neighbor_list_format_name} "
-            f"(disable_cell_list={self._neighbor_disable_cell_list})"
+            f"(disable_cell_list={self._neighbor_disable_cell_list}, "
+            f"capacity_multiplier={self._neighbor_capacity_multiplier:.3f})"
         )
 
         # Mask-aware neighbor init avoids coordinate teleporting and excludes
@@ -195,10 +262,14 @@ class AllegroModelCuEq(BaseMLModel):
         self._neighbor_extra_capacity = int(
             self.allegro_config.pop("neighbor_extra_capacity", 10)
         )
+        init_box_kwargs = {}
+        if self._dynamic_box and box_min is not None:
+            init_box_kwargs["box"] = jnp.asarray(box_min, dtype=self.compute_dtype)
         self.nbrs_init = self.nneigh_fn.allocate(
             R0_safe,
             extra_capacity=self._neighbor_extra_capacity,
             mask=init_valid_mask,
+            **init_box_kwargs,
         )
         model_logger.info(
             f"  neighbor extra_capacity = {self._neighbor_extra_capacity}"
@@ -267,6 +338,40 @@ class AllegroModelCuEq(BaseMLModel):
         # logging is an explicit param of the factory (not forwarded to Allegro).
         ml_model_type = config.get_ml_model_type()
         self.ml_model_type = ml_model_type
+        self.output_mode = config.get_model_output_mode()
+        self.direct_force_config = config.get_direct_force_config()
+        if (
+            self.output_mode == "direct_force"
+            and self.direct_force_config["require_bidirectional_edges"]
+        ):
+            idx = np.asarray(jax.device_get(self.nbrs_init.idx), dtype=np.int64)
+            if self.neighbor_list_format_name == "sparse":
+                receivers_np, senders_np = idx[0], idx[1]
+            else:
+                n_centers, n_slots = idx.shape
+                senders_np = np.repeat(np.arange(n_centers, dtype=np.int64), n_slots)
+                receivers_np = idx.reshape(-1)
+            valid_nodes = np.asarray(jax.device_get(init_valid_mask), dtype=bool)
+            valid = (
+                (senders_np >= 0)
+                & (senders_np < N_max)
+                & (receivers_np >= 0)
+                & (receivers_np < N_max)
+            )
+            senders_valid = senders_np[valid]
+            receivers_valid = receivers_np[valid]
+            valid = valid_nodes[senders_valid] & valid_nodes[receivers_valid]
+            pairs = set(zip(senders_valid[valid].tolist(), receivers_valid[valid].tolist()))
+            missing = [(i, j) for i, j in pairs if (j, i) not in pairs]
+            if missing:
+                raise ValueError(
+                    "Direct-force central symmetrization requires bidirectional edges; "
+                    f"initial graph is missing {len(missing)} reverse edges."
+                )
+            model_logger.info(
+                "  direct-force graph validation = bidirectional (%d directed edges)",
+                len(pairs),
+            )
         self._enable_logging = bool(enable_logging)
         layer_methods = self.allegro_config.get("tp_method_by_layer")
         if isinstance(layer_methods, (list, tuple)):
@@ -282,6 +387,88 @@ class AllegroModelCuEq(BaseMLModel):
             mode_token=True,
         )
         self._export_apply_cache: dict[str, Any] = {}
+
+        edge_gate_cfg = edge_distance_gate_config(config)
+        self.edge_distance_gate_enabled = bool(edge_gate_cfg.get("enabled", False))
+        if self.output_mode == "direct_force" and self.edge_distance_gate_enabled:
+            raise ValueError("model.edge_distance_gate is not supported in direct-force teacher mode.")
+        self.edge_distance_gate_bank = None
+        if self.edge_distance_gate_enabled:
+            if ml_model_type != "allegro_cueq_fast":
+                raise ValueError("model.edge_distance_gate is supported only for ml_model=allegro_cueq_fast")
+            artifact_path = edge_gate_cfg.get("artifact_path")
+            if not artifact_path:
+                raise ValueError("model.edge_distance_gate.enabled=true requires artifact_path")
+            gate_path = Path(artifact_path)
+            if not gate_path.is_absolute():
+                config_relative = (Path(config.config_path).parent / gate_path).resolve()
+                cwd_relative = (Path.cwd() / gate_path).resolve()
+                gate_path = config_relative if config_relative.exists() else cwd_relative
+            fragment_torsion_gate_path = edge_gate_cfg.get(
+                "fragment_torsion_gate_path",
+                edge_gate_cfg.get("torsion_gate_path"),
+            )
+            ala2_combined_gate_path = edge_gate_cfg.get(
+                "ala2_combined_gate_path",
+                edge_gate_cfg.get("combined_gate_path"),
+            )
+            torsion_gate_path = None
+            if fragment_torsion_gate_path:
+                torsion_gate_path = Path(fragment_torsion_gate_path)
+                if not torsion_gate_path.is_absolute():
+                    config_relative = (
+                        Path(config.config_path).parent / torsion_gate_path
+                    ).resolve()
+                    cwd_relative = (Path.cwd() / torsion_gate_path).resolve()
+                    torsion_gate_path = (
+                        config_relative if config_relative.exists() else cwd_relative
+                    )
+            combined_gate_path = None
+            if ala2_combined_gate_path:
+                combined_gate_path = Path(ala2_combined_gate_path)
+                if not combined_gate_path.is_absolute():
+                    config_relative = (
+                        Path(config.config_path).parent / combined_gate_path
+                    ).resolve()
+                    cwd_relative = (Path.cwd() / combined_gate_path).resolve()
+                    combined_gate_path = (
+                        config_relative if config_relative.exists() else cwd_relative
+                    )
+            self.edge_distance_gate_bank = EdgeDistanceGateBank.from_file(
+                gate_path,
+                falloff_percent=float(edge_gate_cfg.get("falloff_percent", 0.05)),
+                onset_percent=float(edge_gate_cfg.get("onset_percent", 0.0)),
+                offset_percent=float(edge_gate_cfg.get("offset_percent", edge_gate_cfg.get("falloff_percent", 0.05))),
+                floor=float(edge_gate_cfg.get("floor", 0.0)),
+                alpha_power=float(edge_gate_cfg.get("alpha_power", 1.0)),
+                stop_gradient=bool(edge_gate_cfg.get("stop_gradient", True)),
+                fragment_torsion_gate_path=torsion_gate_path,
+                ala2_combined_gate_path=combined_gate_path,
+            )
+            model_logger.info(
+                "  edge distance gate = %s onset_percent=%.4g offset_percent=%.4g floor=%.4g alpha_power=%.4g stop_gradient=%s",
+                gate_path,
+                float(self.edge_distance_gate_bank.onset_percent),
+                float(self.edge_distance_gate_bank.offset_percent),
+                float(self.edge_distance_gate_bank.floor),
+                float(self.edge_distance_gate_bank.alpha_power),
+                bool(self.edge_distance_gate_bank.stop_gradient),
+            )
+            if self.edge_distance_gate_bank.has_fragment_torsion_gate:
+                model_logger.info(
+                    "  fragment torsion gate = %s k=%d onset_score=%.4gdeg offset_score=%.4gdeg",
+                    torsion_gate_path,
+                    int(self.edge_distance_gate_bank.fragment_torsion_k),
+                    float(self.edge_distance_gate_bank.fragment_torsion_onset_score_deg),
+                    float(self.edge_distance_gate_bank.fragment_torsion_offset_score_deg),
+                )
+            if self.edge_distance_gate_bank.has_ala2_combined_gate:
+                model_logger.info(
+                    "  ala2 combined gate = %s components=%s",
+                    combined_gate_path,
+                    ",".join(self.edge_distance_gate_bank.ala2_combined_components),
+                )
+
         if ml_model_type == "allegro_cueq_fast":
             from .allegro_cueq_fast_1103 import (
                 allegro_neighborlist_pp,  # lazy cuequivariance import
@@ -293,6 +480,13 @@ class AllegroModelCuEq(BaseMLModel):
             )
             model_logger.info("  backend         = allegro_cueq_v2")
         self._export_factory = allegro_neighborlist_pp
+        direct_force_kwargs = {
+            "direct_force_hidden": int(self.direct_force_config["hidden"]),
+            "direct_force_layers": int(self.direct_force_config["layers"]),
+            "direct_force_envelope_p": int(self.direct_force_config["envelope_p"]),
+            "direct_force_zero_init": bool(self.direct_force_config["zero_init"]),
+        }
+        factory_mode = "direct_forces" if self.output_mode == "direct_force" else "energy"
         self.init_allegro, self.apply_allegro = allegro_neighborlist_pp(
             displacement=self.displacement,
             r_cutoff=self.cutoff,
@@ -301,29 +495,51 @@ class AllegroModelCuEq(BaseMLModel):
             neighbor_test=self.nbrs_init,
             max_edge_multiplier=self.max_edge_multiplier,
             max_edges=self.max_edges,
-            mode="energy",
+            mode=factory_mode,
             logging=enable_logging,
             mlp_dtype=self.mlp_dtype,
+            **(direct_force_kwargs if self.output_mode == "direct_force" else {}),
+            **({"edge_distance_gate": self.edge_distance_gate_bank} if ml_model_type == "allegro_cueq_fast" else {}),
             **self.allegro_config,
         )
         # Per-atom version for export: per_particle=True in the closure so the
         # function returns shape (n_atoms,) instead of a scalar total.  The
         # scalar version (_apply_allegro_for_training) is kept for training
         # where jax.grad needs a scalar output.
-        _, self.apply_allegro_per_atom = allegro_neighborlist_pp(
-            displacement=self.displacement,
-            r_cutoff=self.cutoff,
-            n_species=self.n_species,
-            positions_test=R0_safe,
-            neighbor_test=self.nbrs_init,
-            max_edge_multiplier=self.max_edge_multiplier,
-            max_edges=self.max_edges,
-            mode="energy",
-            per_particle=True,
-            logging=enable_logging,
-            mlp_dtype=self.mlp_dtype,
-            **self.allegro_config,
-        )
+        if self.output_mode == "energy":
+            _, self.apply_allegro_per_atom = allegro_neighborlist_pp(
+                displacement=self.displacement,
+                r_cutoff=self.cutoff,
+                n_species=self.n_species,
+                positions_test=R0_safe,
+                neighbor_test=self.nbrs_init,
+                max_edge_multiplier=self.max_edge_multiplier,
+                max_edges=self.max_edges,
+                mode="energy",
+                per_particle=True,
+                logging=enable_logging,
+                mlp_dtype=self.mlp_dtype,
+                **({"edge_distance_gate": self.edge_distance_gate_bank} if ml_model_type == "allegro_cueq_fast" else {}),
+                **self.allegro_config,
+            )
+        else:
+            self.apply_allegro_per_atom = None
+        if ml_model_type == "allegro_cueq_fast" and self.output_mode == "energy":
+            _, self.apply_allegro_al_features = allegro_neighborlist_pp(
+                displacement=self.displacement,
+                r_cutoff=self.cutoff,
+                n_species=self.n_species,
+                positions_test=R0_safe,
+                neighbor_test=self.nbrs_init,
+                max_edge_multiplier=self.max_edge_multiplier,
+                max_edges=self.max_edges,
+                mode="al_features",
+                logging=enable_logging,
+                mlp_dtype=self.mlp_dtype,
+                **self.allegro_config,
+            )
+        else:
+            self.apply_allegro_al_features = None
 
         self._apply_allegro_for_training = self.apply_allegro
         if self.remat_level > 0:
@@ -336,10 +552,12 @@ class AllegroModelCuEq(BaseMLModel):
             self._apply_allegro_for_training = jax.checkpoint(
                 self.apply_allegro, policy=_policy
             )
-        self._export_apply_cache["current"] = self.apply_allegro_per_atom
+        if self.apply_allegro_per_atom is not None:
+            self._export_apply_cache["current"] = self.apply_allegro_per_atom
 
         self._R0 = R0_safe
         self._species0 = species_safe
+        self._O0 = jnp.asarray(O0, dtype=jnp.float32) if O0 is not None else None
 
     # ---------------------------------------------------------------------- #
     #  Internal helpers                                                       #
@@ -368,11 +586,17 @@ class AllegroModelCuEq(BaseMLModel):
     #  Public interface (identical to AllegroModel)                          #
     # ---------------------------------------------------------------------- #
 
+    def _dynamic_box_kwargs(self, box):
+        return {"box": box} if self._dynamic_box and box is not None else {}
+
     def initialize_params(self, rng_key: jax.random.PRNGKey) -> Any:
         """Initialize cuEq Allegro parameters."""
-        return self.init_allegro(rng_key, self._R0, self.nbrs_init, self._species0)
+        kwargs = {}
+        if self._O0 is not None:
+            kwargs["orientations"] = self._O0
+        return self.init_allegro(rng_key, self._R0, self.nbrs_init, self._species0, **kwargs)
 
-    def get_neighborlist(self, R: jax.Array, nbrs: Optional[Any] = None) -> Any:
+    def get_neighborlist(self, R: jax.Array, nbrs: Optional[Any] = None, box: Optional[jax.Array] = None) -> Any:
         """Get or update neighbor list for coordinates."""
         if nbrs is None:
             nbrs = self.nbrs_init
@@ -383,6 +607,7 @@ class AllegroModelCuEq(BaseMLModel):
             jnp.asarray(R, dtype=target_dtype),
             nbrs,
             mask=valid_mask,
+            **self._dynamic_box_kwargs(box),
         )
 
     def _compute_energy_with_apply(
@@ -392,8 +617,10 @@ class AllegroModelCuEq(BaseMLModel):
         R: jax.Array,
         mask: jax.Array,
         species: jax.Array,
+        orientations: Optional[jax.Array] = None,
         neighbor: Optional[Any] = None,
         segment_id: Optional[jax.Array] = None,
+        box: Optional[jax.Array] = None,
     ) -> jax.Array:
         """Compute cuEq Allegro energy for given coordinates."""
         valid_mask = mask > 0
@@ -408,6 +635,7 @@ class AllegroModelCuEq(BaseMLModel):
                 jnp.asarray(R_masked, dtype=target_dtype),
                 base_nbrs,
                 mask=valid_mask.astype(jnp.bool_),
+                **self._dynamic_box_kwargs(box),
             )
         else:
             nbr_error = getattr(neighbor, "error", None)
@@ -420,6 +648,7 @@ class AllegroModelCuEq(BaseMLModel):
                     jnp.asarray(R_masked, dtype=target_dtype),
                     neighbor,
                     mask=valid_mask.astype(jnp.bool_),
+                    **self._dynamic_box_kwargs(box),
                 )
 
         nbrs = custom_partition.mask_neighbor_list(
@@ -431,9 +660,18 @@ class AllegroModelCuEq(BaseMLModel):
         species_masked = jnp.where(valid_mask, species, 0).astype(jnp.int32)
         R_model = jnp.asarray(R_masked, dtype=self.compute_dtype)
 
+        # JAX >= 0.10 strictly enforces that arrays used inside shard_map's
+        # Manual mesh context must not carry Auto-mesh sharding. Haiku parameters
+        # are created with Auto-mesh sharding, so we re-annotate them with
+        # PartitionSpec() (replicated, no axis partitioning) which is valid in
+        # both Auto and Manual contexts. Skip when no mesh is active (e.g.,
+        # during export tracing) since with_sharding_constraint requires a mesh.
+        params = _replicate_params_when_mesh_active(params)
+
         E = apply_fn(
             params, R_model, nbrs, species_masked,
-            mask=valid_mask.astype(jnp.bool_),
+            mask=valid_mask.astype(jnp.bool_), orientations=orientations,
+            **self._dynamic_box_kwargs(box),
         )
         return jnp.asarray(E, dtype=jnp.float32)
 
@@ -446,6 +684,8 @@ class AllegroModelCuEq(BaseMLModel):
         species: jax.Array,
         neighbor: Optional[Any] = None,
         segment_id: Optional[jax.Array] = None,
+        box: Optional[jax.Array] = None,
+        orientations: Optional[jax.Array] = None,
     ) -> jax.Array:
         """Compute per-atom energies with a custom apply_fn for export."""
         valid_mask = mask > 0
@@ -460,6 +700,7 @@ class AllegroModelCuEq(BaseMLModel):
                 jnp.asarray(R_masked, dtype=target_dtype),
                 base_nbrs,
                 mask=valid_mask.astype(jnp.bool_),
+                **self._dynamic_box_kwargs(box),
             )
         else:
             nbr_error = getattr(neighbor, "error", None)
@@ -472,6 +713,7 @@ class AllegroModelCuEq(BaseMLModel):
                     jnp.asarray(R_masked, dtype=target_dtype),
                     neighbor,
                     mask=valid_mask.astype(jnp.bool_),
+                    **self._dynamic_box_kwargs(box),
                 )
 
         nbrs = custom_partition.mask_neighbor_list(
@@ -483,12 +725,16 @@ class AllegroModelCuEq(BaseMLModel):
         species_masked = jnp.where(valid_mask, species, 0).astype(jnp.int32)
         R_model = jnp.asarray(R_masked, dtype=self.compute_dtype)
 
+        params = _replicate_params_when_mesh_active(params)
+
         E = apply_fn(
             params,
             R_model,
             nbrs,
             species_masked,
             mask=valid_mask.astype(jnp.bool_),
+            orientations=orientations,
+            **self._dynamic_box_kwargs(box),
         )
         return jnp.asarray(E, dtype=jnp.float32)
 
@@ -498,18 +744,157 @@ class AllegroModelCuEq(BaseMLModel):
         R: jax.Array,
         mask: jax.Array,
         species: jax.Array,
+        orientations: Optional[jax.Array] = None,
         neighbor: Optional[Any] = None,
         segment_id: Optional[jax.Array] = None,
+        box: Optional[jax.Array] = None,
     ) -> jax.Array:
         """Compute cuEq Allegro energy for given coordinates."""
+        if self.output_mode != "energy":
+            raise RuntimeError("Direct-force teacher models do not define a scalar energy.")
         return self._compute_energy_with_apply(
             self._apply_allegro_for_training,
             params,
             R,
             mask,
             species,
+            neighbor=neighbor,
+            segment_id=segment_id,
+            box=box,
+            orientations=orientations,
+        )
+
+    def compute_direct_force(
+        self,
+        params: Any,
+        R: jax.Array,
+        mask: jax.Array,
+        species: jax.Array,
+        neighbor: Optional[Any] = None,
+        segment_id: Optional[jax.Array] = None,
+        box: Optional[jax.Array] = None,
+    ) -> jax.Array:
+        """Compute central direct forces without differentiating an energy."""
+        if self.output_mode != "direct_force":
+            raise RuntimeError("compute_direct_force requires model.output_mode=direct_force.")
+
+        valid_mask = jnp.asarray(mask > 0, dtype=jnp.bool_)
+        R_model = jnp.asarray(R, dtype=self.compute_dtype)
+        if neighbor is None or getattr(neighbor, "error", None) is not None:
+            base_nbrs = self.nbrs_init if neighbor is None else neighbor
+            ref_position = getattr(base_nbrs, "reference_position", None)
+            target_dtype = getattr(ref_position, "dtype", self.compute_dtype)
+            nbrs = self.nneigh_fn.update(
+                jnp.asarray(R_model, dtype=target_dtype),
+                base_nbrs,
+                mask=valid_mask,
+                **self._dynamic_box_kwargs(box),
+            )
+        else:
+            nbrs = neighbor
+        nbrs = custom_partition.mask_neighbor_list(
+            nbrs,
+            mask=valid_mask,
+            segment_id=(
+                jnp.asarray(segment_id, dtype=jnp.int32)
+                if segment_id is not None
+                else None
+            ),
+        )
+        species_masked = jnp.where(valid_mask, species, 0).astype(jnp.int32)
+        params = _replicate_params_when_mesh_active(params)
+        forces = self._apply_allegro_for_training(
+            params,
+            R_model,
+            nbrs,
+            species_masked,
+            mask=valid_mask,
+            **self._dynamic_box_kwargs(box),
+        )
+        return jnp.asarray(forces, dtype=jnp.float32) * valid_mask[:, None]
+
+    def compute_per_atom_energy(
+        self,
+        params: Any,
+        R: jax.Array,
+        mask: jax.Array,
+        species: jax.Array,
+        neighbor: Optional[Any] = None,
+        segment_id: Optional[jax.Array] = None,
+        box: Optional[jax.Array] = None,
+    ) -> jax.Array:
+        """Compute per-atom cuEq Allegro energies for segment-level gating."""
+        if self.output_mode != "energy":
+            raise RuntimeError("Direct-force teacher models do not define per-atom energies.")
+        return self._compute_per_atom_energy_with_apply(
+            self.apply_allegro_per_atom,
+            params,
+            R,
+            mask,
+            species,
             neighbor,
             segment_id=segment_id,
+            box=box,
+        )
+
+    def compute_al_features(
+        self,
+        params: Any,
+        R: jax.Array,
+        mask: jax.Array,
+        species: jax.Array,
+        neighbor: Optional[Any] = None,
+        segment_id: Optional[jax.Array] = None,
+        box: Optional[jax.Array] = None,
+    ) -> dict[str, jax.Array]:
+        """Return final invariant edge features for active-learning scoring."""
+        if self.apply_allegro_al_features is None:
+            raise NotImplementedError(
+                "Active-learning feature extraction is currently implemented "
+                "for ml_model='allegro_cueq_fast' only."
+            )
+
+        valid_mask = mask > 0
+        R_base = jnp.asarray(R, dtype=self.compute_dtype)
+
+        if neighbor is None:
+            base_nbrs = self.nbrs_init
+            ref_position = getattr(base_nbrs, "reference_position", None)
+            target_dtype = getattr(ref_position, "dtype", self.compute_dtype)
+            nbrs = self.nneigh_fn.update(
+                jnp.asarray(R_base, dtype=target_dtype),
+                base_nbrs,
+                mask=valid_mask.astype(jnp.bool_),
+                **self._dynamic_box_kwargs(box),
+            )
+        else:
+            nbr_error = getattr(neighbor, "error", None)
+            if nbr_error is None:
+                nbrs = neighbor
+            else:
+                ref_position = getattr(neighbor, "reference_position", None)
+                target_dtype = getattr(ref_position, "dtype", self.compute_dtype)
+                nbrs = self.nneigh_fn.update(
+                    jnp.asarray(R_base, dtype=target_dtype),
+                    neighbor,
+                    mask=valid_mask.astype(jnp.bool_),
+                    **self._dynamic_box_kwargs(box),
+                )
+
+        nbrs = custom_partition.mask_neighbor_list(
+            nbrs,
+            mask=valid_mask.astype(jnp.bool_),
+            segment_id=jnp.asarray(segment_id, dtype=jnp.int32) if segment_id is not None else None,
+        )
+
+        species_masked = jnp.where(valid_mask, species, 0).astype(jnp.int32)
+        return self.apply_allegro_al_features(
+            params,
+            jnp.asarray(R_base, dtype=self.compute_dtype),
+            nbrs,
+            species_masked,
+            mask=valid_mask.astype(jnp.bool_),
+            **self._dynamic_box_kwargs(box),
         )
 
     @property
@@ -522,10 +907,20 @@ class AllegroModelCuEq(BaseMLModel):
     @property
     def model_export_apply_fn(self):
         """Per-atom apply function for use in the MLIR export path."""
+        if self.edge_distance_gate_enabled:
+            raise NotImplementedError(
+                "MLIR export does not yet support model.edge_distance_gate; "
+                "disable the gate or use direct Python/JAX MD."
+            )
         return self.apply_allegro_per_atom
 
     def build_export_apply_fn(self, *, tp_method_override: Optional[str] = None):
         """Rebuild the raw apply_fn for export-time backend overrides."""
+        if self.edge_distance_gate_enabled:
+            raise NotImplementedError(
+                "MLIR export does not yet support model.edge_distance_gate; "
+                "disable the gate or use direct Python/JAX MD."
+            )
         if tp_method_override is None:
             return self.apply_allegro_per_atom
 
@@ -580,6 +975,7 @@ class AllegroModelCuEq(BaseMLModel):
             per_particle=True,
             logging=self._enable_logging,
             mlp_dtype=self.mlp_dtype,
+            edge_distance_gate=None,
             **export_allegro_config,
         )
         self._export_apply_cache[normalized_override] = export_apply

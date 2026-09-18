@@ -12,29 +12,20 @@ from typing import Dict, Any, Optional, Union
 
 
 class ConfigManager:
-    """
-    Manages configuration for training, models, and system parameters.
+    """Load and access training configuration."""
 
-    Loads YAML configuration files and provides convenient accessor methods
-    with default values and type checking.
-
-    Example:
-        >>> config = ConfigManager("config.yaml")
-        >>> cutoff = config.get_model_param("cutoff", default=10.0)
-        >>> batch_size = config.get_training_param("batch_per_device", default=4)
-    """
+    ML_MODEL_ALIASES = {
+        "allegro": "allegro",
+        "allegro_cueq": "allegro_cueq",
+        "allegro_cueq_opt": "allegro_cueq",
+        "allegro_cueq_b1": "allegro_cueq",
+        "allegro_cueq_fast": "allegro_cueq_fast",
+        "allegro_cueq_fast_1103": "allegro_cueq_fast",
+        "mace": "mace",
+        "painn": "painn",
+    }
 
     def __init__(self, config_path: Union[str, Path]):
-        """
-        Load configuration from YAML file.
-
-        Args:
-            config_path: Path to YAML configuration file
-
-        Raises:
-            FileNotFoundError: If config file doesn't exist
-            yaml.YAMLError: If config file is not valid YAML
-        """
         self.config_path = Path(config_path)
         if not self.config_path.exists():
             raise FileNotFoundError(f"Config file not found: {config_path}")
@@ -45,16 +36,61 @@ class ConfigManager:
         self._validate_config()
 
     def _validate_config(self):
-        """
-        Validate that required configuration sections exist.
-
-        Raises:
-            ValueError: If required sections are missing
-        """
         required_sections = ['data', 'model', 'training', 'optimizer']
         missing = [s for s in required_sections if s not in self._config]
         if missing:
             raise ValueError(f"Missing required config sections: {missing}")
+        if self.dynamic_box_enabled():
+            if not bool(self.get("model", "pbc", default=False)):
+                raise ValueError("data.dynamic_box=true requires model.pbc=true.")
+            if not self.get_ml_model_type().lower().startswith("allegro"):
+                raise ValueError(
+                    "data.dynamic_box=true currently supports Allegro backends only."
+                )
+        output_mode = self.get_model_output_mode()
+        if output_mode == "direct_force":
+            if self.get_ml_model_type() != "allegro_cueq_fast":
+                raise ValueError(
+                    "model.output_mode=direct_force is currently supported only for "
+                    "model.ml_model=allegro_cueq_fast."
+                )
+            gammas = self.get_gammas()
+            if float(gammas.get("U", 0.0)) != 0.0:
+                raise ValueError("Direct-force teacher mode requires training.gammas.U=0.")
+            if bool(self.get("model", "use_priors", default=False)):
+                raise ValueError(
+                    "Direct-force teachers must be ML-only. Use training.prior_residual "
+                    "to train on F_mapped - F_prior."
+                )
+            if bool(self.get("export", "enabled", default=True)):
+                raise ValueError(
+                    "Direct-force teacher mode has no energy/MD export; set export.enabled=false."
+                )
+            incompatible = {
+                "training.relative_entropy.enabled": bool(
+                    self.get("training", "relative_entropy", "enabled", default=False)
+                ),
+                "training.dsm.enabled": bool(
+                    self.get("training", "dsm", "enabled", default=False)
+                ),
+                "training.hvp.enabled": bool(
+                    self.get("training", "hvp", "enabled", default=False)
+                ),
+                "training.safety.enabled": bool(
+                    self.get("training", "safety", "enabled", default=False)
+                ),
+                "training.basin_energy_monitor.enabled": bool(
+                    self.get(
+                        "training", "basin_energy_monitor", "enabled", default=False
+                    )
+                ),
+            }
+            active = [name for name, enabled in incompatible.items() if enabled]
+            if active:
+                raise ValueError(
+                    "Direct-force teacher mode is incompatible with energy-derived "
+                    f"training features: {', '.join(active)}."
+                )
 
     def set(self, *keys_and_value) -> None:
         """Set a nested config value.  Last argument is the value.
@@ -69,20 +105,6 @@ class ConfigManager:
         d[keys[-1]] = value
 
     def get(self, *keys: str, default: Any = None) -> Any:
-        """
-        Get nested config value by keys.
-
-        Args:
-            *keys: Sequence of keys to traverse (e.g., "model", "cutoff")
-            default: Default value if key path doesn't exist
-
-        Returns:
-            Configuration value or default
-
-        Example:
-            >>> config.get("model", "cutoff", default=10.0)
-            12.0
-        """
         value = self._config
         for key in keys:
             if isinstance(value, dict) and key in value:
@@ -90,10 +112,6 @@ class ConfigManager:
             else:
                 return default
         return value
-
-    # ===== Convenience Accessors =====
-
-    # ----- Debug Section -----
 
     @staticmethod
     def _env_bool(var: str) -> Optional[bool]:
@@ -124,8 +142,6 @@ class ConfigManager:
     def debug_model_logging(self) -> bool:
         return bool(self.get("debug", "model_logging", default=False))
 
-    # ----- General -----
-
     def get_seed(self) -> int:
         return self.get("seed", default=42)
 
@@ -135,13 +151,18 @@ class ConfigManager:
     def get_model_id(self) -> str:
         return self.get("model_id", default="default")
 
-    # ----- Data Section -----
-
     def get_data_path(self) -> str:
         return self.get("data", "path", default=None)
 
     def get_max_frames(self) -> Optional[int]:
         return self.get("data", "max_frames", default=None)
+
+    def dynamic_box_enabled(self) -> bool:
+        """Whether PBC boxes are supplied per frame and rebuilt dynamically."""
+        value = self.get("data", "dynamic_box", default=False)
+        if isinstance(value, dict):
+            return bool(value.get("enabled", False))
+        return bool(value)
 
     def get_batch_mode(self) -> str:
         """
@@ -158,6 +179,59 @@ class ConfigManager:
                 "Expected one of: standard, tiled."
             )
         return raw
+
+    def get_static_neighbors_config(self) -> Dict[str, Any]:
+        """
+        Static tiled neighbor-graph settings.
+
+        Returns:
+            Dict with `enabled`, `backend`, `block_size`, `capacity_multiplier`
+            and `r_list`. `r_list` defaults to `model.cutoff + model.dr_threshold`,
+            reproducing the candidate radius JAX-MD would have used.
+        """
+        cfg = self.get("data", "static_neighbors", default={}) or {}
+        if not isinstance(cfg, dict):
+            raise ValueError("data.static_neighbors must be a mapping.")
+
+        backend = str(cfg.get("backend", "kdtree")).strip().lower()
+        if backend not in ("kdtree", "chunked"):
+            raise ValueError(
+                f"Unsupported data.static_neighbors.backend='{backend}'. "
+                "Expected one of: kdtree, chunked."
+            )
+
+        block_size = int(cfg.get("block_size", 1024))
+        if block_size < 1:
+            raise ValueError(
+                f"data.static_neighbors.block_size must be >= 1, got {block_size}."
+            )
+
+        capacity_multiplier = float(cfg.get("capacity_multiplier", 1.0))
+        if capacity_multiplier < 1.0:
+            raise ValueError(
+                "data.static_neighbors.capacity_multiplier must be >= 1.0, got "
+                f"{capacity_multiplier}."
+            )
+
+        r_list = cfg.get("r_list", None)
+        if r_list is None:
+            r_list = float(self.get_cutoff()) + float(self.get_dr_threshold())
+        else:
+            r_list = float(r_list)
+            if r_list < float(self.get_cutoff()):
+                raise ValueError(
+                    f"data.static_neighbors.r_list={r_list} is below "
+                    f"model.cutoff={self.get_cutoff()}; edges inside the model "
+                    "cutoff would be missing from the graph."
+                )
+
+        return {
+            "enabled": bool(cfg.get("enabled", False)),
+            "backend": backend,
+            "block_size": block_size,
+            "capacity_multiplier": capacity_multiplier,
+            "r_list": r_list,
+        }
 
     def get_tile_target_beads(self) -> int:
         value = int(self.get("data", "tile_target_beads", default=1000))
@@ -272,6 +346,18 @@ class ConfigManager:
     def tile_spatial_separation_enabled(self) -> bool:
         return bool(self.get("data", "tile_spatial_separation", default=False))
 
+    def get_tile_spatial_layout(self) -> str:
+        raw = str(self.get("data", "tile_spatial_layout", default="line_x"))
+        normalized = raw.strip().lower()
+        aliases = {"line": "line_x", "1d": "line_x", "grid": "grid_3d", "3d": "grid_3d"}
+        normalized = aliases.get(normalized, normalized)
+        if normalized not in ("line_x", "grid_3d"):
+            raise ValueError(
+                f"Unsupported data.tile_spatial_layout='{raw}'. "
+                "Expected one of: line_x, grid_3d."
+            )
+        return normalized
+
     def get_tile_structure_gap(self) -> float:
         value = float(self.get("data", "tile_structure_gap", default=25.0))
         if value <= 0.0:
@@ -305,6 +391,76 @@ class ConfigManager:
 
     def get_cutoff(self) -> float:
         return self.get("model", "cutoff", default=10.0)
+
+    def get_model_output_mode(self) -> str:
+        raw = str(self.get("model", "output_mode", default="energy")).strip().lower()
+        aliases = {
+            "force": "direct_force",
+            "forces": "direct_force",
+            "direct_forces": "direct_force",
+        }
+        mode = aliases.get(raw, raw)
+        if mode not in ("energy", "direct_force"):
+            raise ValueError(
+                f"Unsupported model.output_mode={raw!r}. Expected 'energy' or 'direct_force'."
+            )
+        return mode
+
+    def get_direct_force_config(self) -> Dict[str, Any]:
+        raw = self.get("model", "direct_force", default={}) or {}
+        if not isinstance(raw, dict):
+            raise ValueError("model.direct_force must be a mapping.")
+        cfg = {
+            "hidden": int(raw.get("head_hidden", 128)),
+            "layers": int(raw.get("head_layers", 2)),
+            "envelope_p": int(raw.get("envelope_p", 6)),
+            "zero_init": bool(raw.get("zero_init", True)),
+            "require_bidirectional_edges": bool(raw.get("require_bidirectional_edges", True)),
+        }
+        if cfg["hidden"] <= 0:
+            raise ValueError("model.direct_force.head_hidden must be > 0.")
+        if cfg["layers"] < 0:
+            raise ValueError("model.direct_force.head_layers must be >= 0.")
+        if cfg["envelope_p"] <= 0:
+            raise ValueError("model.direct_force.envelope_p must be > 0.")
+        return cfg
+
+    def get_force_label_config(self) -> Dict[str, Any]:
+        raw = self.get("training", "force_labels", default={}) or {}
+        if not isinstance(raw, dict):
+            raise ValueError("training.force_labels must be a mapping.")
+        mode = str(raw.get("mode", "raw")).strip().lower()
+        if mode not in ("raw", "teacher", "raw_teacher_blend"):
+            raise ValueError(
+                "training.force_labels.mode must be raw, teacher, or raw_teacher_blend."
+            )
+        cfg = {
+            "mode": mode,
+            "teacher_key": str(raw.get("teacher_key", "TeacherForce")),
+            "torque_teacher_key": str(raw.get("torque_teacher_key", "TeacherTorque")),
+            "raw_weight": float(raw.get("raw_weight", 2.0)),
+            "teacher_weight": float(raw.get("teacher_weight", 1.0)),
+        }
+        if cfg["raw_weight"] < 0.0 or cfg["teacher_weight"] < 0.0:
+            raise ValueError("Force-label weights must be non-negative.")
+        if mode == "raw_teacher_blend" and cfg["raw_weight"] + cfg["teacher_weight"] <= 0.0:
+            raise ValueError("At least one force-label blend weight must be positive.")
+        return cfg
+
+    def get_crossfit_config(self) -> Dict[str, Any]:
+        raw = self.get("data", "crossfit", default={}) or {}
+        if not isinstance(raw, dict):
+            raise ValueError("data.crossfit must be a mapping.")
+        cfg = {
+            "enabled": bool(raw.get("enabled", False)),
+            "manifest_path": raw.get("manifest_path"),
+            "held_out_fold": int(raw.get("held_out_fold", 0)),
+        }
+        if cfg["enabled"] and not cfg["manifest_path"]:
+            raise ValueError("data.crossfit.enabled=true requires manifest_path.")
+        if cfg["held_out_fold"] < 0:
+            raise ValueError("data.crossfit.held_out_fold must be >= 0.")
+        return cfg
 
     def get_dr_threshold(self) -> float:
         return self.get("model", "dr_threshold", default=0.5)
@@ -342,11 +498,27 @@ class ConfigManager:
     def neighbor_disable_cell_list_enabled(self) -> bool:
         return bool(self.get("model", "neighbor_disable_cell_list", default=False))
 
+    def use_pbc_enabled(self) -> bool:
+        return bool(self.get("model", "pbc", default=False))
+
     def get_allegro_config(self, size: str = "default") -> Dict[str, Any]:
         """Get Allegro model hyperparameters from model.allegro,
         with cuEq-specific overrides layered on top when applicable."""
         use_cueq_cfg = self.get_ml_model_type() in ("allegro_cueq", "allegro_cueq_fast")
         cfg: Dict[str, Any] = dict(self.get("model", "allegro", default={}))
+
+        nested_cueq_keys = [
+            key for key in ("allegro_cuEq", "allegro_cueq")
+            if isinstance(cfg.get(key), dict)
+        ]
+        if nested_cueq_keys:
+            nested_paths = ", ".join(f"model.allegro.{key}" for key in nested_cueq_keys)
+            warnings.warn(
+                f"cuEq override block(s) {nested_paths} are nested too deeply and will "
+                "not override Allegro settings. Move them to model.allegro_cueq "
+                "(or model.allegro_cuEq).",
+                UserWarning,
+            )
 
         if use_cueq_cfg:
             for key in ("allegro_cuEq", "allegro_cueq"):
@@ -372,11 +544,18 @@ class ConfigManager:
         "dihedral": 0.15,
         "excluded_volume": 1.0,
         "wca": 0.0,
+        "lj": 0.0,
         "fene": 0.0,
         "leash": 0.0,
+        "local_in": 0.0,
+        "local_bond_in": 0.0,
+        "crowding_wall": 0.0,
         "dh": 0.0,
         "stickiness": 0.0,
         "salt_bridge": 0.0,
+        "five_particle_flat_bottom": 0.0,
+        "ala2_feature_recovery": 0.0,
+        "ala2_rama_recovery": 0.0,
     }
 
     def get_prior_weights(self) -> Dict[str, float]:
@@ -495,6 +674,12 @@ class ConfigManager:
     def get_gammas(self) -> Dict[str, float]:
         return self.get("training", "gammas", default={"F": 1.0, "U": 0.0})
 
+    def get_basin_energy_monitor_config(self) -> Dict[str, Any]:
+        """Return normalized independent basin-energy diagnostic settings."""
+        from training.basin_energy_monitor import parse_basin_energy_monitor_config
+
+        return parse_basin_energy_monitor_config(self)
+
     def get_force_loss_normalization(self) -> str:
         raw = str(
             self.get("training", "force_loss_normalization", default="legacy_mean")
@@ -505,6 +690,30 @@ class ConfigManager:
                 "Expected one of: legacy_mean, valid_components, per_structure_components."
             )
         return raw
+
+    def relative_entropy_enabled(self) -> bool:
+        return bool(self.get("training", "relative_entropy", "enabled", default=False))
+
+    def get_relative_entropy_config(self) -> Dict[str, Any]:
+        cfg = self.get("training", "relative_entropy", default={}) or {}
+        if not isinstance(cfg, dict):
+            raise ValueError("training.relative_entropy must be a mapping.")
+        return cfg
+
+    def get_relative_entropy_reference_data_path(self) -> Optional[str]:
+        path = self.get("training", "relative_entropy", "reference_data_path", default=None)
+        if path is None or str(path).strip() == "":
+            return self.get_data_path()
+        return str(path)
+
+    def get_dsm_refresh_interval_steps(self) -> int:
+        value = int(self.get("training", "dsm", "refresh_interval_steps", default=0))
+        if value < 0:
+            raise ValueError(
+                "training.dsm.refresh_interval_steps must be >= 0, "
+                f"got {value}."
+            )
+        return value
 
     def prior_residual_enabled(self) -> bool:
         """Residual mode: F_target = F_ref - F_prior (precomputed)."""
@@ -664,33 +873,11 @@ class ConfigManager:
         return self.get("model", "prior_only", default=False)
 
     def get_ml_model_type(self) -> str:
-        """
-        Get which ML model backbone to use.
-
-        Returns:
-            Canonical model type:
-            - "allegro"
-            - "allegro_cueq"
-            - "allegro_cueq_fast"
-            - "mace"
-            - "painn"
-        """
         raw = str(self.get("model", "ml_model", default="allegro"))
         normalized = raw.strip().lower().replace("-", "_")
-
-        aliases = {
-            "allegro": "allegro",
-            "allegro_cueq": "allegro_cueq",
-            "allegro_cueq_opt": "allegro_cueq",
-            "allegro_cueq_b1": "allegro_cueq",
-            "allegro_cueq_fast": "allegro_cueq_fast",
-            "allegro_cueq_fast_1103": "allegro_cueq_fast",
-            "mace": "mace",
-            "painn": "painn",
-        }
-        canonical = aliases.get(normalized)
+        canonical = self.ML_MODEL_ALIASES.get(normalized)
         if canonical is None:
-            allowed = ", ".join(sorted(aliases.keys()))
+            allowed = ", ".join(sorted(self.ML_MODEL_ALIASES.keys()))
             raise ValueError(
                 f"Unsupported model.ml_model='{raw}'. "
                 f"Expected one of: {allowed}"
@@ -744,7 +931,7 @@ class ConfigManager:
         stages = self.get("training", "stages", default=None)
         if stages is not None:
             result = [
-                {"optimizer": s["optimizer"], "epochs": int(s.get("epochs", 0))}
+                {"optimizer": s["optimizer"], "epochs": int(s.get("epochs", 0)), "gammas": s.get("gammas", None)}
                 for s in stages
             ]
         else:
@@ -763,6 +950,92 @@ class ConfigManager:
                     f"Available: {available}"
                 )
         return result
+
+    def get_swa_config(self) -> Dict[str, Any]:
+        """Return normalized stochastic weight averaging config."""
+        raw = self.get("training", "swa", default={}) or {}
+        stages = self.get_training_stages()
+        nonzero_stages = [s for s in stages if int(s.get("epochs", 0)) > 0]
+        default_stage = nonzero_stages[-1]["optimizer"] if nonzero_stages else None
+
+        cfg = {
+            "enabled": bool(raw.get("enabled", False)),
+            "stage": raw.get("stage", default_stage),
+            "start_epoch": raw.get("start_epoch", None),
+            "start_fraction": float(raw.get("start_fraction", 0.75)),
+            "sample_freq_epochs": int(raw.get("sample_freq_epochs", 1)),
+            "save_checkpoint": bool(raw.get("save_checkpoint", True)),
+            "use_best_params": bool(raw.get("use_best_params", False)),
+        }
+
+        if cfg["stage"] is None:
+            cfg["stage"] = default_stage
+        if cfg["stage"] is not None and cfg["stage"] not in {s["optimizer"] for s in stages}:
+            raise ValueError(
+                f"training.swa.stage={cfg['stage']!r} is not present in training.stages."
+            )
+        if not 0.0 <= cfg["start_fraction"] <= 1.0:
+            raise ValueError(
+                "training.swa.start_fraction must be between 0.0 and 1.0, "
+                f"got {cfg['start_fraction']}."
+            )
+        if cfg["start_epoch"] is not None:
+            cfg["start_epoch"] = int(cfg["start_epoch"])
+            if cfg["start_epoch"] < 0:
+                raise ValueError(
+                    "training.swa.start_epoch must be >= 0 when provided, "
+                    f"got {cfg['start_epoch']}."
+                )
+        if cfg["sample_freq_epochs"] < 1:
+            raise ValueError(
+                "training.swa.sample_freq_epochs must be >= 1, "
+                f"got {cfg['sample_freq_epochs']}."
+            )
+        return cfg
+
+    def get_msam_config(self) -> Dict[str, Any]:
+        """Return normalized micro-batch SAM config."""
+        raw = self.get("training", "msam", default={}) or {}
+        stages = self.get_training_stages()
+        nonzero_stages = [s for s in stages if int(s.get("epochs", 0)) > 0]
+        default_stage = nonzero_stages[-1]["optimizer"] if nonzero_stages else None
+
+        cfg = {
+            "enabled": bool(raw.get("enabled", False)),
+            "stage": raw.get("stage", default_stage),
+            "start_epoch": raw.get("start_epoch", None),
+            "start_fraction": float(raw.get("start_fraction", 0.80)),
+            "rho": float(raw.get("rho", 0.01)),
+            "epsilon": float(raw.get("epsilon", 1.0e-12)),
+        }
+
+        if cfg["stage"] is None:
+            cfg["stage"] = default_stage
+        if cfg["stage"] is not None and cfg["stage"] not in {s["optimizer"] for s in stages}:
+            raise ValueError(
+                f"training.msam.stage={cfg['stage']!r} is not present in training.stages."
+            )
+        if not 0.0 <= cfg["start_fraction"] <= 1.0:
+            raise ValueError(
+                "training.msam.start_fraction must be between 0.0 and 1.0, "
+                f"got {cfg['start_fraction']}."
+            )
+        if cfg["start_epoch"] is not None:
+            cfg["start_epoch"] = int(cfg["start_epoch"])
+            if cfg["start_epoch"] < 0:
+                raise ValueError(
+                    "training.msam.start_epoch must be >= 0 when provided, "
+                    f"got {cfg['start_epoch']}."
+                )
+        if cfg["rho"] <= 0.0:
+            raise ValueError(
+                f"training.msam.rho must be > 0, got {cfg['rho']}."
+            )
+        if cfg["epsilon"] <= 0.0:
+            raise ValueError(
+                f"training.msam.epsilon must be > 0, got {cfg['epsilon']}."
+            )
+        return cfg
 
     def get_stage1_optimizer(self) -> str:
         stages = self.get_training_stages()

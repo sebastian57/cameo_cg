@@ -1,24 +1,14 @@
 #!/bin/bash
 
 #SBATCH --account=cameo
-#SBATCH --nodes=2
+#SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-task=4
-#SBATCH --time=00:15:00
+#SBATCH --gres=gpu:gh200:1
+#SBATCH --time=03:30:00
 #SBATCH --partition=booster
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
 
-# =============================================================================
-# Unified SLURM script for training (single run or array suite)
-# =============================================================================
-#
-# ARCHITECTURE:
-#   - 1 process per NODE (not per GPU!)
-#   - Each process sees 4 local GPUs
-#   - chemtrain uses pmap internally to distribute across local GPUs
-#   - JAX distributed coordinates gradient sync across NODES
-#
 # Usage:
 #   Single-run:
 #     sbatch scripts/run_training.sh config.yaml
@@ -36,9 +26,6 @@
 #     sbatch --array 0-N%4 \
 #       --export=ALL,CONFIG_LIST_FILE=manifest.txt,PARENT_OUTPUT_DIR=... \
 #       scripts/run_training.sh
-#
-# =============================================================================
-
 set -Eeuo pipefail
 
 RUN_TRAINING_TRACE="${RUN_TRAINING_TRACE:-0}"
@@ -392,7 +379,9 @@ export CHEMTRAIN_DISABLE_TRAIN_TARGET_LOSS_SYNC="${CHEMTRAIN_DISABLE_TRAIN_TARGE
 export CHEMTRAIN_SEGMENT_SUM_MODE="${CHEMTRAIN_SEGMENT_SUM_MODE:-chunked}"
 export CHEMTRAIN_SEGMENT_SUM_CHUNK_EDGES="${CHEMTRAIN_SEGMENT_SUM_CHUNK_EDGES:-65536}"
 export CHEMTRAIN_SEGMENT_SUM_DEBUG="${CHEMTRAIN_SEGMENT_SUM_DEBUG:-0}"
-
+export DEBUG_GRAD_NORMS=1 # Enable debug grad norm logging in cameo_cg code
+export DEBUG_SCALE_SHIFT=1
+export DEBUG_EVAL_FRAME=1
 # =============================================================================
 # Multi-node coordinator verification
 # =============================================================================
@@ -413,12 +402,14 @@ if [[ ${SLURM_NNODES:-1} -gt 1 ]]; then
     
         COORD_CANDIDATES=("${COORD_NODE}")
         
-        # Try DNS suffixes for this cluster (adjust if needed for your site)
-        for host_suffix in "${COORD_NODE}i.juwels" "${COORD_NODE}.juwels"; do
+        IFS=':' read -r -a COORD_SUFFIXES <<< "${CHEMTRAIN_COORDINATOR_HOST_SUFFIXES:-}"
+        for suffix in "${COORD_SUFFIXES[@]}"; do
+            [[ -z "${suffix}" ]] && continue
+            host_suffix="${COORD_NODE}${suffix}"
             COORD_IP_GETENT="$(getent ahostsv4 "${host_suffix}" 2>/dev/null | awk 'NR==1 {print $1}' || true)"
             if [[ -n "${COORD_IP_GETENT}" ]]; then
                 COORD_CANDIDATES+=("${host_suffix}" "${COORD_IP_GETENT}")
-                break  # If DNS works, use that
+                break
             fi
         done
         
@@ -508,11 +499,21 @@ if is_truthy "${CHEMTRAIN_PROFILE_GPU_TELEMETRY:-0}"; then
 fi
 
 cleanup_background_jobs() {
-    local rc=$?
+    local rc="${1:-$?}"
     [[ -n "${GPU_TELEMETRY_SRUN_PID}" ]] && kill "${GPU_TELEMETRY_SRUN_PID}" >/dev/null 2>&1 || true
     echo "[run_training.sh] EXIT rc=${rc}" >&2
 }
-trap cleanup_background_jobs EXIT
+source "${PROJECT_ROOT}/runs/registry_hook.sh"
+run_registry_start "${RUN_REGISTRY_TYPE:-training}" "${CONFIG_FILE}" "${RUN_OUTPUT_DIR}"
+
+run_training_exit() {
+    local rc=$?
+    trap - EXIT
+    cleanup_background_jobs "${rc}"
+    run_registry_finish "${rc}"
+    exit "${rc}"
+}
+trap run_training_exit EXIT
 
 # =============================================================================
 # Launch training
@@ -529,7 +530,7 @@ echo "Config:       ${RUNTIME_CONFIG}"
 echo "Run dir:      ${RUN_OUTPUT_DIR}"
 echo "Job tag:      ${JOB_TAG}"
 echo "Nodes:        ${SLURM_NNODES:-1}"
-echo "GPUs/node:    4"
+echo "GPUs/task:    ${SLURM_GPUS_PER_TASK:-${SLURM_GPUS_ON_NODE:-unknown}}"
 echo "Grad accum:   ${CHEMTRAIN_GRAD_ACCUM_STEPS} (${CHEMTRAIN_GRAD_ACCUM_MODE})"
 echo "============================================================"
 

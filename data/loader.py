@@ -19,6 +19,15 @@ logger = logging.getLogger(__name__)
 # Alternative key names accepted in place of the canonical "R" and "F".
 _COORD_ALIASES = ["coords", "coordinates", "positions", "pos", "xyz"]
 _FORCE_ALIASES = ["forces", "force", "frc", "grads", "gradients"]
+_BOX_ALIASES   = ["box", "cell", "lattice"]
+_OPTIONAL_FRAME_ALIGNED_KEYS = (
+    "U",
+    "hvp_probe", "HVP", "hvp_loss_mask",
+    "teacher_features", "teacher_feature_mask",
+    "teacher_cg_forces", "teacher_force_mask",
+    "TeacherFeature", "TeacherForce", "TeacherTorque", "teacher_force_std", "teacher_force_count",
+    "RawForce", "RawTorque", "T", "O",
+)
 
 
 def _resolve_key(data, canonical: str, aliases: list[str], source: str = "") -> str:
@@ -45,7 +54,40 @@ def _resolve_key(data, canonical: str, aliases: list[str], source: str = "") -> 
     )
 
 
-def load_npz(path: PathLike) -> Dict[str, Any]:
+def _resolve_box(
+    raw_box: np.ndarray,
+    *,
+    per_frame: bool = False,
+    n_frames: Optional[int] = None,
+) -> np.ndarray:
+    """Normalize supported box representations to orthorhombic vectors.
+
+    Accepted shapes are ``(3,)``, ``(3, 3)``, ``(N_frames, 3)``, and
+    ``(N_frames, 3, 3)``.  With ``per_frame=True`` the result is always
+    frame-aligned; static boxes are broadcast when ``n_frames`` is supplied.
+    """
+    raw_box = np.asarray(raw_box, dtype=np.float32)
+    if raw_box.ndim == 1 and raw_box.shape == (3,):
+        if per_frame and n_frames is not None:
+            return np.broadcast_to(raw_box, (int(n_frames), 3)).copy()
+        return raw_box
+    if raw_box.ndim == 2 and raw_box.shape == (3, 3):
+        vector = np.diag(raw_box)
+        if per_frame and n_frames is not None:
+            return np.broadcast_to(vector, (int(n_frames), 3)).copy()
+        return vector
+    if raw_box.ndim == 2 and raw_box.shape[1] == 3:
+        return raw_box if per_frame else raw_box[0]
+    if raw_box.ndim == 3 and raw_box.shape[1:] == (3, 3):
+        vectors = np.diagonal(raw_box, axis1=1, axis2=2)
+        return vectors if per_frame else vectors[0]
+    raise ValueError(
+        f"Unrecognised box shape {raw_box.shape}. "
+        "Expected (3,), (3,3), (N,3), or (N,3,3)."
+    )
+
+
+def load_npz(path: PathLike, *, dynamic_box: bool = False) -> Dict[str, Any]:
     """
     Load dataset from NPZ file.
 
@@ -123,6 +165,23 @@ def load_npz(path: PathLike) -> Dict[str, Any]:
                 arrays.append(d["species"] if "species" in d else np.zeros(d[rk].shape[:2], dtype=np.int32))
             return np.concatenate(arrays, axis=0)
 
+        # Preserve the legacy first-frame box and optionally concatenate frame boxes.
+        box_value = None
+        box_frames = []
+        for d, rk in zip(datasets, r_keys):
+            box_key = next((k for k in _BOX_ALIASES if k in d), None)
+            if box_key is None:
+                if dynamic_box:
+                    raise ValueError("dynamic_box=true requires a box key in every NPZ file")
+                continue
+            raw_box = d[box_key]
+            if box_value is None:
+                box_value = _resolve_box(raw_box)
+            if dynamic_box:
+                box_frames.append(_resolve_box(raw_box, per_frame=True, n_frames=d[rk].shape[0]))
+        if dynamic_box:
+            box_frames = np.concatenate(box_frames, axis=0)
+
         result = {
             "R": np.concatenate([d[rk] for d, rk in zip(datasets, r_keys)], axis=0).astype(np.float32),
             "F": np.concatenate([d[fk] for d, fk in zip(datasets, f_keys)], axis=0).astype(np.float32),
@@ -134,7 +193,13 @@ def load_npz(path: PathLike) -> Dict[str, Any]:
             "resname": datasets[0]["resname"] if "resname" in datasets[0] else None,
             "N_max":   int(datasets[0]["N_max"][0]) if "N_max" in datasets[0] else datasets[0][r_keys[0]].shape[1],
             "aa_to_id": datasets[0]["aa_to_id"].item() if "aa_to_id" in datasets[0] else None,
+            "box": box_value,
+            **({"box_per_frame": box_frames.astype(np.float32)} if dynamic_box else {}),
         }
+
+        for key in _OPTIONAL_FRAME_ALIGNED_KEYS:
+            if all(key in d for d in datasets):
+                result[key] = np.concatenate([d[key] for d in datasets], axis=0).astype(np.float32)
 
         return result
 
@@ -156,9 +221,24 @@ def load_npz(path: PathLike) -> Dict[str, Any]:
         "source_name": np.full((int(data[r_key].shape[0]),), path.stem, dtype=object),
     }
 
+    for key in _OPTIONAL_FRAME_ALIGNED_KEYS:
+        if key in data:
+            result[key] = data[key].astype(np.float32)
+
     # Handle N_max being an array
     if isinstance(result["N_max"], np.ndarray):
         result["N_max"] = int(result["N_max"][0])
+
+    # Box: optional, required when model.pbc=true. Keep a legacy reference box
+    # and, when requested, a frame-aligned orthorhombic array.
+    box_key = next((k for k in _BOX_ALIASES if k in data), None)
+    result["box"] = _resolve_box(data[box_key]) if box_key is not None else None
+    if dynamic_box:
+        if box_key is None:
+            raise ValueError("dynamic_box=true requires a box/cell/lattice key in the NPZ dataset")
+        result["box_per_frame"] = _resolve_box(
+            data[box_key], per_frame=True, n_frames=data[r_key].shape[0]
+        ).astype(np.float32)
 
     return result
 
@@ -443,6 +523,8 @@ def build_tiled_dataset(
     F: np.ndarray,
     mask: np.ndarray,
     species: np.ndarray,
+    O: Optional[np.ndarray] = None,
+    T: Optional[np.ndarray] = None,
     structure_ids: Optional[np.ndarray] = None,
     target_beads: int = 1000,
     bucket_beads: Optional[Sequence[int]] = None,
@@ -460,8 +542,11 @@ def build_tiled_dataset(
     large_structure_threshold: Optional[int] = None,
     large_structure_edge_threshold: Optional[float] = None,
     spatial_separation: bool = False,
+    spatial_layout: str = "line_x",
     structure_gap: float = 25.0,
     seed: int = 0,
+    extra_per_atom_fields: Optional[Dict[str, np.ndarray]] = None,
+    static_neighbors: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, np.ndarray]:
     """
     Pack many small structures into disconnected tiled pseudo-structures.
@@ -472,6 +557,13 @@ def build_tiled_dataset(
 
     Profiling metadata is included with a `meta_` prefix so later training
     diagnostics can attribute optimizer updates back to tile composition.
+
+    When `static_neighbors` is given (the parsed `data.static_neighbors` config),
+    the fixed per-segment neighbor graph of every tile is constructed here and
+    returned under `neighbor_idx` / `neighbor_n_edges` / `neighbor_capacity`.
+    Building it at this point rather than at the call sites keeps connectivity in
+    sync with the packing for every path that repacks tiles (initial build,
+    epoch-wise rebuild, DSM refresh).
     """
     if target_beads <= 0:
         raise ValueError(f"target_beads must be > 0, got {target_beads}.")
@@ -486,6 +578,12 @@ def build_tiled_dataset(
         )
     if structure_gap <= 0.0:
         raise ValueError(f"structure_gap must be > 0, got {structure_gap}.")
+    spatial_layout = str(spatial_layout).strip().lower()
+    if spatial_layout not in ("line_x", "grid_3d"):
+        raise ValueError(
+            f"Unsupported spatial_layout='{spatial_layout}'. "
+            "Expected one of: line_x, grid_3d."
+        )
 
     if R.ndim != 3 or F.ndim != 3:
         raise ValueError("R and F must have shape (n_structures, n_atoms, 3).")
@@ -495,7 +593,36 @@ def build_tiled_dataset(
         raise ValueError("R/F/mask/species must share the same leading dimension.")
 
     n_structures = int(R.shape[0])
+    n_atoms = int(R.shape[1])
     valid_counts = np.asarray(np.sum(mask > 0, axis=1), dtype=np.int32)
+    extra_per_atom_fields = extra_per_atom_fields or {}
+    extra_specs = {}
+    for key, value in extra_per_atom_fields.items():
+        arr = np.asarray(value)
+        if arr.shape[0] != n_structures:
+            raise ValueError(
+                f"extra_per_atom_fields[{key!r}] must have {n_structures} frames, "
+                f"got shape {arr.shape}."
+            )
+        if arr.ndim == 2 and arr.shape[1] == n_atoms:
+            atom_axis = 1
+            tile_shape = lambda capacity, arr=arr: (capacity,)
+        elif arr.ndim == 3 and arr.shape[1] == n_atoms:
+            atom_axis = 1
+            tile_shape = lambda capacity, arr=arr: (capacity, arr.shape[2])
+        elif arr.ndim == 3 and arr.shape[2] == n_atoms:
+            atom_axis = 2
+            tile_shape = lambda capacity, arr=arr: (arr.shape[1], capacity)
+        elif arr.ndim == 4 and arr.shape[2] == n_atoms:
+            atom_axis = 2
+            tile_shape = lambda capacity, arr=arr: (arr.shape[1], capacity, arr.shape[3])
+        else:
+            raise ValueError(
+                f"extra_per_atom_fields[{key!r}] shape {arr.shape} is unsupported. "
+                "Expected (frames,N), (frames,N,C), (frames,K,N), or (frames,K,N,C)."
+            )
+        extra_specs[key] = {"array": arr, "atom_axis": atom_axis, "tile_shape": tile_shape}
+    tile_extra = {key: [] for key in extra_specs}
     if structure_edge_estimates is not None:
         edge_counts_est = np.asarray(structure_edge_estimates, dtype=np.float64)
         if edge_counts_est.shape != (n_structures,):
@@ -564,6 +691,8 @@ def build_tiled_dataset(
 
     tile_R = []
     tile_F = []
+    tile_O = [] if O is not None else None
+    tile_T = [] if T is not None else None
     tile_mask = []
     tile_species = []
     tile_segment_id = []
@@ -597,9 +726,35 @@ def build_tiled_dataset(
 
         R_out = np.zeros((capacity, 3), dtype=np.float32)
         F_out = np.zeros((capacity, 3), dtype=np.float32)
+        O_out = np.zeros((capacity, 3, 3), dtype=np.float32) if O is not None else None
+        T_out = np.zeros((capacity, 3), dtype=np.float32) if T is not None else None
         mask_out = np.zeros((capacity,), dtype=np.float32)
         species_out = np.zeros((capacity,), dtype=np.int32)
         segment_out = np.full((capacity,), -1, dtype=np.int32)
+        extra_out = {
+            key: np.zeros(spec["tile_shape"](capacity), dtype=spec["array"].dtype)
+            for key, spec in extra_specs.items()
+        }
+
+        grid_centers = None
+        if spatial_separation and spatial_layout == "grid_3d":
+            half_extents = []
+            for struct_idx in tile_indices:
+                valid_idx = np.flatnonzero(mask[struct_idx] > 0)
+                coords = np.asarray(R[struct_idx, valid_idx], dtype=np.float32)
+                centered = coords - np.mean(coords, axis=0, keepdims=True)
+                half_extents.append(np.max(np.abs(centered), axis=0))
+            max_half_extent = np.max(np.asarray(half_extents, dtype=np.float32), axis=0)
+            cell_size = 2.0 * max_half_extent + float(structure_gap)
+            cells_per_axis = max(1, int(np.ceil(len(tile_indices) ** (1.0 / 3.0))))
+            grid_centers = []
+            for grid_idx in range(len(tile_indices)):
+                ix = grid_idx % cells_per_axis
+                iy = (grid_idx // cells_per_axis) % cells_per_axis
+                iz = grid_idx // (cells_per_axis * cells_per_axis)
+                grid_centers.append(
+                    (np.asarray([ix, iy, iz], dtype=np.float32) + 0.5) * cell_size
+                )
 
         cursor = 0
         current_x = 0.0
@@ -614,7 +769,7 @@ def build_tiled_dataset(
                 )
             sl = slice(cursor, cursor + n_valid)
             coords = np.asarray(R[struct_idx, valid_idx], dtype=np.float32)
-            if spatial_separation:
+            if spatial_separation and spatial_layout == "line_x":
                 centered = coords - np.mean(coords, axis=0, keepdims=True)
                 radii = np.linalg.norm(centered, axis=1)
                 radius = float(np.max(radii)) if radii.size > 0 else 0.0
@@ -622,11 +777,25 @@ def build_tiled_dataset(
                 centered[:, 0] += center_x
                 current_x = center_x + radius + float(structure_gap)
                 coords = centered
+            elif spatial_separation and spatial_layout == "grid_3d":
+                centered = coords - np.mean(coords, axis=0, keepdims=True)
+                coords = centered + grid_centers[seg_id]
             R_out[sl] = coords
             F_out[sl] = F[struct_idx, valid_idx]
+            if O is not None:
+                O_out[sl] = O[struct_idx, valid_idx]
+            if T is not None:
+                T_out[sl] = T[struct_idx, valid_idx]
             mask_out[sl] = 1.0
             species_out[sl] = species[struct_idx, valid_idx]
             segment_out[sl] = np.int32(seg_id)
+            for key, spec in extra_specs.items():
+                arr = spec["array"]
+                frame_extra = arr[struct_idx]
+                if spec["atom_axis"] == 1:
+                    extra_out[key][sl] = np.take(frame_extra, valid_idx, axis=0)
+                else:
+                    extra_out[key][:, sl, ...] = np.take(frame_extra, valid_idx, axis=1)
             cursor += n_valid
 
         tile_R.append(R_out)
@@ -634,6 +803,12 @@ def build_tiled_dataset(
         tile_mask.append(mask_out)
         tile_species.append(species_out)
         tile_segment_id.append(segment_out)
+        if O is not None:
+            tile_O.append(O_out)
+        if T is not None:
+            tile_T.append(T_out)
+        for key, value in extra_out.items():
+            tile_extra[key].append(value)
         tile_n_valid.append(np.int32(cursor))
         tile_n_segments.append(np.int32(len(tile_indices)))
         meta_batch_item_id.append(np.int32(tile_id))
@@ -669,13 +844,36 @@ def build_tiled_dataset(
         out[: arr.shape[0]] = arr
         return out
 
+    def _pad_extra(arr: np.ndarray) -> np.ndarray:
+        if arr.shape[0] == global_capacity or (arr.ndim >= 2 and arr.shape[1] == global_capacity):
+            return arr
+        if arr.ndim == 1:
+            out = np.zeros((global_capacity,), dtype=arr.dtype)
+            out[: arr.shape[0]] = arr
+            return out
+        if arr.ndim == 2 and arr.shape[0] != global_capacity:
+            out = np.zeros((global_capacity, arr.shape[1]), dtype=arr.dtype)
+            out[: arr.shape[0]] = arr
+            return out
+        if arr.ndim == 2:
+            out = np.zeros((arr.shape[0], global_capacity), dtype=arr.dtype)
+            out[:, : arr.shape[1]] = arr
+            return out
+        out = np.zeros((arr.shape[0], global_capacity, *arr.shape[2:]), dtype=arr.dtype)
+        out[:, : arr.shape[1], ...] = arr
+        return out
+
     tile_R = [_pad_2d(arr, fill=0.0) for arr in tile_R]
     tile_F = [_pad_2d(arr, fill=0.0) for arr in tile_F]
     tile_mask = [_pad_1d(arr, fill=0.0) for arr in tile_mask]
     tile_species = [_pad_1d(arr, fill=0) for arr in tile_species]
     tile_segment_id = [_pad_1d(arr, fill=-1) for arr in tile_segment_id]
+    tile_O = [_pad_2d(arr, fill=0.0) for arr in tile_O] if tile_O is not None else None
+    tile_T = [_pad_2d(arr, fill=0.0) for arr in tile_T] if tile_T is not None else None
 
-    return {
+    extra_result = {key: np.stack([_pad_extra(arr) for arr in values], axis=0) for key, values in tile_extra.items()}
+
+    result = {
         "R": np.stack(tile_R, axis=0),
         "F": np.stack(tile_F, axis=0),
         "mask": np.stack(tile_mask, axis=0),
@@ -697,6 +895,30 @@ def build_tiled_dataset(
         "meta_structure_size_max": np.asarray(meta_structure_size_max, dtype=np.int32),
         "meta_structure_size_std": np.asarray(meta_structure_size_std, dtype=np.float32),
     }
+    if tile_O is not None:
+        result["O"] = np.stack(tile_O, axis=0)
+    if tile_T is not None:
+        result["T"] = np.stack(tile_T, axis=0)
+    result.update(extra_result)
+
+    if static_neighbors is not None and static_neighbors.get("enabled", False):
+        # Imported lazily so the tiled loader keeps working without SciPy when
+        # static graphs are not requested.
+        from data.static_neighbors import build_static_graphs
+
+        result.update(
+            build_static_graphs(
+                R=result["R"],
+                mask=result["mask"],
+                segment_id=result["segment_id"],
+                r_list=float(static_neighbors["r_list"]),
+                backend=str(static_neighbors["backend"]),
+                block_size=int(static_neighbors["block_size"]),
+                capacity_multiplier=float(static_neighbors["capacity_multiplier"]),
+            )
+        )
+
+    return result
 
 
 class DatasetLoader:
@@ -712,7 +934,7 @@ class DatasetLoader:
         >>> print(f"Loaded {loader.n_frames} frames, {loader.n_atoms} atoms")
     """
 
-    def __init__(self, npz_path: PathLike, max_frames: Optional[int] = None, seed: int = 42):
+    def __init__(self, npz_path: PathLike, max_frames: Optional[int] = None, seed: int = 42, dynamic_box: bool = False):
         """
         Initialize dataset loader.
 
@@ -723,9 +945,10 @@ class DatasetLoader:
         """
         self.npz_path = as_path(npz_path)
         self.seed = seed
+        self.dynamic_box = bool(dynamic_box)
 
         # Load raw data
-        raw_data = load_npz(npz_path)
+        raw_data = load_npz(npz_path, dynamic_box=self.dynamic_box)
 
         # Shuffle frames if max_frames is specified
         n_total = raw_data["R"].shape[0]
@@ -739,6 +962,8 @@ class DatasetLoader:
         # JAX arrays are created on-demand via .R_jax etc. when needed on device.
         self.R = np.asarray(raw_data["R"][indices], dtype=np.float32)
         self.F = np.asarray(raw_data["F"][indices], dtype=np.float32)
+        self.O = np.asarray(raw_data["O"][indices], dtype=np.float32) if "O" in raw_data else None
+        self.T = np.asarray(raw_data["T"][indices], dtype=np.float32) if "T" in raw_data else None
         self.mask = np.asarray(raw_data["mask"][indices], dtype=np.float32)
         raw_source_name = raw_data.get("source_name")
         if raw_source_name is None:
@@ -760,11 +985,32 @@ class DatasetLoader:
             else:
                 self.species = raw_species[indices]
 
+        self.extra_fields = {}
+        for key in _OPTIONAL_FRAME_ALIGNED_KEYS:
+            if key in raw_data:
+                value = np.asarray(raw_data[key][indices], dtype=np.float32)
+                self.extra_fields[key] = value
+                setattr(self, key, value)
+        if "hvp_probe" in self.extra_fields and "HVP" in self.extra_fields and "hvp_loss_mask" not in self.extra_fields:
+            value = self.mask[:, None, :].astype(np.float32)
+            self.extra_fields["hvp_loss_mask"] = value
+            self.hvp_loss_mask = value
+
         # Store metadata
         self.N_max = raw_data["N_max"]
         self.resid = raw_data["resid"]
         self.resname = raw_data["resname"]
         self.Z = raw_data["Z"]
+        # Box: shape (3,) orthorhombic vector, or None if not in dataset.
+        # Required when model.pbc=true.
+        self.box = raw_data.get("box", None)
+        raw_box_frames = raw_data.get("box_per_frame")
+        self.box_per_frame = (
+            np.asarray(raw_box_frames[indices], dtype=np.float32)
+            if raw_box_frames is not None else None
+        )
+        if self.dynamic_box and self.box_per_frame is None:
+            raise ValueError("dynamic_box=true requires per-frame box data")
 
         # Species mapping
         if raw_data["aa_to_id"] is not None:
@@ -803,14 +1049,17 @@ class DatasetLoader:
         Returns:
             Dictionary with R, F, mask, species for the frame
         """
-        return {
+        frame = {
             "R": self.R[idx],
             "F": self.F[idx],
             "mask": self.mask[idx],
             "species": self.species[idx],
         }
+        if self.box_per_frame is not None:
+            frame["box"] = self.box_per_frame[idx]
+        return frame
 
-    def get_batch(self, start: int, end: int) -> Tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    def get_batch(self, start: int, end: int) -> Tuple[jax.Array, jax.Array, Optional[jax.Array], Optional[jax.Array], jax.Array, jax.Array]:
         """
         Get a batch of frames.
 
@@ -819,24 +1068,34 @@ class DatasetLoader:
             end: End frame index (exclusive)
 
         Returns:
-            R, F, mask, species arrays for the batch
+            R, F, O, T, mask, species arrays for the batch
         """
         return (
             self.R[start:end],
             self.F[start:end],
+            self.O[start:end] if self.O is not None else None,
+            self.T[start:end] if self.T is not None else None,
             self.mask[start:end],
             self.species[start:end],
         )
 
     def get_all(self) -> Dict[str, jax.Array]:
         """Get complete dataset as dictionary."""
-        return {
+        data = {
             "R": self.R,
             "F": self.F,
             "mask": self.mask,
             "species": self.species,
             "source_name": self.source_name,
         }
+        if self.box_per_frame is not None:
+            data["box"] = self.box_per_frame
+        if self.O is not None:
+            data["O"] = self.O
+        if self.T is not None:
+            data["T"] = self.T
+        data.update(getattr(self, "extra_fields", {}))
+        return data
 
     def split_train_val(self, val_fraction: float = 0.1) -> Tuple["DatasetLoader", "DatasetLoader"]:
         """
@@ -860,9 +1119,19 @@ class DatasetLoader:
         train_loader.seed = self.seed
         train_loader.R = self.R[:n_train]
         train_loader.F = self.F[:n_train]
+        train_loader.O = self.O[:n_train] if self.O is not None else None
+        train_loader.T = self.T[:n_train] if self.T is not None else None
         train_loader.mask = self.mask[:n_train]
         train_loader.species = self.species[:n_train]
         train_loader.source_name = self.source_name[:n_train]
+        train_loader.dynamic_box = self.dynamic_box
+        train_loader.box = self.box
+        train_loader.box_per_frame = self.box_per_frame[:n_train] if self.box_per_frame is not None else None
+        train_loader.extra_fields = {}
+        for key, value in getattr(self, "extra_fields", {}).items():
+            sliced = value[:n_train]
+            train_loader.extra_fields[key] = sliced
+            setattr(train_loader, key, sliced)
         train_loader.N_max = self.N_max
         train_loader.resid = self.resid
         train_loader.resname = self.resname
@@ -876,9 +1145,19 @@ class DatasetLoader:
         val_loader.seed = self.seed
         val_loader.R = self.R[n_train:]
         val_loader.F = self.F[n_train:]
+        val_loader.O = self.O[n_train:] if self.O is not None else None
+        val_loader.T = self.T[n_train:] if self.T is not None else None
         val_loader.mask = self.mask[n_train:]
         val_loader.species = self.species[n_train:]
         val_loader.source_name = self.source_name[n_train:]
+        val_loader.dynamic_box = self.dynamic_box
+        val_loader.box = self.box
+        val_loader.box_per_frame = self.box_per_frame[n_train:] if self.box_per_frame is not None else None
+        val_loader.extra_fields = {}
+        for key, value in getattr(self, "extra_fields", {}).items():
+            sliced = value[n_train:]
+            val_loader.extra_fields[key] = sliced
+            setattr(val_loader, key, sliced)
         val_loader.N_max = self.N_max
         val_loader.resid = self.resid
         val_loader.resname = self.resname
@@ -930,6 +1209,7 @@ class BucketedDatasetLoader:
         bucket_dir_or_paths,
         max_frames: Optional[int] = None,
         seed: int = 42,
+        dynamic_box: bool = False,
     ):
         """
         Args:
@@ -953,7 +1233,7 @@ class BucketedDatasetLoader:
         # Build (N_max, DatasetLoader) pairs sorted by N_max
         self._buckets = []
         for p in npz_paths:
-            dl = DatasetLoader(str(p), max_frames=max_frames, seed=seed)
+            dl = DatasetLoader(str(p), max_frames=max_frames, seed=seed, dynamic_box=dynamic_box)
             self._buckets.append((dl.N_max, dl))
 
         self._buckets.sort(key=lambda x: x[0])
